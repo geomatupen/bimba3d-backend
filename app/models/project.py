@@ -76,6 +76,8 @@ class ProcessParams(BaseModel):
     auto_early_stop: Optional[bool] = None
     # COLMAP tuning options (passed through to COLMAP step)
     colmap: Optional[dict] = None
+    # Trainer init limit: maximum number of Gaussians to initialize from COLMAP points
+    gsplat_max_gaussians: Optional[int] = None
 
 
 class EvaluationMetrics(BaseModel):

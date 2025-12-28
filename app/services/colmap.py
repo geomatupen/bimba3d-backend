@@ -80,6 +80,22 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
                     pass
         rc = proc.wait()
         if rc != 0:
+            # If container was killed by OOM (137) provide a helpful status message
+            try:
+                from app.services import status as _status
+                if project_id and rc == 137:
+                    msg = (
+                        "Worker container exited with code 137 (out of memory). "
+                        "This usually means the host ran out of RAM or the GPU ran out of memory. "
+                        "Try reducing the number of initialized Gaussians (Trainer -> Init Gaussians), "
+                        "or lower COLMAP `max_image_size` and `mapper_num_threads` in the Process configuration."
+                    )
+                    try:
+                        _status.update_status(project_id, "failed", error=msg, message=msg)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             raise subprocess.CalledProcessError(rc, cmd)
     except subprocess.CalledProcessError as e:
         logger.error(f"Docker worker failed: returncode={getattr(e, 'returncode', None)}")
