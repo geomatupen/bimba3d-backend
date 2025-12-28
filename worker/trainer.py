@@ -64,6 +64,7 @@ class GsplatTrainer:
         # Maximum number of Gaussians to initialize from COLMAP points.
         # If None, use all points (may OOM for large scenes).
         self.max_init_gaussians = max_init_gaussians
+        logger.info(f"Trainer configured max_init_gaussians={self.max_init_gaussians}")
         self.stop_reason: Optional[str] = None
         self.last_tuning_info = None  # Track last tuning action for status updates
         

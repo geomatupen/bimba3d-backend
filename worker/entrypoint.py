@@ -526,6 +526,13 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         cuda_ok = False
     device = "cuda" if (p.get("use_cuda", True) and cuda_ok) else "cpu"
 
+    # Log the received params for debugging
+    try:
+        logger.info(f"Worker params: {p}")
+        logger.info(f"Top-level params (raw): {params}")
+    except Exception:
+        pass
+
     update_status(
         output_dir.parent, "processing", progress=55, stage="training", stage_progress=0,
         message=f"🚀 Initializing Gaussian Splatting trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'}, {mode} mode)...",
