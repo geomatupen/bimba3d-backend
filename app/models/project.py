@@ -74,6 +74,8 @@ class ProcessParams(BaseModel):
     splat_export_interval: Optional[int] = None
     png_export_interval: Optional[int] = None
     auto_early_stop: Optional[bool] = None
+    # COLMAP tuning options (passed through to COLMAP step)
+    colmap: Optional[dict] = None
 
 
 class EvaluationMetrics(BaseModel):
@@ -86,7 +88,7 @@ class EvaluationMetrics(BaseModel):
 
 class ComparisonRequest(BaseModel):
     name: Optional[str] = None
-    max_steps: Optional[int] = 30000
+    max_steps: Optional[int] = 300
     batch_size: Optional[int] = 1
 
 

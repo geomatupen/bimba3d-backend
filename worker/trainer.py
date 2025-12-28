@@ -37,14 +37,15 @@ class GsplatTrainer:
         colmap_dir: Path,
         output_dir: Path,
         mode: str = "baseline",
-        max_steps: int = 3_000,
+        max_steps: int = 300,
         device: str = "cuda",
         progress_callback: Optional[Callable] = None,
-        splat_export_interval: Optional[int] = None,
-        png_export_interval: Optional[int] = None,
+        splat_export_interval: Optional[int] = 150,
+        png_export_interval: Optional[int] = 50,
         auto_early_stop: bool = False,
         stop_checker: Optional[Callable[[], bool]] = None,
         resume: bool = False,
+        max_init_gaussians: int | None = 20000,
     ):
         set_random_seed(42)
         
@@ -60,6 +61,9 @@ class GsplatTrainer:
         self.auto_early_stop = auto_early_stop
         self.stop_checker = stop_checker
         self.resume = resume
+        # Maximum number of Gaussians to initialize from COLMAP points.
+        # If None, use all points (may OOM for large scenes).
+        self.max_init_gaussians = max_init_gaussians
         self.stop_reason: Optional[str] = None
         self.last_tuning_info = None  # Track last tuning action for status updates
         
@@ -113,8 +117,16 @@ class GsplatTrainer:
         """Initialize Gaussian parameters from COLMAP points."""
         points = torch.from_numpy(self.dataset.points).float()
         rgbs = torch.from_numpy(self.dataset.points_rgb / 255.0).float()
-        
+
         N = points.shape[0]
+        # Optionally subsample to avoid excessive memory usage
+        if self.max_init_gaussians is not None and N > self.max_init_gaussians:
+            logger.info(f"COLMAP produced {N} points; subsampling to {self.max_init_gaussians} Gaussians to reduce memory")
+            idx = torch.randperm(N)[: self.max_init_gaussians]
+            points = points[idx].contiguous()
+            rgbs = rgbs[idx].contiguous()
+            N = points.shape[0]
+
         logger.info(f"Initializing {N} Gaussians from COLMAP points")
         
         # Initialize scales based on k-nearest neighbors

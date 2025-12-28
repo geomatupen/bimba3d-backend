@@ -20,12 +20,30 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
     params_json = json.dumps(params or {})
     # DATA_DIR is now /path/to/websplat-backend/data/projects
     # Mount parent: /path/to/websplat-backend/data -> /data
-    data_dir = DATA_DIR.parent  
+    data_dir = DATA_DIR.parent
+
+    # Ensure a writable cache directory exists on the host and will be mounted
+    cache_dir = data_dir / ".cache"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not create cache dir {cache_dir}: {e}")
     
+    # Run container as the host backend user to avoid root-owned output files.
+    uid = os.getuid()
+    gid = os.getgid()
+    user_flag = ["-u", f"{uid}:{gid}"]
+
     cmd = [
         "docker", "run", "--rm",
+        *user_flag,
         "--gpus", "all",  # Enable GPU access
+        # Mount project data and a writable cache into the container so PyTorch
+        # can build extensions without trying to write to '/.cache' inside root.
         "-v", f"{data_dir}:/data",
+        "-v", f"{cache_dir}:/data/.cache",
+        "-e", "TORCH_EXTENSIONS_DIR=/data/.cache/torch_extensions",
+        "-e", "XDG_CACHE_HOME=/data/.cache",
         "bimba3d-worker:latest",
         project_id,
         "--data-dir", "/data/projects",
@@ -33,11 +51,38 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
     ]
     
     logger.info(f"Running Docker worker: {' '.join(cmd)}")
-    
+
+    # Stream container output into the project's processing.log so the frontend
+    # can display live logs. Avoid capture_output which buffers large output
+    # and can cause deadlocks for long-running containers.
+    from app.services import storage as _storage
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        project_dir = _storage.get_project_dir(project_id)
+        logs_file = project_dir / "processing.log"
+        logs_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logs_file = None
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+            try:
+                logger.info(line)
+            except Exception:
+                pass
+            if logs_file is not None:
+                try:
+                    with open(logs_file, 'a') as f:
+                        f.write(line + '\n')
+                except Exception:
+                    pass
+        rc = proc.wait()
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, cmd)
     except subprocess.CalledProcessError as e:
-        logger.error(f"Docker worker failed: {e.stderr}")
+        logger.error(f"Docker worker failed: returncode={getattr(e, 'returncode', None)}")
         raise
 
 
@@ -75,7 +120,7 @@ def _cleanup_sqlite_sidecars(db_path: Path):
                 logger.warning(f"Failed to remove sidecar {sidecar}: {e}")
 
 
-def run_colmap(image_dir: Path, output_dir: Path):
+def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None):
     """
     Run COLMAP feature extraction, matching, and sparse reconstruction.
     
@@ -105,31 +150,55 @@ def run_colmap(image_dir: Path, output_dir: Path):
     _cleanup_sqlite_sidecars(db_path)
     
     try:
+        # Allow optional tuning via params.colmap
+        p = params.get("colmap", {}) if isinstance(params, dict) else {}
+
         # 1️⃣ Feature extraction
         logger.info("Running COLMAP feature extraction...")
-        _run_cmd_with_retry([
+        feat_cmd = [
             "colmap", "feature_extractor",
             "--database_path", str(db_path),
             "--image_path", str(image_dir),
             "--ImageReader.camera_model", "OPENCV",
             "--ImageReader.single_camera", "1",
-            "--SiftExtraction.max_image_size", "3200",
-            "--SiftExtraction.peak_threshold", "0.01",
-        ])
+        ]
+        if p.get("max_image_size"):
+            feat_cmd += ["--SiftExtraction.max_image_size", str(p.get("max_image_size"))]
+        else:
+            feat_cmd += ["--SiftExtraction.max_image_size", "1600"]
+        if p.get("peak_threshold") is not None:
+            feat_cmd += ["--SiftExtraction.peak_threshold", str(p.get("peak_threshold"))]
+        else:
+            feat_cmd += ["--SiftExtraction.peak_threshold", "0.01"]
+
+        _run_cmd_with_retry(feat_cmd)
         logger.info("✓ Feature extraction completed")
-        
+
         # 2️⃣ Feature matching
         logger.info("Running COLMAP feature matching...")
-        _run_cmd_with_retry([
-            "colmap", "exhaustive_matcher",
-            "--database_path", str(db_path),
-            "--SiftMatching.guided_matching", "1",
-        ])
+        guided = p.get("guided_matching")
+        matching_type = p.get("matching_type", "exhaustive")
+        if matching_type == "sequential":
+            match_cmd = [
+                "colmap", "sequential_matcher",
+                "--database_path", str(db_path),
+            ]
+        else:
+            match_cmd = [
+                "colmap", "exhaustive_matcher",
+                "--database_path", str(db_path),
+            ]
+        if guided is not None:
+            match_cmd += ["--SiftMatching.guided_matching", "1" if guided else "0"]
+        else:
+            match_cmd += ["--SiftMatching.guided_matching", "1"]
+
+        _run_cmd_with_retry(match_cmd)
         logger.info("✓ Feature matching completed")
-        
+
         # 3️⃣ Sparse reconstruction
         logger.info("Running COLMAP sparse reconstruction (mapper)...")
-        _run_cmd_with_retry([
+        mapper_cmd = [
             "colmap", "mapper",
             "--database_path", str(db_path),
             "--image_path", str(image_dir),
@@ -137,7 +206,14 @@ def run_colmap(image_dir: Path, output_dir: Path):
             "--Mapper.ba_refine_principal_point", "1",
             "--Mapper.ba_refine_focal_length", "1",
             "--Mapper.ba_refine_extra_params", "1",
-        ])
+        ]
+        if p.get("mapper_num_threads"):
+            mapper_cmd += ["--Mapper.num_threads", str(p.get("mapper_num_threads"))]
+        else:
+            # Default to 2 mapper threads to reduce memory usage on typical hosts
+            mapper_cmd += ["--Mapper.num_threads", "2"]
+
+        _run_cmd_with_retry(mapper_cmd)
         logger.info("✓ Sparse reconstruction completed")
         
         # Verify outputs

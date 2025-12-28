@@ -497,29 +497,103 @@ def get_logs(project_id: str, lines: int = 500):
         raise HTTPException(status_code=500, detail="Failed to get logs")
 
 
-@router.get("/{project_id}/download/{file_type}")
-def get_preview(project_id: str):
-    """Return the latest preview PNG generated during training."""
+@router.get("/{project_id}/download/sparse.json")
+def download_sparse_json(project_id: str):
+    """Return a JSON representation of the first COLMAP sparse reconstruction (points only).
+
+    This endpoint prefers `points3D.txt` (readable) and falls back to `points3D.bin` (best-effort parser).
+    The returned shape is {"points": [{"x":..,"y":..,"z":..,"r":..,"g":..,"b":..}, ...]}.
+    """
     try:
         project_dir = DATA_DIR / project_id
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
-        preview_path = project_dir / "outputs" / "previews" / "preview_latest.png"
-        if not preview_path.exists():
-            raise HTTPException(status_code=404, detail="Preview not available")
+        sparse_root = project_dir / "outputs" / "sparse"
+        if not sparse_root.exists() or not sparse_root.is_dir():
+            raise HTTPException(status_code=404, detail="Sparse outputs not found")
 
-        # Disable caching so polling clients always see fresh image
-        return FileResponse(
-            path=preview_path,
-            media_type="image/png",
-            headers={"Cache-Control": "no-store"}
-        )
+        # Pick the first reconstruction directory containing points3D
+        recon_dir = None
+        for d in sorted([p for p in sparse_root.iterdir() if p.is_dir()]):
+            if (d / "points3D.txt").exists() or (d / "points3D.bin").exists():
+                recon_dir = d
+                break
+
+        if recon_dir is None:
+            raise HTTPException(status_code=404, detail="No COLMAP reconstruction found")
+
+        txt_path = recon_dir / "points3D.txt"
+        bin_path = recon_dir / "points3D.bin"
+
+        points = []
+
+        if txt_path.exists():
+            # Parse ASCII points3D.txt (format: id x y z r g b error track_length [track...])
+            with open(txt_path, "r") as f:
+                for line in f:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    parts = line.strip().split()
+                    try:
+                        # parts[0]=id, [1..3]=xyz, [4..6]=rgb
+                        x = float(parts[1]); y = float(parts[2]); z = float(parts[3])
+                        r = int(parts[4]); g = int(parts[5]); b = int(parts[6])
+                        points.append({"x": x, "y": y, "z": z, "r": r, "g": g, "b": b})
+                    except Exception:
+                        continue
+        elif bin_path.exists():
+            # Best-effort binary parser. COLMAP's binary layout may vary; we attempt the common layout.
+            import struct
+            with open(bin_path, "rb") as f:
+                try:
+                    # Read number of points (uint64)
+                    num_points_bytes = f.read(8)
+                    if len(num_points_bytes) < 8:
+                        raise ValueError("Invalid points3D.bin header")
+                    num_points = struct.unpack("<Q", num_points_bytes)[0]
+                except Exception:
+                    # If header read fails, fall back to scanning (empty response)
+                    num_points = 0
+
+                for _ in range(num_points):
+                    try:
+                        pid = struct.unpack("<Q", f.read(8))[0]
+                        x, y, z = struct.unpack("<ddd", f.read(24))
+                        r, g, b = struct.unpack("BBB", f.read(3))
+                        error = struct.unpack("<d", f.read(8))[0]
+                        track_len = struct.unpack("<Q", f.read(8))[0]
+                        # skip track entries (image_id, point2d_idx) pairs
+                        try:
+                            f.read(track_len * 16)
+                        except Exception:
+                            # If sizes differ, try smaller element sizes
+                            try:
+                                f.read(track_len * 8)
+                            except Exception:
+                                pass
+                        points.append({"x": x, "y": y, "z": z, "r": int(r), "g": int(g), "b": int(b)})
+                    except Exception:
+                        # On parse error just break to avoid infinite loop
+                        break
+
+        if not points:
+            raise HTTPException(status_code=404, detail="No points parsed from COLMAP output")
+
+        return {"points": points}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting preview: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get preview")
+        logger.error(f"Error exporting sparse JSON for {project_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export sparse points")
+
+
+
+
+
+
+
+
 
 
 @router.get("/{project_id}/splat-format")
@@ -656,6 +730,127 @@ def download_splats(project_id: str):
     except Exception as e:
         logger.error(f"Error downloading splats: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to download splats")
+
+
+@router.get("/{project_id}/download/{file_type}")
+def get_preview_download(project_id: str, file_type: str):
+    """Fallback preview endpoint for legacy clients requesting `download/{file_type}`.
+
+    This handler is intentionally registered after specific download endpoints so
+    requests for `.splat`, `.ply`, `.bin` and `sparse.json` are handled by
+    their dedicated handlers. It serves the latest preview PNG as a harmless
+    fallback for UI polling requests.
+    """
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        preview_path = project_dir / "outputs" / "previews" / "preview_latest.png"
+        if not preview_path.exists():
+            raise HTTPException(status_code=404, detail="Preview not available")
+
+        return FileResponse(
+            path=preview_path,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting preview for download/{file_type}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get preview")
+
+
+@router.get("/{project_id}/download/sparse.json")
+def download_sparse_json(project_id: str):
+    """Return a JSON representation of the first COLMAP sparse reconstruction (points only).
+
+    This endpoint prefers `points3D.txt` (readable) and falls back to `points3D.bin` (best-effort parser).
+    The returned shape is {"points": [{"x":..,"y":..,"z":..,"r":..,"g":..,"b":..}, ...]}.
+    """
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        sparse_root = project_dir / "outputs" / "sparse"
+        if not sparse_root.exists() or not sparse_root.is_dir():
+            raise HTTPException(status_code=404, detail="Sparse outputs not found")
+
+        # Pick the first reconstruction directory containing points3D
+        recon_dir = None
+        for d in sorted([p for p in sparse_root.iterdir() if p.is_dir()]):
+            if (d / "points3D.txt").exists() or (d / "points3D.bin").exists():
+                recon_dir = d
+                break
+
+        if recon_dir is None:
+            raise HTTPException(status_code=404, detail="No COLMAP reconstruction found")
+
+        txt_path = recon_dir / "points3D.txt"
+        bin_path = recon_dir / "points3D.bin"
+
+        points = []
+
+        if txt_path.exists():
+            # Parse ASCII points3D.txt (format: id x y z r g b error track_length [track...])
+            with open(txt_path, "r") as f:
+                for line in f:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    parts = line.strip().split()
+                    try:
+                        # parts[0]=id, [1..3]=xyz, [4..6]=rgb
+                        x = float(parts[1]); y = float(parts[2]); z = float(parts[3])
+                        r = int(parts[4]); g = int(parts[5]); b = int(parts[6])
+                        points.append({"x": x, "y": y, "z": z, "r": r, "g": g, "b": b})
+                    except Exception:
+                        continue
+        elif bin_path.exists():
+            # Best-effort binary parser. COLMAP's binary layout may vary; we attempt the common layout.
+            import struct
+            with open(bin_path, "rb") as f:
+                try:
+                    # Read number of points (uint64)
+                    num_points_bytes = f.read(8)
+                    if len(num_points_bytes) < 8:
+                        raise ValueError("Invalid points3D.bin header")
+                    num_points = struct.unpack("<Q", num_points_bytes)[0]
+                except Exception:
+                    # If header read fails, fall back to scanning (empty response)
+                    num_points = 0
+
+                for _ in range(num_points):
+                    try:
+                        pid = struct.unpack("<Q", f.read(8))[0]
+                        x, y, z = struct.unpack("<ddd", f.read(24))
+                        r, g, b = struct.unpack("BBB", f.read(3))
+                        error = struct.unpack("<d", f.read(8))[0]
+                        track_len = struct.unpack("<Q", f.read(8))[0]
+                        # skip track entries (image_id, point2d_idx) pairs
+                        try:
+                            f.read(track_len * 16)
+                        except Exception:
+                            # If sizes differ, try smaller element sizes
+                            try:
+                                f.read(track_len * 8)
+                            except Exception:
+                                pass
+                        points.append({"x": x, "y": y, "z": z, "r": int(r), "g": int(g), "b": int(b)})
+                    except Exception:
+                        # On parse error just break to avoid infinite loop
+                        break
+
+        if not points:
+            raise HTTPException(status_code=404, detail="No points parsed from COLMAP output")
+
+        return {"points": points}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting sparse JSON for {project_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export sparse points")
 
 
 @router.get("/{project_id}/metadata")

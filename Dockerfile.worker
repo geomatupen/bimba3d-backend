@@ -44,14 +44,21 @@ RUN git clone https://github.com/colmap/colmap.git && \
     cd /tmp && \
     rm -rf colmap
 
-# Install Python packages
-RUN pip3 install --no-cache-dir \
-    torch==2.1.0 \
-    torchvision==0.16.0 \
-    "numpy<2" \
-    pillow \
-    tqdm \
-    packaging
+
+
+# Install Python packages (retry on transient network failures)
+# Use PyTorch wheels built for CUDA 12.1 (cu121) to match the base image runtime
+RUN set -euo \
+ && for i in 1 2 3; do \
+            pip3 install --no-cache-dir --timeout 120 \
+                --index-url https://download.pytorch.org/whl/cu121 \
+                torch==2.1.0+cu121 \
+                torchvision==0.16.0+cu121 \
+                "numpy<2" \
+                pillow \
+                tqdm \
+                packaging && break || sleep 5; \
+        done
 
 # Install gsplat from PyPI (rendering ops + exporter)
 RUN pip3 install --no-cache-dir gsplat

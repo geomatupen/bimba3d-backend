@@ -21,6 +21,7 @@ def update_status(
     status: str,
     progress: int = None,
     error: str = None,
+    resumable: bool = None,
     mode: str = None,
     tuning_active: bool = None,
     currentStep: int = None,
@@ -54,6 +55,8 @@ def update_status(
             data["mode"] = mode
         if tuning_active is not None:
             data["tuning_active"] = tuning_active
+        if resumable is not None:
+            data["resumable"] = resumable
         if currentStep is not None:
             data["currentStep"] = currentStep
         if maxSteps is not None:
@@ -160,7 +163,7 @@ def _cleanup_sqlite_sidecars(db_path: Path):
                 logger.warning(f"Failed to remove sidecar {sidecar}: {e}")
 
 
-def run_colmap(image_dir: Path, output_dir: Path) -> Path:
+def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) -> Path:
     """Run COLMAP Structure-from-Motion."""
     logger.info("Starting COLMAP...")
     colmap_start = time.time()
@@ -181,6 +184,8 @@ def run_colmap(image_dir: Path, output_dir: Path) -> Path:
             # Try truncate if unlink fails
             database_path.write_bytes(b"")
     _cleanup_sqlite_sidecars(database_path)
+    # allow colmap tuning via params.colmap
+    p = params.get("colmap", {}) if isinstance(params, dict) else {}
 
     logger.info("COLMAP: Feature extraction...")
     update_status(
@@ -196,13 +201,32 @@ def run_colmap(image_dir: Path, output_dir: Path) -> Path:
         except Exception:
             pass
         sys.exit(0)
-    _run_cmd_with_retry([
+    feat_cmd = [
         "colmap", "feature_extractor",
         "--database_path", str(database_path),
         "--image_path", str(image_dir),
         "--ImageReader.single_camera", "1",
         "--ImageReader.camera_model", "OPENCV",
-    ])
+    ]
+    if p.get("max_image_size"):
+        feat_cmd += ["--SiftExtraction.max_image_size", str(p.get("max_image_size"))]
+    else:
+        feat_cmd += ["--SiftExtraction.max_image_size", "1600"]
+    if p.get("peak_threshold") is not None:
+        feat_cmd += ["--SiftExtraction.peak_threshold", str(p.get("peak_threshold"))]
+    try:
+        _run_cmd_with_retry(feat_cmd)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
+        logger.error(f"COLMAP feature_extractor failed: {e.stderr}")
+        if "cuda" in stderr or "driver" in stderr:
+            # Surface a clear failure to the frontend and stop processing, but allow resume
+            msg = "GPU error: CUDA driver/runtime mismatch. Update host NVIDIA drivers or use a compatible worker image."
+            logger.error(msg)
+            update_status(output_dir.parent, "stopped", progress=0, error=msg, stage="colmap", message=msg, stop_requested=True, stopped_stage="colmap", resumable=True)
+            sys.exit(1)
+        else:
+            raise
 
     logger.info("COLMAP: Feature matching...")
     update_status(
@@ -218,10 +242,27 @@ def run_colmap(image_dir: Path, output_dir: Path) -> Path:
         except Exception:
             pass
         sys.exit(0)
-    _run_cmd_with_retry([
-        "colmap", "exhaustive_matcher",
-        "--database_path", str(database_path),
-    ])
+    # matching strategy
+    guided = p.get("guided_matching")
+    matching_type = p.get("matching_type", "exhaustive")
+    if matching_type == "sequential":
+        match_cmd = ["colmap", "sequential_matcher", "--database_path", str(database_path)]
+    else:
+        match_cmd = ["colmap", "exhaustive_matcher", "--database_path", str(database_path)]
+    if guided is not None:
+        match_cmd += ["--SiftMatching.guided_matching", "1" if guided else "0"]
+    try:
+        _run_cmd_with_retry(match_cmd)
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
+        logger.error(f"COLMAP matcher failed: {e.stderr}")
+        if "cuda" in stderr or "driver" in stderr:
+            msg = "GPU error during matching: CUDA driver/runtime mismatch. Update host NVIDIA drivers or use a compatible worker image."
+            logger.error(msg)
+            update_status(output_dir.parent, "stopped", progress=0, error=msg, stage="colmap", message=msg, stop_requested=True, stopped_stage="colmap", resumable=True)
+            sys.exit(1)
+        else:
+            raise
 
     logger.info("COLMAP: Sparse reconstruction...")
     update_status(
@@ -234,57 +275,74 @@ def run_colmap(image_dir: Path, output_dir: Path) -> Path:
         update_status(output_dir.parent, "stopped", progress=0, stop_requested=True, stage="colmap", message="⏸️ Processing stopped by user before sparse reconstruction.", stopped_stage="colmap")
         sys.exit(0)
     try:
-        proc = subprocess.Popen([
-            "colmap", "mapper",
-            "--database_path", str(database_path),
-            "--image_path", str(image_dir),
-            "--output_path", str(sparse_dir),
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        # Poll process and allow external stop to terminate it
-        while True:
-            rc = proc.poll()
-            if rc is not None:
-                # Process finished
-                if proc.stdout:
-                    try:
-                        out = proc.stdout.read()
-                        if out:
-                            logger.info(out.strip())
-                    except Exception:
-                        pass
-                if proc.stderr:
-                    try:
-                        err = proc.stderr.read()
-                        if err:
-                            logger.debug(err.strip())
-                    except Exception:
-                        pass
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, proc.args)
-                break
-            if stop_flag.exists():
-                logger.info("Stop requested during COLMAP mapper; terminating process")
+        mapper_cmd = ["colmap", "mapper", "--database_path", str(database_path), "--image_path", str(image_dir), "--output_path", str(sparse_dir), "--Mapper.ba_refine_principal_point", "1", "--Mapper.ba_refine_focal_length", "1", "--Mapper.ba_refine_extra_params", "1"]
+        if p.get("mapper_num_threads"):
+            mapper_cmd += ["--Mapper.num_threads", str(p.get("mapper_num_threads"))]
+        else:
+            # Default to 2 mapper threads to reduce memory usage
+            mapper_cmd += ["--Mapper.num_threads", "2"]
+        # Do not capture stdout/stderr into pipes here; allow the child to inherit the
+        # container's stdout/stderr so COLMAP can stream directly to Docker logs.
+        # Capturing into pipes without continuously reading can lead to pipe buffer
+        # deadlocks where COLMAP appears to hang while producing output.
+        # Stream COLMAP mapper output into the application logger so it is
+        # persisted to the project's processing.log and visible via frontend.
+        # Use a pipe and continuously read to avoid deadlocks.
+        proc = subprocess.Popen(
+            mapper_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            assert proc.stdout is not None
+            # Read lines as they arrive and log them (will be written to file handler)
+            for line in proc.stdout:
                 try:
-                    proc.terminate()
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                update_status(output_dir.parent, "stopped", progress=0, stop_requested=True, stage="colmap", message="⏸️ Processing stopped by user during sparse reconstruction.", stopped_stage="colmap")
-                # Ensure process cleaned up
-                try:
-                    proc.wait(timeout=10)
+                    logger.info(line.rstrip())
                 except Exception:
                     pass
-                try:
-                    stop_flag.unlink()
-                except Exception:
-                    pass
-                sys.exit(0)
+                # If a stop has been requested externally, terminate mapper
+                if stop_flag.exists():
+                    logger.info("Stop requested during COLMAP mapper; terminating process")
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    update_status(output_dir.parent, "stopped", progress=0, stop_requested=True, stage="colmap", message="⏸️ Processing stopped by user during sparse reconstruction.", stopped_stage="colmap")
+                    try:
+                        proc.wait(timeout=10)
+                    except Exception:
+                        pass
+                    try:
+                        stop_flag.unlink()
+                    except Exception:
+                        pass
+                    sys.exit(0)
+            # After stdout is exhausted, wait for process exit and check return code
+            rc = proc.wait()
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, proc.args)
+        finally:
+            try:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            except Exception:
+                pass
     except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
         logger.error(f"COLMAP mapper failed: {e}")
-        raise
+        if "cuda" in stderr or "driver" in stderr:
+            msg = "GPU error during mapper: CUDA driver/runtime mismatch. Update host NVIDIA drivers or use a compatible worker image."
+            logger.error(msg)
+            update_status(output_dir.parent, "stopped", progress=0, error=msg, stage="colmap", message=msg, stop_requested=True, stopped_stage="colmap", resumable=True)
+            sys.exit(1)
+        else:
+            raise
 
     reconstruction_dirs = list(sparse_dir.glob("*/"))
     if not reconstruction_dirs:
@@ -402,7 +460,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     # Extract parameters
     p = params or {}
     mode = p.get("mode", "baseline")  # "baseline" or "modified"
-    max_steps = p.get("max_steps", 3000)
+    max_steps = p.get("max_steps", 300)
 
     stop_flag = output_dir.parent / "stop_requested"
 
@@ -490,6 +548,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         output_dir=output_dir,
         mode=mode,
         max_steps=max_steps,
+        max_init_gaussians=p.get("gsplat_max_gaussians", None),
         progress_callback=progress_callback,
         splat_export_interval=p.get("splat_export_interval"),
         png_export_interval=p.get("png_export_interval"),
@@ -672,7 +731,7 @@ def main():
         
         if stage == "colmap_only":
             update_status(project_dir, "processing", progress=1, stage="colmap", message="🚀 Starting COLMAP structure-from-motion pipeline...")
-            colmap_dir = run_colmap(image_dir, output_dir)
+            colmap_dir = run_colmap(image_dir, output_dir, params)
             logger.info("COLMAP completed")
             # Mark COLMAP as completed for frontend tick/green
             update_status(project_dir, "completed", progress=100, stage="colmap", message="✅ Sparse 3D reconstruction complete!")
@@ -691,7 +750,7 @@ def main():
         else:
             # Full pipeline
             update_status(project_dir, "processing", progress=1, stage="colmap", message="🚀 Starting full pipeline - Running COLMAP structure-from-motion...")
-            colmap_dir = run_colmap(image_dir, output_dir)
+            colmap_dir = run_colmap(image_dir, output_dir, params)
             logger.info("COLMAP completed")
 
             # Always use outputs/sparse/0 if it exists, else outputs/sparse

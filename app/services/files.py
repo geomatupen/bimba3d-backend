@@ -18,13 +18,16 @@ def get_output_files(project_id: str) -> dict:
     files = {}
     
     # Check for standard outputs
-    splats_path = output_dir / "splats.bin"
-    if splats_path.exists():
-        files["splats"] = {
-            "path": str(splats_path),
-            "size": splats_path.stat().st_size,
-            "type": "binary"
-        }
+    # Support multiple splats formats: .splat (optimized), .ply, .bin
+    splats_splat = output_dir / "splats.splat"
+    splats_ply = output_dir / "splats.ply"
+    splats_bin = output_dir / "splats.bin"
+    if splats_splat.exists():
+        files["splats"] = {"format": "splat", "path": str(splats_splat), "size": splats_splat.stat().st_size}
+    elif splats_ply.exists():
+        files["splats"] = {"format": "ply", "path": str(splats_ply), "size": splats_ply.stat().st_size}
+    elif splats_bin.exists():
+        files["splats"] = {"format": "bin", "path": str(splats_bin), "size": splats_bin.stat().st_size}
     
     metadata_path = output_dir / "metadata.json"
     if metadata_path.exists():

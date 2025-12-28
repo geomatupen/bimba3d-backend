@@ -27,6 +27,6 @@ FastAPI backend for project management, processing pipeline (COLMAP + training),
 
 
 ## Notes
-- Default `max_steps` is 3000; previews and splat exports occur at configured intervals.
+- Default `max_steps` is 300; previews and splat exports occur at configured intervals.
 - Manual stop triggers a final export and sets status to `stopped`.
 - GPU detection uses PyTorch; when CUDA is unavailable, training runs on CPU (slower).

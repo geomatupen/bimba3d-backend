@@ -41,10 +41,10 @@ def run_gsplat(image_dir: Path, colmap_sparse: Path, output_dir: Path, params: d
             "--image_path", str(image_dir),
             "--colmap_path", str(colmap_model_dir),
             "--output_dir", str(output_dir),
-            "--max_steps", str(p.get("max_steps", 3000)),
+            "--max_steps", str(p.get("max_steps", 300)),
             "--batch_size", str(p.get("batch_size", 1)),
             "--eval_interval", str(p.get("eval_interval", 1000)),
-            "--save_interval", str(p.get("save_interval", 5000)),
+            "--save_interval", str(p.get("save_interval", 150)),
             "--densify_from_iter", str(p.get("densify_from_iter", 500)),
             "--densify_until_iter", str(p.get("densify_until_iter", 15000)),
             "--densification_interval", str(p.get("densification_interval", 100)),
@@ -92,10 +92,10 @@ def create_output_artifacts(output_dir: Path, colmap_model_dir: Path, params: di
     p = params or {}
     metadata["training_config"] = {
         "use_demo_mode": False,
-        "max_steps": int(p.get("max_steps", 30000)),
+        "max_steps": int(p.get("max_steps", 300)),
         "batch_size": int(p.get("batch_size", 1)),
         "eval_interval": int(p.get("eval_interval", 1000)),
-        "save_interval": int(p.get("save_interval", 5000)),
+        "save_interval": int(p.get("save_interval", 150)),
         "densify_from_iter": int(p.get("densify_from_iter", 500)),
         "densify_until_iter": int(p.get("densify_until_iter", 15000)),
         "densification_interval": int(p.get("densification_interval", 100)),
@@ -295,9 +295,11 @@ def create_metadata(colmap_model_dir: Path) -> dict:
             "num_points": max(num_points, 0),
             "colmap_model": str(colmap_model_dir),
             "training_config": {
-                "max_steps": 30000,
+                "max_steps": 300,
                 "batch_size": 1,
                 "densification_interval": 100,
+                "splat_export_interval": 150,
+                "png_export_interval": 50,
             }
         }
         return metadata

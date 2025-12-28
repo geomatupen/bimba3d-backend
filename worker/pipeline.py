@@ -156,7 +156,7 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
             # 1️⃣ COLMAP SfM only
             logger.info(f"Running COLMAP for project: {project_id}")
             status.update_status(project_id, "processing", progress=20, stage="colmap", message="Running COLMAP")
-            sparse_dir = colmap.run_colmap(image_dir, output_dir)
+            sparse_dir = colmap.run_colmap(image_dir, output_dir, params)
             logger.info(f"COLMAP completed for project: {project_id}")
             # Only set completed if not stopped
             current_status = status.get_status(project_id)
@@ -194,7 +194,7 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
             # Full pipeline
             logger.info(f"Running COLMAP for project: {project_id}")
             status.update_status(project_id, "processing", progress=20, stage="colmap", message="Running COLMAP")
-            sparse_dir = colmap.run_colmap(image_dir, output_dir)
+            sparse_dir = colmap.run_colmap(image_dir, output_dir, params)
             logger.info(f"COLMAP completed for project: {project_id}")
             # Mark COLMAP as completed for frontend tick/green
             current_status = status.get_status(project_id)
