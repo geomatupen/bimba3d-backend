@@ -237,6 +237,21 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None):
             raise FileNotFoundError(f"COLMAP reconstruction failed - no output in {sparse_dir}")
         
         logger.info(f"COLMAP outputs saved to: {sparse_dir}")
+        # Attempt to generate compact points.bin for easier web consumption
+        try:
+            from app.services import pointsbin
+            # Iterate recon dirs and convert any with COLMAP points
+            for d in sorted([p for p in sparse_dir.iterdir() if p.is_dir()]):
+                try:
+                    cnt = pointsbin.convert_colmap_recon_to_pointsbin(d)
+                    if cnt:
+                        logger.info(f"Converted COLMAP recon {d} -> points.bin ({cnt} points)")
+                except Exception as e:
+                    logger.warning(f"Failed to convert recon {d} to points.bin: {e}")
+        except Exception:
+            # Non-fatal if converter missing or fails; continue returning sparse_dir
+            logger.debug("pointsbin converter not available or failed")
+
         return sparse_dir
         
     except FileNotFoundError as e:

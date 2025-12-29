@@ -696,6 +696,36 @@ def download_splats_bin(project_id: str):
         raise HTTPException(status_code=500, detail="Failed to download binary")
 
 
+@router.get("/{project_id}/download/points.bin")
+def download_points_bin(project_id: str):
+    """Download compact `points.bin` generated from COLMAP reconstruction.
+
+    The converter writes `points.bin` into the reconstruction directory (e.g. outputs/sparse/0/points.bin).
+    """
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        sparse_root = project_dir / "outputs" / "sparse"
+        if not sparse_root.exists():
+            raise HTTPException(status_code=404, detail="Sparse outputs not found")
+
+        # Find first recon dir with points.bin
+        for d in sorted([p for p in sparse_root.iterdir() if p.is_dir()]):
+            p = d / "points.bin"
+            if p.exists():
+                return FileResponse(path=p, filename="points.bin", media_type="application/octet-stream")
+
+        raise HTTPException(status_code=404, detail="points.bin not found; reconstruction may not be converted yet")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading points.bin: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download points.bin")
+
+
+
 @router.get("/{project_id}/download/splats")
 def download_splats(project_id: str):
     """Download splats file (.splat format optimized for web rendering)."""
