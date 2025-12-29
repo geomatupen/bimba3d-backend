@@ -47,6 +47,10 @@ class GsplatTrainer:
         resume: bool = False,
         max_init_gaussians: int | None = 20000,
         max_gaussians_cap: int | None = None,
+        amp_enabled: bool = False,
+        pruning_enabled: bool = False,
+        pruning_policy: str = "opacity",
+        pruning_weights: dict | None = None,
     ):
         set_random_seed(42)
         
@@ -71,6 +75,21 @@ class GsplatTrainer:
         self.max_gaussians_cap = max_gaussians_cap
         logger.info(f"Trainer configured max_gaussians_cap={self.max_gaussians_cap}")
         logger.info(f"Trainer configured max_init_gaussians={self.max_init_gaussians}")
+        # AMP (automatic mixed precision) flag
+        self.amp_enabled = bool(amp_enabled)
+        if self.amp_enabled:
+            logger.info("AMP (mixed precision) enabled for training")
+
+        # Pruning policy configuration
+        self.pruning_enabled = bool(pruning_enabled)
+        self.pruning_policy = pruning_policy or "opacity"
+        # Pruning weights: dict may contain keys 'opacity', 'scale', 'age'
+        self.pruning_weights = pruning_weights if isinstance(pruning_weights, dict) else {}
+        # Defaults
+        self.pruning_weights.setdefault("opacity", 1.0)
+        self.pruning_weights.setdefault("scale", 0.0)
+        self.pruning_weights.setdefault("age", 0.0)
+        logger.info(f"Pruning enabled={self.pruning_enabled}, policy={self.pruning_policy}, weights={self.pruning_weights}")
         self.stop_reason: Optional[str] = None
         self.last_tuning_info = None  # Track last tuning action for status updates
         
@@ -90,6 +109,22 @@ class GsplatTrainer:
         
         # Initialize Gaussian parameters
         self._init_gaussians()
+
+        # If AMP enabled and on CUDA, create GradScaler
+        self.scaler = None
+        if self.amp_enabled and torch.cuda.is_available():
+            try:
+                self.scaler = torch.cuda.amp.GradScaler()
+            except Exception:
+                self.scaler = None
+        # Debug: log AMP / GradScaler status for runtime verification
+        try:
+            logger.info(
+                f"AMP flag: {self.amp_enabled}; CUDA available: {torch.cuda.is_available()}; GradScaler initialized: {self.scaler is not None}"
+            )
+        except Exception:
+            # Best-effort logging; do not crash on logging errors
+            pass
         
         # Adaptive tuning parameters (your thesis approach)
         self.tuning_params = {
@@ -213,13 +248,37 @@ class GsplatTrainer:
             if cap is None or N <= cap:
                 return
 
-            # Compute importance by opacity (sigmoid of stored logits)
+            # Compute importance according to pruning policy
             with torch.no_grad():
-                opac = torch.sigmoid(self.splats["opacities"]).view(-1)
-                # Keep top-k by opacity
-                k = cap
-                _, topk_idx = torch.topk(opac, k=k, largest=True)
-                keep_idx = torch.sort(topk_idx).values
+                # Default: opacity
+                if self.pruning_enabled and self.pruning_policy == "scale":
+                    # Use scale magnitude (exp of stored log-scales), take mean over 3 dims
+                    scales = torch.exp(self.splats["scales"]).view(N, -1)
+                    score = scales.mean(dim=1)
+                    # larger scale considered more important
+                    _, topk_idx = torch.topk(score, k=cap, largest=True)
+                    keep_idx = torch.sort(topk_idx).values
+                elif self.pruning_enabled and self.pruning_policy == "importance":
+                    # Composite importance score using configurable weights
+                    opac = torch.sigmoid(self.splats["opacities"]).view(-1)
+                    scales = torch.exp(self.splats["scales"]).view(N, -1)
+                    scale_mean = scales.mean(dim=1)
+                    # Normalize components
+                    opac_n = opac / (opac.max() + 1e-9)
+                    scale_n = scale_mean / (scale_mean.max() + 1e-9)
+                    # Age not currently tracked per-gaussian; placeholder zero vector
+                    age_n = torch.zeros_like(opac_n)
+                    w_op = float(self.pruning_weights.get("opacity", 1.0))
+                    w_scale = float(self.pruning_weights.get("scale", 0.0))
+                    w_age = float(self.pruning_weights.get("age", 0.0))
+                    score = (w_op * opac_n) + (w_scale * scale_n) + (w_age * age_n)
+                    _, topk_idx = torch.topk(score, k=cap, largest=True)
+                    keep_idx = torch.sort(topk_idx).values
+                else:
+                    # Fallback to opacity-based pruning
+                    opac = torch.sigmoid(self.splats["opacities"]).view(-1)
+                    _, topk_idx = torch.topk(opac, k=cap, largest=True)
+                    keep_idx = torch.sort(topk_idx).values
 
                 # Slice each parameter tensor to keep only selected indices
                 new_splats = {}
@@ -686,8 +745,12 @@ class GsplatTrainer:
             camtoworld = torch.from_numpy(self.dataset.camtoworlds[idx]).float().to(self.device)
             K = torch.from_numpy(self.dataset.Ks[idx]).float().to(self.device)
             
-            # Forward pass
-            colors, alphas, info = self.rasterize(camtoworld, K, width, height)
+            # Forward pass (support AMP if enabled)
+            if self.amp_enabled and self.scaler is not None:
+                with torch.cuda.amp.autocast():
+                    colors, alphas, info = self.rasterize(camtoworld, K, width, height)
+            else:
+                colors, alphas, info = self.rasterize(camtoworld, K, width, height)
             colors = colors[0]  # Remove batch dim
             
             # Compute loss (L1 + SSIM, same as upstream)
@@ -703,8 +766,11 @@ class GsplatTrainer:
             ssim_loss = 1.0 - self._ssim(colors, pixels)
             loss = 0.8 * l1_loss + 0.2 * ssim_loss
             
-            # Backward
-            loss.backward()
+            # Backward (use GradScaler when AMP enabled)
+            if self.amp_enabled and self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             # Store convergence data
             with torch.no_grad():
@@ -732,10 +798,24 @@ class GsplatTrainer:
                 if step == 300:
                     self.save_tuning_results(step)
             
-            # Optimizer step
-            for optimizer in self.optimizers.values():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            # Optimizer step (handle AMP stepping when enabled)
+            if self.amp_enabled and self.scaler is not None:
+                for optimizer in self.optimizers.values():
+                    try:
+                        self.scaler.step(optimizer)
+                    except Exception:
+                        # Fallback to regular step if scaler.step fails
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                try:
+                    self.scaler.update()
+                except Exception:
+                    pass
+            else:
+                for optimizer in self.optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+
             self.scheduler.step()
             
             # Densification
