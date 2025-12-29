@@ -556,6 +556,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         mode=mode,
         max_steps=max_steps,
         max_init_gaussians=p.get("gsplat_max_gaussians", None),
+        max_gaussians_cap=p.get("gsplat_hard_cap", p.get("gsplat_max_gaussians", None)),
         progress_callback=progress_callback,
         splat_export_interval=p.get("splat_export_interval"),
         png_export_interval=p.get("png_export_interval"),

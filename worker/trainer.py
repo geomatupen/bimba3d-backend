@@ -46,6 +46,7 @@ class GsplatTrainer:
         stop_checker: Optional[Callable[[], bool]] = None,
         resume: bool = False,
         max_init_gaussians: int | None = 20000,
+        max_gaussians_cap: int | None = None,
     ):
         set_random_seed(42)
         
@@ -64,6 +65,11 @@ class GsplatTrainer:
         # Maximum number of Gaussians to initialize from COLMAP points.
         # If None, use all points (may OOM for large scenes).
         self.max_init_gaussians = max_init_gaussians
+        # Hard cap for total Gaussians during training. If set (int), trainer will
+        # prune back to this cap whenever densification would exceed it.
+        # If None, no hard cap is enforced (unlimited growth governed only by strategy).
+        self.max_gaussians_cap = max_gaussians_cap
+        logger.info(f"Trainer configured max_gaussians_cap={self.max_gaussians_cap}")
         logger.info(f"Trainer configured max_init_gaussians={self.max_init_gaussians}")
         self.stop_reason: Optional[str] = None
         self.last_tuning_info = None  # Track last tuning action for status updates
@@ -157,6 +163,10 @@ class GsplatTrainer:
         }).to(self.device)
         
         # Setup optimizers (same as upstream)
+        self._setup_optimizers()
+
+    def _setup_optimizers(self):
+        """(Re)initialize optimizers and scheduler for current splats."""
         lr_scale = math.sqrt(1)  # batch_size=1
         self.optimizers = {
             "means": torch.optim.Adam(
@@ -184,11 +194,60 @@ class GsplatTrainer:
                 eps=1e-15,
             ),
         }
-        
+
         # Learning rate scheduler for means
         self.scheduler = torch.optim.lr_scheduler.ExponentialLR(
             self.optimizers["means"], gamma=0.01 ** (1.0 / self.max_steps)
         )
+
+    def _cap_gaussians(self, cap: int):
+        """Enforce a hard cap on the total number of Gaussians by pruning the
+        least-important Gaussians (lowest opacity) until the cap is satisfied.
+
+        This is a safety mechanism to prevent unbounded growth OOMs during
+        densification. After pruning we reinitialize the optimizers and sanity-check
+        the strategy.
+        """
+        try:
+            N = self.splats["means"].shape[0]
+            if cap is None or N <= cap:
+                return
+
+            # Compute importance by opacity (sigmoid of stored logits)
+            with torch.no_grad():
+                opac = torch.sigmoid(self.splats["opacities"]).view(-1)
+                # Keep top-k by opacity
+                k = cap
+                _, topk_idx = torch.topk(opac, k=k, largest=True)
+                keep_idx = torch.sort(topk_idx).values
+
+                # Slice each parameter tensor to keep only selected indices
+                new_splats = {}
+                for key, param in self.splats.items():
+                    data = param.detach()
+                    if data.shape[0] != N:
+                        # Some bands may have different leading dims (safe copy)
+                        new_splats[key] = torch.nn.Parameter(data)
+                        continue
+
+                    # Handle sh bands that may have extra dims
+                    new_data = data[keep_idx].contiguous()
+                    new_splats[key] = torch.nn.Parameter(new_data)
+
+                # Replace ParameterDict
+                self.splats = torch.nn.ParameterDict(new_splats).to(self.device)
+
+                # Reinit optimizers and strategy sanity
+                self._setup_optimizers()
+                try:
+                    self.strategy.check_sanity(self.splats, self.optimizers)
+                except Exception:
+                    # If check fails, reinitialize strategy state conservatively
+                    self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
+
+                logger.info(f"Hard cap enforced: pruned {N - cap} Gaussians, now {cap} remain")
+        except Exception as e:
+            logger.warning(f"Failed to enforce gaussians cap: {e}")
     
     def rasterize(
         self,
@@ -689,6 +748,9 @@ class GsplatTrainer:
                 packed=False,
             )
 
+            # Enforce hard cap on Gaussians (safety against unbounded growth)
+            if self.max_gaussians_cap is not None:
+                self._cap_gaussians(self.max_gaussians_cap)
             # Live exports for viewer refresh
             if self.splat_export_interval and step % self.splat_export_interval == 0 and step > 0:
                 self._export_current_splats(step)
