@@ -6,6 +6,8 @@ Faithful implementation with research intervention hooks.
 import json
 import logging
 import math
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Dict, Optional, Callable
@@ -136,7 +138,7 @@ class GsplatTrainer:
         }
         
         # Setup training strategy
-        self.strategy = DefaultStrategy(
+        self.strategy_config = dict(
             verbose=True,
             prune_opa=0.005,
             grow_grad2d=self.tuning_params["densify_threshold"],
@@ -147,6 +149,7 @@ class GsplatTrainer:
             reset_every=3000,
             refine_every=100,
         )
+        self.strategy = DefaultStrategy(**self.strategy_config)
         self.strategy.check_sanity(self.splats, self.optimizers)
         self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
         
@@ -235,6 +238,16 @@ class GsplatTrainer:
             self.optimizers["means"], gamma=0.01 ** (1.0 / self.max_steps)
         )
 
+    def _reset_strategy_state(self):
+        """Rebuild gsplat strategy so its buffers stay in sync after pruning."""
+        self.strategy = DefaultStrategy(**self.strategy_config)
+        self.strategy.grow_grad2d = self.tuning_params["densify_threshold"]
+        try:
+            self.strategy.check_sanity(self.splats, self.optimizers)
+        except Exception as exc:
+            logger.warning("Strategy sanity check failed; continuing with fresh state: %s", exc)
+        self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
+
     def _cap_gaussians(self, cap: int):
         """Enforce a hard cap on the total number of Gaussians by pruning the
         least-important Gaussians (lowest opacity) until the cap is satisfied.
@@ -296,13 +309,9 @@ class GsplatTrainer:
                 # Replace ParameterDict
                 self.splats = torch.nn.ParameterDict(new_splats).to(self.device)
 
-                # Reinit optimizers and strategy sanity
+                # Reinit optimizers and fully rebuild strategy dynamics
                 self._setup_optimizers()
-                try:
-                    self.strategy.check_sanity(self.splats, self.optimizers)
-                except Exception:
-                    # If check fails, reinitialize strategy state conservatively
-                    self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
+                self._reset_strategy_state()
 
                 logger.info(f"Hard cap enforced: pruned {N - cap} Gaussians, now {cap} remain")
         except Exception as e:
@@ -511,7 +520,7 @@ class GsplatTrainer:
         self.strategy.grow_grad2d = self.tuning_params["densify_threshold"]
 
     def _export_current_splats(self, step: int):
-        """Export current in-memory splats to .splat and .ply for live viewing."""
+        """Export current in-memory splats to a .splat snapshot for live viewing."""
         try:
             from gsplat.exporter import export_splats
 
@@ -523,7 +532,12 @@ class GsplatTrainer:
             sh0 = self.splats["sh0"].detach().cpu().float()
             shN = self.splats["shN"].detach().cpu().float()
 
-            splat_path = self.output_dir / "splats.splat"
+            snapshot_dir = self.output_dir / "snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            step_tag = f"{step:06d}"
+
+            splat_snapshot = snapshot_dir / f"3dmodel_{step_tag}.splat"
+            splat_tmp = splat_snapshot.with_name(splat_snapshot.name + ".tmp")
             export_splats(
                 means=means,
                 scales=scales,
@@ -532,22 +546,35 @@ class GsplatTrainer:
                 sh0=sh0,
                 shN=shN,
                 format="splat",
-                save_to=str(splat_path),
+                save_to=str(splat_tmp),
             )
-            ply_path = self.output_dir / "splats.ply"
-            export_splats(
-                means=means,
-                scales=scales,
-                quats=quats,
-                opacities=opacities,
-                sh0=sh0,
-                shN=shN,
-                format="ply",
-                save_to=str(ply_path),
+            splat_tmp.replace(splat_snapshot)
+            self._update_latest_link(splat_snapshot, self.output_dir / "splats.splat")
+
+            logger.info(
+                "Live export complete at step %d (snapshot %s)",
+                step,
+                splat_snapshot.name,
             )
-            logger.info("Live export complete at step %d (splat + ply)", step)
         except Exception as e:
             logger.warning("Live export failed at step %d: %s", step, e)
+
+    def _update_latest_link(self, snapshot_path: Path, latest_path: Path):
+        """Update canonical splats.* pointer without duplicating large files."""
+        try:
+            if latest_path.exists() or latest_path.is_symlink():
+                latest_path.unlink()
+            os.link(snapshot_path, latest_path)
+        except OSError:
+            try:
+                shutil.copy2(snapshot_path, latest_path)
+            except Exception as copy_err:
+                logger.warning(
+                    "Failed to refresh %s from %s: %s",
+                    latest_path.name,
+                    snapshot_path.name,
+                    copy_err,
+                )
 
     def _save_preview_image(self, step: int, colors: Tensor):
         """Persist a PNG preview from the current render."""

@@ -30,3 +30,10 @@ FastAPI backend for project management, processing pipeline (COLMAP + training),
 - Default `max_steps` is 300; previews and splat exports occur at configured intervals.
 - Manual stop triggers a final export and sets status to `stopped`.
 - GPU detection uses PyTorch; when CUDA is unavailable, training runs on CPU (slower).
+
+
+
+
+
+./build-worker.sh
+uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload

@@ -78,6 +78,12 @@ class ProcessParams(BaseModel):
     colmap: Optional[dict] = None
     # Trainer init limit: maximum number of Gaussians to initialize from COLMAP points
     gsplat_max_gaussians: Optional[int] = None
+    # Hard cap enforcement and advanced trainer controls
+    gsplat_hard_cap: Optional[int] = None
+    amp: Optional[bool] = None
+    pruning_enabled: Optional[bool] = None
+    pruning_policy: Optional[str] = None
+    pruning_weights: Optional[dict] = None
 
 
 class EvaluationMetrics(BaseModel):

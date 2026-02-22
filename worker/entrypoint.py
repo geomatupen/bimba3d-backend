@@ -348,6 +348,33 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
     if not reconstruction_dirs:
         raise RuntimeError("COLMAP reconstruction failed - no output")
 
+    # Convert COLMAP outputs into lightweight points.bin files for the frontend
+    converter = None
+    try:
+        from . import pointsbin as worker_pointsbin
+
+        converter = worker_pointsbin
+    except Exception as worker_conv_err:
+        logger.debug("Worker pointsbin module unavailable: %s", worker_conv_err)
+        try:
+            from app.services import pointsbin as app_pointsbin
+
+            converter = app_pointsbin
+        except Exception as app_conv_err:
+            logger.debug("Backend pointsbin module unavailable: %s", app_conv_err)
+
+    if converter is not None:
+        for recon_dir in reconstruction_dirs:
+            try:
+                count = converter.convert_colmap_recon_to_pointsbin(recon_dir)
+                if count:
+                    logger.info("Converted %s -> points.bin (%d points)", recon_dir, count)
+            except Exception as conv_err:
+                logger.warning("Failed to convert %s to points.bin: %s", recon_dir, conv_err)
+    else:
+        # Non-fatal: frontend simply falls back to COLMAP binaries if converter unavailable
+        logger.debug("Skipping points.bin export (converter unavailable)")
+
     # Mark COLMAP done for substep progress
     colmap_end = time.time()
     update_status(
