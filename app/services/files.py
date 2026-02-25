@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import re
 from app.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,26 @@ def get_output_files(project_id: str) -> dict:
     splats_ply = output_dir / "splats.ply"
     splats_bin = output_dir / "splats.bin"
     if splats_splat.exists():
-        files["splats"] = {"format": "splat", "path": str(splats_splat), "size": splats_splat.stat().st_size}
+        files["splats"] = {
+            "format": "splat",
+            "path": str(splats_splat),
+            "size": splats_splat.stat().st_size,
+            "url": f"/projects/{project_id}/download/splats.splat",
+        }
     elif splats_ply.exists():
-        files["splats"] = {"format": "ply", "path": str(splats_ply), "size": splats_ply.stat().st_size}
+        files["splats"] = {
+            "format": "ply",
+            "path": str(splats_ply),
+            "size": splats_ply.stat().st_size,
+            "url": f"/projects/{project_id}/download/splats.ply",
+        }
     elif splats_bin.exists():
-        files["splats"] = {"format": "bin", "path": str(splats_bin), "size": splats_bin.stat().st_size}
+        files["splats"] = {
+            "format": "bin",
+            "path": str(splats_bin),
+            "size": splats_bin.stat().st_size,
+            "url": f"/projects/{project_id}/download/splats.bin",
+        }
     
     metadata_path = output_dir / "metadata.json"
     if metadata_path.exists():
@@ -101,6 +117,33 @@ def get_output_files(project_id: str) -> dict:
             reconstructions.append(recon_info)
         if reconstructions:
             files["sparse"] = reconstructions
+
+    # Intermediate model snapshots (historical .splat/.ply exports)
+    snapshots_dir = output_dir / "snapshots"
+    if snapshots_dir.exists() and snapshots_dir.is_dir():
+        snapshots: list[dict] = []
+        for snapshot in sorted(snapshots_dir.glob("*")):
+            if not snapshot.is_file():
+                continue
+            suffix = snapshot.suffix.lower().lstrip(".") or "splat"
+            step = None
+            stem = snapshot.stem.split("_")[-1]
+            if stem.isdigit():
+                step = int(stem)
+            else:
+                match = re.search(r"(\d+)", snapshot.stem)
+                if match:
+                    step = int(match.group(1))
+            snapshots.append({
+                "name": snapshot.name,
+                "path": str(snapshot),
+                "size": snapshot.stat().st_size,
+                "format": suffix,
+                "step": step,
+                "url": f"/projects/{project_id}/download/snapshots/{snapshot.name}",
+            })
+        if snapshots:
+            files["model_snapshots"] = snapshots
     
     return files
 
@@ -113,7 +156,11 @@ def get_file_path(project_id: str, file_type: str, filename: str = None) -> Path
     output_dir = project_dir / "outputs"
     
     if file_type == "splats":
-        return output_dir / "splats.bin"
+        for candidate in ("splats.splat", "splats.ply", "splats.bin"):
+            path = output_dir / candidate
+            if path.exists():
+                return path
+        return output_dir / "splats.splat"
     elif file_type == "metadata":
         return output_dir / "metadata.json"
     elif file_type == "image" and filename:

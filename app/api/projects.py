@@ -762,6 +762,43 @@ def download_splats(project_id: str):
         raise HTTPException(status_code=500, detail="Failed to download splats")
 
 
+@router.get("/{project_id}/download/snapshots/{filename}")
+def download_snapshot(project_id: str, filename: str):
+    """Download a specific intermediate splat snapshot exported during training."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        snapshots_dir = project_dir / "outputs" / "snapshots"
+        if not snapshots_dir.exists() or not snapshots_dir.is_dir():
+            raise HTTPException(status_code=404, detail="No snapshots available")
+
+        snapshots_root = snapshots_dir.resolve()
+        snap_path = (snapshots_dir / filename).resolve()
+        if snapshots_root not in snap_path.parents:
+            raise HTTPException(status_code=403, detail="Access denied")
+        if not snap_path.exists() or not snap_path.is_file():
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+
+        media_type = "application/octet-stream"
+        if snap_path.suffix.lower() == ".ply":
+            media_type = "application/octet-stream"
+        elif snap_path.suffix.lower() == ".splat":
+            media_type = "application/octet-stream"
+
+        return FileResponse(
+            path=snap_path,
+            filename=snap_path.name,
+            media_type=media_type,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading snapshot for {project_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download snapshot")
+
+
 @router.get("/{project_id}/download/{file_type}")
 def get_preview_download(project_id: str, file_type: str):
     """Fallback preview endpoint for legacy clients requesting `download/{file_type}`.
