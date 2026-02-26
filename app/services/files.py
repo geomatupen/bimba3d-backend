@@ -1,9 +1,129 @@
 import logging
-from pathlib import Path
 import re
+from pathlib import Path
+
 from app.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+ENGINE_SUBDIR = "engines"
+
+
+def _collect_outputs(root_dir: Path, project_id: str, engine: str | None = None) -> dict:
+    """Collect export artifacts for either the legacy root or a specific engine."""
+    bundle: dict = {}
+    query_suffix = f"?engine={engine}" if engine else ""
+
+    if not root_dir.exists():
+        return bundle
+
+    def add_splats_entry(candidate: Path, fmt: str):
+        if not candidate.exists():
+            return None
+        download_target = {
+            "splat": "splats.splat",
+            "ply": "splats.ply",
+            "bin": "splats.bin",
+        }.get(fmt)
+        if not download_target:
+            return None
+        entry = {
+            "format": fmt,
+            "path": str(candidate),
+            "size": candidate.stat().st_size,
+            "url": f"/projects/{project_id}/download/{download_target}{query_suffix}",
+        }
+        bundle["splats"] = entry
+        return entry
+
+    # Final artifacts (splat/ply/bin)
+    add_splats_entry(root_dir / "splats.splat", "splat")
+    if "splats" not in bundle:
+        add_splats_entry(root_dir / "splats.ply", "ply")
+    if "splats" not in bundle:
+        add_splats_entry(root_dir / "splats.bin", "bin")
+
+    metadata_path = root_dir / "metadata.json"
+    if metadata_path.exists():
+        bundle["metadata"] = {
+            "path": str(metadata_path),
+            "size": metadata_path.stat().st_size,
+            "type": "json",
+            "engine": engine,
+        }
+
+    metrics_path = root_dir / "metrics.json"
+    if metrics_path.exists():
+        bundle["metrics"] = {
+            "path": str(metrics_path),
+            "size": metrics_path.stat().st_size,
+            "engine": engine,
+        }
+
+    previews_dir = root_dir / "previews"
+    if previews_dir.exists():
+        previews = []
+        for preview in sorted(previews_dir.glob("preview_*.png")):
+            previews.append({
+                "name": preview.name,
+                "path": str(preview),
+                "size": preview.stat().st_size,
+                "url": f"/projects/{project_id}/previews/{preview.name}{query_suffix}",
+            })
+        latest_preview = previews_dir / "preview_latest.png"
+        if previews or latest_preview.exists():
+            latest_url = None
+            if latest_preview.exists():
+                latest_url = f"/projects/{project_id}/previews/{latest_preview.name}{query_suffix}"
+            bundle["previews"] = {
+                "items": previews,
+                "latest": str(latest_preview) if latest_preview.exists() else None,
+                "latest_url": latest_url,
+            }
+
+    ckpt_dir = root_dir / "checkpoints"
+    if ckpt_dir.exists():
+        checkpoints = []
+        for ckpt in sorted(ckpt_dir.glob("*")):
+            if not ckpt.is_file():
+                continue
+            if ckpt.suffix.lower() not in {".pt", ".pth"}:
+                continue
+            checkpoints.append({
+                "name": ckpt.name,
+                "path": str(ckpt),
+                "size": ckpt.stat().st_size,
+            })
+        if checkpoints:
+            bundle["checkpoints"] = checkpoints
+
+    snapshots_dir = root_dir / "snapshots"
+    if snapshots_dir.exists() and snapshots_dir.is_dir():
+        snapshots: list[dict] = []
+        for snapshot in sorted(snapshots_dir.glob("*")):
+            if not snapshot.is_file():
+                continue
+            file_suffix = snapshot.suffix.lower().lstrip(".") or "splat"
+            step = None
+            stem = snapshot.stem.split("_")[-1]
+            if stem.isdigit():
+                step = int(stem)
+            else:
+                match = re.search(r"(\d+)", snapshot.stem)
+                if match:
+                    step = int(match.group(1))
+            snapshots.append({
+                "name": snapshot.name,
+                "path": str(snapshot),
+                "size": snapshot.stat().st_size,
+                "format": file_suffix,
+                "step": step,
+                "url": f"/projects/{project_id}/download/snapshots/{snapshot.name}{query_suffix}",
+            })
+        if snapshots:
+            bundle["model_snapshots"] = snapshots
+
+    return bundle
 
 
 def get_output_files(project_id: str) -> dict:
@@ -17,70 +137,9 @@ def get_output_files(project_id: str) -> dict:
         return {}
     
     files = {}
-    
-    # Check for standard outputs
-    # Support multiple splats formats: .splat (optimized), .ply, .bin
-    splats_splat = output_dir / "splats.splat"
-    splats_ply = output_dir / "splats.ply"
-    splats_bin = output_dir / "splats.bin"
-    if splats_splat.exists():
-        files["splats"] = {
-            "format": "splat",
-            "path": str(splats_splat),
-            "size": splats_splat.stat().st_size,
-            "url": f"/projects/{project_id}/download/splats.splat",
-        }
-    elif splats_ply.exists():
-        files["splats"] = {
-            "format": "ply",
-            "path": str(splats_ply),
-            "size": splats_ply.stat().st_size,
-            "url": f"/projects/{project_id}/download/splats.ply",
-        }
-    elif splats_bin.exists():
-        files["splats"] = {
-            "format": "bin",
-            "path": str(splats_bin),
-            "size": splats_bin.stat().st_size,
-            "url": f"/projects/{project_id}/download/splats.bin",
-        }
-    
-    metadata_path = output_dir / "metadata.json"
-    if metadata_path.exists():
-        files["metadata"] = {
-            "path": str(metadata_path),
-            "size": metadata_path.stat().st_size,
-            "type": "json"
-        }
 
-    # Previews (latest PNGs during training)
-    previews_dir = output_dir / "previews"
-    if previews_dir.exists():
-        previews = []
-        for preview in sorted(previews_dir.glob("preview_*.png")):
-            previews.append({
-                "name": preview.name,
-                "path": str(preview),
-                "size": preview.stat().st_size,
-            })
-        latest_preview = previews_dir / "preview_latest.png"
-        files["previews"] = {
-            "items": previews,
-            "latest": str(latest_preview) if latest_preview.exists() else None,
-        }
-    
-    # Check for checkpoints
-    ckpt_dir = output_dir / "checkpoints"
-    if ckpt_dir.exists():
-        checkpoints = []
-        for ckpt in sorted(ckpt_dir.glob("ckpt_*.pt")):
-            checkpoints.append({
-                "name": ckpt.name,
-                "path": str(ckpt),
-                "size": ckpt.stat().st_size,
-            })
-        if checkpoints:
-            files["checkpoints"] = checkpoints
+    base_bundle = _collect_outputs(output_dir, project_id)
+    files.update(base_bundle)
     
     # Check for images
     images_dir = project_dir / "images"
@@ -118,32 +177,16 @@ def get_output_files(project_id: str) -> dict:
         if reconstructions:
             files["sparse"] = reconstructions
 
-    # Intermediate model snapshots (historical .splat/.ply exports)
-    snapshots_dir = output_dir / "snapshots"
-    if snapshots_dir.exists() and snapshots_dir.is_dir():
-        snapshots: list[dict] = []
-        for snapshot in sorted(snapshots_dir.glob("*")):
-            if not snapshot.is_file():
-                continue
-            suffix = snapshot.suffix.lower().lstrip(".") or "splat"
-            step = None
-            stem = snapshot.stem.split("_")[-1]
-            if stem.isdigit():
-                step = int(stem)
-            else:
-                match = re.search(r"(\d+)", snapshot.stem)
-                if match:
-                    step = int(match.group(1))
-            snapshots.append({
-                "name": snapshot.name,
-                "path": str(snapshot),
-                "size": snapshot.stat().st_size,
-                "format": suffix,
-                "step": step,
-                "url": f"/projects/{project_id}/download/snapshots/{snapshot.name}",
-            })
-        if snapshots:
-            files["model_snapshots"] = snapshots
+    engines_root = output_dir / ENGINE_SUBDIR
+    if engines_root.exists() and engines_root.is_dir():
+        engine_entries = {}
+        for engine_dir in sorted([p for p in engines_root.iterdir() if p.is_dir()]):
+            engine_name = engine_dir.name
+            bundle = _collect_outputs(engine_dir, project_id, engine_name)
+            if bundle:
+                engine_entries[engine_name] = bundle
+        if engine_entries:
+            files["engines"] = engine_entries
     
     return files
 

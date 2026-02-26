@@ -3,11 +3,12 @@ import logging
 import shutil
 import json
 import time
+import re
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
 from PIL import Image, ExifTags
-from fastapi import APIRouter, UploadFile, File, HTTPException, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Body, Query
 from fastapi.responses import FileResponse
 from app.config import DATA_DIR, ALLOWED_IMAGE_EXTENSIONS
 from app.models.project import (
@@ -35,12 +36,95 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+ENGINE_SUBDIR = "engines"
+ENGINE_NAME_RE = re.compile(r"^[a-z0-9_-]+$", re.IGNORECASE)
+
 # Map EXIF GPS tag id for quick lookup
 EXIF_GPS_TAG = None
 for k, v in ExifTags.TAGS.items():
     if v == "GPSInfo":
         EXIF_GPS_TAG = k
         break
+
+
+def _normalize_engine_name(engine: str | None) -> str | None:
+    if engine is None:
+        return None
+    candidate = str(engine).strip()
+    if not candidate:
+        return None
+    if not ENGINE_NAME_RE.fullmatch(candidate):
+        return None
+    return candidate.lower()
+
+
+def _sanitize_engine(engine: str | None) -> str | None:
+    if engine is None:
+        return None
+    normalized = _normalize_engine_name(engine)
+    if normalized is None:
+        raise HTTPException(status_code=400, detail="Invalid engine selector")
+    return normalized
+
+
+def _resolve_output_path(project_dir: Path, relative_path: str | Path, engine: str | None = None) -> Path:
+    rel = Path(relative_path)
+    if rel.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid path request")
+    base = project_dir / "outputs"
+    if engine:
+        base = base / ENGINE_SUBDIR / engine
+    return base / rel
+
+
+def _engine_search_order(project_id: str, sanitized_engine: str | None) -> tuple[list[str | None], str | None]:
+    if sanitized_engine:
+        return [sanitized_engine], sanitized_engine
+    inferred = _infer_engine(project_id)
+    order: list[str | None] = []
+    if inferred:
+        order.append(inferred)
+    order.append(None)
+    return order, inferred
+
+
+def _infer_engine(project_id: str) -> str | None:
+    try:
+        info = status.get_status(project_id)
+        normalized = _normalize_engine_name(info.get("engine"))
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    project_dir = DATA_DIR / project_id
+    engines_root = project_dir / "outputs" / ENGINE_SUBDIR
+    if engines_root.exists() and engines_root.is_dir():
+        for entry in sorted(p for p in engines_root.iterdir() if p.is_dir()):
+            normalized = _normalize_engine_name(entry.name)
+            if normalized:
+                return normalized
+    return None
+
+
+def _find_existing_path(
+    project_id: str,
+    relative_path: str | Path,
+    engine: str | None,
+    *,
+    expect_directory: bool = False,
+) -> tuple[Path | None, str | None, str | None, str | None]:
+    sanitized = _sanitize_engine(engine)
+    search_order, inferred = _engine_search_order(project_id, sanitized)
+    project_dir = DATA_DIR / project_id
+    for candidate in search_order:
+        candidate_path = _resolve_output_path(project_dir, relative_path, candidate)
+        if expect_directory:
+            if candidate_path.exists() and candidate_path.is_dir():
+                return candidate_path, candidate, sanitized, inferred
+        else:
+            if candidate_path.exists() and candidate_path.is_file():
+                return candidate_path, candidate, sanitized, inferred
+    return None, None, sanitized, inferred
 
 
 def _rational_to_float(value: tuple) -> float:
@@ -266,16 +350,16 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         images_dir = project_dir / "images"
         if not images_dir.exists() or not list(images_dir.glob("*")):
             raise HTTPException(status_code=400, detail="No images in project")
-        
-        # Update status to processing
-        status.update_status(project_id, "processing", progress=5, engine=engine)
-        
+
         # Prepare params payload with defaults (engine defaults to gsplat)
         params_payload = params.dict(exclude_none=True) if params else {}
         engine = params_payload.get("engine", "gsplat")
         if engine not in {"gsplat", "litegs"}:
             raise HTTPException(status_code=400, detail=f"Invalid training engine: {engine}")
         params_payload["engine"] = engine
+
+        # Update status to processing with the resolved engine
+        status.update_status(project_id, "processing", progress=5, engine=engine)
 
         # Start processing in background thread
         # Pass optional parameters to pipeline
@@ -378,25 +462,43 @@ def get_files(project_id: str):
 
 
 @router.get("/{project_id}/previews/{filename}")
-def get_preview_image(project_id: str, filename: str):
-    """Serve a specific preview PNG from outputs/previews."""
+def get_preview_image(project_id: str, filename: str, engine: str | None = Query(None)):
+    """Serve a specific preview PNG from outputs/previews (optionally engine-scoped)."""
     try:
         project_dir = DATA_DIR / project_id
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
-        previews_dir = project_dir / "outputs" / "previews"
+        previews_dir, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "previews",
+            engine,
+            expect_directory=True,
+        )
+        if previews_dir is None:
+            missing_engine = sanitized_engine or inferred_engine
+            detail = "Preview not found"
+            if missing_engine:
+                detail = f"Preview not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
+
         img_path = previews_dir / filename
 
         if not img_path.exists() or img_path.suffix.lower() != ".png":
-            raise HTTPException(status_code=404, detail="Preview not found")
+            missing_engine = sanitized_engine or inferred_engine or resolved_engine
+            detail = "Preview not found"
+            if missing_engine:
+                detail = f"Preview not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
 
         # Prevent path traversal
-        if not str(img_path).startswith(str(previews_dir)):
+        resolved_dir = previews_dir.resolve()
+        resolved_img = img_path.resolve()
+        if resolved_dir not in resolved_img.parents:
             raise HTTPException(status_code=403, detail="Access denied")
 
         return FileResponse(
-            img_path,
+            resolved_img,
             media_type="image/png",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"}
         )
@@ -408,20 +510,41 @@ def get_preview_image(project_id: str, filename: str):
 
 
 @router.head("/{project_id}/previews/{filename}")
-def head_preview_image(project_id: str, filename: str):
+def head_preview_image(project_id: str, filename: str, engine: str | None = Query(None)):
     """HEAD probe for preview PNG (used by browsers for preflight)."""
     try:
         project_dir = DATA_DIR / project_id
-        previews_dir = project_dir / "outputs" / "previews"
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        previews_dir, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "previews",
+            engine,
+            expect_directory=True,
+        )
+        if previews_dir is None:
+            missing_engine = sanitized_engine or inferred_engine
+            detail = "Preview not found"
+            if missing_engine:
+                detail = f"Preview not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
+
         img_path = previews_dir / filename
 
         if not img_path.exists() or img_path.suffix.lower() != ".png":
-            raise HTTPException(status_code=404, detail="Preview not found")
+            missing_engine = sanitized_engine or inferred_engine or resolved_engine
+            detail = "Preview not found"
+            if missing_engine:
+                detail = f"Preview not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
 
-        if not str(img_path).startswith(str(previews_dir)):
+        resolved_dir = previews_dir.resolve()
+        resolved_img = img_path.resolve()
+        if resolved_dir not in resolved_img.parents:
             raise HTTPException(status_code=403, detail="Access denied")
 
-        return FileResponse(img_path, media_type="image/png")
+        return FileResponse(resolved_img, media_type="image/png")
     except HTTPException:
         raise
     except Exception as e:
@@ -468,11 +591,15 @@ def get_preview(project_id: str):
         project_dir = DATA_DIR / project_id
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
-        
-        preview_file = project_dir / "output" / "previews" / "preview_latest.png"
-        if not preview_file.exists():
+
+        preview_file, _, _, _ = _find_existing_path(
+            project_id,
+            Path("previews") / "preview_latest.png",
+            None,
+        )
+        if not preview_file:
             raise HTTPException(status_code=404, detail="Preview not available")
-        
+
         return FileResponse(
             preview_file,
             media_type="image/png",
@@ -613,23 +740,33 @@ def download_sparse_json(project_id: str):
 
 
 @router.get("/{project_id}/splat-format")
-def get_splat_format(project_id: str):
+def get_splat_format(project_id: str, engine: str | None = Query(None)):
     """Check what splat format is available (ply or bin)."""
     try:
         project_dir = DATA_DIR / project_id
-        
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
-        
-        ply_path = project_dir / "outputs" / "splats.ply"
-        bin_path = project_dir / "outputs" / "splats.bin"
-        
-        if ply_path.exists():
-            return {"format": "ply", "has_ply": True, "has_bin": bin_path.exists()}
-        elif bin_path.exists():
-            return {"format": "bin", "has_ply": False, "has_bin": True}
-        else:
-            return {"format": "none", "has_ply": False, "has_bin": False}
+        sanitized_engine = _sanitize_engine(engine)
+        search_order, inferred_engine = _engine_search_order(project_id, sanitized_engine)
+
+        for candidate in search_order:
+            ply_path = _resolve_output_path(project_dir, "splats.ply", candidate)
+            bin_path = _resolve_output_path(project_dir, "splats.bin", candidate)
+            if ply_path.exists():
+                return {
+                    "format": "ply",
+                    "has_ply": True,
+                    "has_bin": bin_path.exists(),
+                    "engine": candidate,
+                }
+            if bin_path.exists():
+                return {
+                    "format": "bin",
+                    "has_ply": ply_path.exists(),
+                    "has_bin": True,
+                    "engine": candidate,
+                }
+        return {"format": "none", "has_ply": False, "has_bin": False, "engine": sanitized_engine or inferred_engine}
     
     except Exception as e:
         logger.error(f"Error checking splat format: {str(e)}")
@@ -637,14 +774,24 @@ def get_splat_format(project_id: str):
 
 
 @router.get("/{project_id}/download/splats.splat")
-def download_splats_splat(project_id: str):
+def download_splats_splat(project_id: str, engine: str | None = Query(None)):
     """Download .splat file (optimized binary format for web rendering)."""
     try:
         project_dir = DATA_DIR / project_id
-        splat_path = project_dir / "outputs" / "splats.splat"
-        
-        if not splat_path.exists():
-            raise HTTPException(status_code=404, detail=".splat file not found. Processing may not be complete.")
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+        splat_path, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "splats.splat",
+            engine,
+        )
+
+        if not splat_path:
+            detail = ".splat file not found. Processing may not be complete."
+            missing_engine = sanitized_engine or inferred_engine
+            if missing_engine:
+                detail = f".splat file not found for engine '{missing_engine}'."
+            raise HTTPException(status_code=404, detail=detail)
         
         return FileResponse(
             path=splat_path,
@@ -659,24 +806,44 @@ def download_splats_splat(project_id: str):
 
 
 @router.head("/{project_id}/download/splats.splat")
-def head_splats_splat(project_id: str):
+def head_splats_splat(project_id: str, engine: str | None = Query(None)):
     """HEAD probe for .splat file (used by frontend to prefer native format)."""
     project_dir = DATA_DIR / project_id
-    splat_path = project_dir / "outputs" / "splats.splat"
-    if splat_path.exists():
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+    splat_path, _, sanitized_engine, inferred_engine = _find_existing_path(
+        project_id,
+        "splats.splat",
+        engine,
+    )
+    if splat_path:
         return FileResponse(path=splat_path, filename="splats.splat", media_type="application/octet-stream")
-    raise HTTPException(status_code=404, detail=".splat file not found")
+    missing_engine = sanitized_engine or inferred_engine
+    detail = ".splat file not found"
+    if missing_engine:
+        detail = f".splat file not found for engine '{missing_engine}'"
+    raise HTTPException(status_code=404, detail=detail)
 
 
 @router.get("/{project_id}/download/splats.ply")
-def download_splats_ply(project_id: str):
+def download_splats_ply(project_id: str, engine: str | None = Query(None)):
     """Download PLY splats file."""
     try:
         project_dir = DATA_DIR / project_id
-        ply_path = project_dir / "outputs" / "splats.ply"
-        
-        if not ply_path.exists():
-            raise HTTPException(status_code=404, detail="PLY file not found")
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+        ply_path, _, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "splats.ply",
+            engine,
+        )
+
+        if not ply_path:
+            detail = "PLY file not found"
+            missing_engine = sanitized_engine or inferred_engine
+            if missing_engine:
+                detail = f"PLY file not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
         
         return FileResponse(
             path=ply_path,
@@ -691,14 +858,24 @@ def download_splats_ply(project_id: str):
 
 
 @router.get("/{project_id}/download/splats.bin")
-def download_splats_bin(project_id: str):
+def download_splats_bin(project_id: str, engine: str | None = Query(None)):
     """Download binary splats file."""
     try:
         project_dir = DATA_DIR / project_id
-        bin_path = project_dir / "outputs" / "splats.bin"
-        
-        if not bin_path.exists():
-            raise HTTPException(status_code=404, detail="Binary file not found")
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+        bin_path, _, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "splats.bin",
+            engine,
+        )
+
+        if not bin_path:
+            detail = "Binary file not found"
+            missing_engine = sanitized_engine or inferred_engine
+            if missing_engine:
+                detail = f"Binary file not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
         
         return FileResponse(
             path=bin_path,
@@ -743,7 +920,7 @@ def download_points_bin(project_id: str):
 
 
 @router.get("/{project_id}/download/splats")
-def download_splats(project_id: str):
+def download_splats(project_id: str, engine: str | None = Query(None)):
     """Download splats file (.splat format optimized for web rendering)."""
     try:
         project_dir = DATA_DIR / project_id
@@ -751,25 +928,39 @@ def download_splats(project_id: str):
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
-        # Prefer .splat format (optimized for web)
-        splat_path = project_dir / "outputs" / "splats.splat"
-        if splat_path.exists():
+        splat_path, _, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "splats.splat",
+            engine,
+        )
+        if splat_path:
             return FileResponse(
                 path=splat_path,
                 filename="splats.splat",
                 media_type="application/octet-stream"
             )
-        
-        # Fall back to PLY format if .splat not available
-        ply_path = project_dir / "outputs" / "splats.ply"
-        if ply_path.exists():
+
+        ply_path, _, _, _ = _find_existing_path(project_id, "splats.ply", engine)
+        if ply_path:
             return FileResponse(
                 path=ply_path,
                 filename="splats.ply",
                 media_type="application/octet-stream"
             )
+
+        bin_path, _, _, _ = _find_existing_path(project_id, "splats.bin", engine)
+        if bin_path:
+            return FileResponse(
+                path=bin_path,
+                filename="splats.bin",
+                media_type="application/octet-stream"
+            )
         
-        raise HTTPException(status_code=404, detail="Splats file not found. Processing may not be complete.")
+        detail = "Splats file not found. Processing may not be complete."
+        missing_engine = sanitized_engine or inferred_engine
+        if missing_engine:
+            detail = f"Splats file not found for engine '{missing_engine}'."
+        raise HTTPException(status_code=404, detail=detail)
     
     except HTTPException:
         raise
@@ -779,23 +970,35 @@ def download_splats(project_id: str):
 
 
 @router.get("/{project_id}/download/snapshots/{filename}")
-def download_snapshot(project_id: str, filename: str):
+def download_snapshot(project_id: str, filename: str, engine: str | None = Query(None)):
     """Download a specific intermediate splat snapshot exported during training."""
     try:
         project_dir = DATA_DIR / project_id
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
-
-        snapshots_dir = project_dir / "outputs" / "snapshots"
-        if not snapshots_dir.exists() or not snapshots_dir.is_dir():
-            raise HTTPException(status_code=404, detail="No snapshots available")
+        snapshots_dir, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
+            project_id,
+            "snapshots",
+            engine,
+            expect_directory=True,
+        )
+        if not snapshots_dir:
+            missing_engine = sanitized_engine or inferred_engine
+            detail = "No snapshots available"
+            if missing_engine:
+                detail = f"No snapshots available for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
 
         snapshots_root = snapshots_dir.resolve()
         snap_path = (snapshots_dir / filename).resolve()
         if snapshots_root not in snap_path.parents:
             raise HTTPException(status_code=403, detail="Access denied")
         if not snap_path.exists() or not snap_path.is_file():
-            raise HTTPException(status_code=404, detail="Snapshot not found")
+            missing_engine = sanitized_engine or inferred_engine or resolved_engine
+            detail = "Snapshot not found"
+            if missing_engine:
+                detail = f"Snapshot not found for engine '{missing_engine}'"
+            raise HTTPException(status_code=404, detail=detail)
 
         media_type = "application/octet-stream"
         if snap_path.suffix.lower() == ".ply":
@@ -829,8 +1032,12 @@ def get_preview_download(project_id: str, file_type: str):
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
-        preview_path = project_dir / "outputs" / "previews" / "preview_latest.png"
-        if not preview_path.exists():
+        preview_path, _, _, _ = _find_existing_path(
+            project_id,
+            Path("previews") / "preview_latest.png",
+            None,
+        )
+        if not preview_path:
             raise HTTPException(status_code=404, detail="Preview not available")
 
         return FileResponse(

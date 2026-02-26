@@ -18,6 +18,53 @@ import torch.nn.functional as F
 from torch import Tensor
 from PIL import Image
 
+# Torch Hub downloads (pulled in by torchvision/torchmetrics) spam tqdm progress bars
+# into project processing logs by default. Monkey patch the helpers once so any
+# downstream model weights download quietly.
+try:  # pragma: no cover - defensive guard only
+    import torch.hub as _torch_hub
+except Exception:  # torch hub may not exist in stripped builds
+    _torch_hub = None
+else:
+    _orig_download_url_to_file = _torch_hub.download_url_to_file
+
+    def _download_url_to_file_no_progress(url, dst, hash_prefix=None, progress=True):
+        return _orig_download_url_to_file(url, dst, hash_prefix, False)
+
+    _torch_hub.download_url_to_file = _download_url_to_file_no_progress
+
+    _orig_load_state_dict_from_url = _torch_hub.load_state_dict_from_url
+
+    def _load_state_dict_from_url_no_progress(
+        url,
+        model_dir=None,
+        map_location=None,
+        progress=True,
+        check_hash=False,
+        file_name=None,
+        weights_only=False,
+        **kwargs,
+    ):
+        return _orig_load_state_dict_from_url(
+            url,
+            model_dir,
+            map_location,
+            False,
+            check_hash,
+            file_name,
+            weights_only,
+            **kwargs,
+        )
+
+    _torch_hub.load_state_dict_from_url = _load_state_dict_from_url_no_progress
+
+    try:  # legacy alias used by some deps (lpips, torchvision <= 0.16)
+        import torch.utils.model_zoo as _model_zoo
+
+        _model_zoo.load_url = _torch_hub.load_state_dict_from_url
+    except Exception:
+        pass
+
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
 
@@ -157,7 +204,7 @@ class GsplatTrainer:
         self.convergence_history = []
         self.tuning_history = []
         self.tuner_runs = 0
-    
+
     def _init_gaussians(self):
         """Initialize Gaussian parameters from COLMAP points."""
         points = torch.from_numpy(self.dataset.points).float()
@@ -911,6 +958,7 @@ class GsplatTrainer:
             "scene_scale": self.scene_scale,
             "training_time_seconds": time.time() - start_time,
             "final_metrics": final_metrics,
+            "training_engine": "gsplat",
         }
         
         if self.mode == "modified":

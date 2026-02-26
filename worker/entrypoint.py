@@ -14,9 +14,12 @@ from pathlib import Path
 import time
 
 from .image_resize import prepare_training_images, normalize_max_size
+from .colmap_loader import COLMAPDataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+ENGINE_SUBDIR = "engines"
 
 
 def update_status(
@@ -118,18 +121,25 @@ def update_status(
         logger.error(f"Failed to update status: {e}")
 
 
-def write_metrics(project_dir: Path, metrics: dict):
-    """Write training metrics to metrics.json."""
-    metrics_file = project_dir / "outputs" / "metrics.json"
-    metrics_file.parent.mkdir(parents=True, exist_ok=True)
+def write_metrics(project_dir: Path, metrics: dict, engine: str | None = None):
+    """Write training metrics to metrics.json (engine-specific + legacy root)."""
+    output_root = project_dir / "outputs"
+    targets: list[Path] = []
+    if engine:
+        targets.append(output_root / ENGINE_SUBDIR / engine)
+    targets.append(output_root)
 
-    try:
-        temp_file = metrics_file.with_suffix('.tmp')
-        with open(temp_file, 'w') as f:
-            json.dump(metrics, f, indent=2)
-        temp_file.replace(metrics_file)
-    except Exception as e:
-        logger.error(f"Failed to write metrics: {e}")
+    for root in targets:
+        metrics_file = root / "metrics.json"
+        metrics_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            temp_file = metrics_file.with_suffix('.tmp')
+            with open(temp_file, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            temp_file.replace(metrics_file)
+        except Exception as e:
+            logger.error(f"Failed to write metrics for {root}: {e}")
 
 
 def _ensure_symlink(source: Path, link_path: Path):
@@ -297,6 +307,104 @@ def _cleanup_sqlite_sidecars(db_path: Path):
                 logger.info(f"Removed stale SQLite sidecar: {sidecar}")
             except Exception as e:
                 logger.warning(f"Failed to remove sidecar {sidecar}: {e}")
+
+
+def _select_best_sparse_model(sparse_root: Path, image_dir: Path) -> Path:
+    """Return the sparse reconstruction containing the most registered images/points."""
+    sparse_root = Path(sparse_root)
+    if not sparse_root.exists():
+        raise FileNotFoundError(f"Sparse directory not found: {sparse_root}")
+
+    candidates: list[Path] = []
+    if (sparse_root / "cameras.bin").exists():
+        candidates.append(sparse_root)
+
+    try:
+        children = sorted(p for p in sparse_root.iterdir() if p.is_dir())
+    except Exception as exc:
+        logger.warning("Failed to enumerate sparse subdirectories under %s: %s", sparse_root, exc)
+        children = []
+
+    for child in children:
+        if (child / "cameras.bin").exists():
+            candidates.append(child)
+
+    if not candidates:
+        raise RuntimeError(f"No COLMAP reconstructions found under {sparse_root}")
+
+    best_path = None
+    best_images = -1
+    best_points = -1
+
+    for candidate in candidates:
+        num_images = -1
+        num_points = -1
+        try:
+            dataset = COLMAPDataset(candidate, image_dir)
+            num_images = len(dataset)
+            num_points = len(dataset.points)
+            logger.info(
+                "Sparse candidate %s contains %d images and %d points",
+                candidate,
+                num_images,
+                num_points,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load sparse candidate %s: %s", candidate, exc)
+
+        if num_images > best_images or (num_images == best_images and num_points > best_points):
+            best_path = candidate
+            best_images = num_images
+            best_points = num_points
+
+    if best_path is None:
+        raise RuntimeError(f"Unable to determine best sparse reconstruction under {sparse_root}")
+
+    logger.info(
+        "Selected sparse reconstruction %s (%d images, %d points)",
+        best_path,
+        best_images,
+        best_points,
+    )
+    return best_path
+
+
+def _get_engine_output_dir(base_output_dir: Path, engine: str) -> Path:
+    """Return (and ensure) the engine-specific outputs directory."""
+    engine_dir = base_output_dir / ENGINE_SUBDIR / engine
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    return engine_dir
+
+
+def _sync_engine_artifact_dirs(base_output_dir: Path, engine_output_dir: Path, subdirs: tuple[str, ...]):
+    """Move legacy artifact folders into the engine scope and remove old copies."""
+    for name in subdirs:
+        legacy_dir = base_output_dir / name
+        engine_dir = engine_output_dir / name
+
+        if legacy_dir.exists():
+            if legacy_dir.is_symlink():
+                legacy_dir.unlink(missing_ok=True)
+            elif legacy_dir.is_dir():
+                engine_dir.mkdir(parents=True, exist_ok=True)
+                for item in legacy_dir.iterdir():
+                    target = engine_dir / item.name
+                    if target.exists():
+                        continue
+                    try:
+                        item.rename(target)
+                    except Exception:
+                        shutil.move(str(item), str(target))
+                shutil.rmtree(legacy_dir, ignore_errors=True)
+            else:
+                engine_dir.parent.mkdir(parents=True, exist_ok=True)
+                target = engine_dir / legacy_dir.name
+                try:
+                    legacy_dir.rename(target)
+                except Exception:
+                    shutil.move(str(legacy_dir), str(target))
+
+        engine_dir.mkdir(parents=True, exist_ok=True)
 
 
 def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) -> Path:
@@ -618,17 +726,21 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     from .trainer import GsplatTrainer
     
     logger.info("Starting gsplat training...")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_output_dir = Path(output_dir)
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    engine_name = "gsplat"
+    engine_output_dir = _get_engine_output_dir(base_output_dir, engine_name)
+    _sync_engine_artifact_dirs(base_output_dir, engine_output_dir, ("checkpoints", "previews", "snapshots"))
     
     # Extract parameters
     p = params or {}
     mode = p.get("mode", "baseline")  # "baseline" or "modified"
     max_steps = p.get("max_steps", 300)
-    project_dir = output_dir.parent
+    project_dir = base_output_dir.parent
     training_image_dir = image_dir
     images_max_size = normalize_max_size(p.get("images_max_size"))
 
-    stop_flag = output_dir.parent / "stop_requested"
+    stop_flag = project_dir / "stop_requested"
 
     def stop_checker() -> bool:
         return stop_flag.exists()
@@ -663,7 +775,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
                 timing["eta"] = eta
             # Only one status/progress per substep update
             update_status(
-                output_dir.parent,
+                project_dir,
                 status_text,
                 progress=60 + int(progress * 0.35),
                 mode=mode,
@@ -677,11 +789,11 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
                 message=msg,
                 timing=timing,
             )
-            write_metrics(output_dir.parent, {
+            write_metrics(project_dir, {
                 "step": step,
                 "loss": loss,
                 "progress": progress,
-            })
+            }, engine=engine_name)
     
     # Initialize and run trainer
     # Determine device availability
@@ -716,19 +828,10 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         timing={"start": gsplat_start},
     )
 
-    # Normalize colmap_dir: if provided dir lacks cameras.bin but has a '0' subdir with cameras.bin, use it
-    try:
-        cdir = Path(colmap_dir)
-        if not (cdir / "cameras.bin").exists() and (cdir / "0" / "cameras.bin").exists():
-            colmap_dir = cdir / "0"
-            logger.info("Adjusted colmap_dir to %s (using subfolder 0)", colmap_dir)
-    except Exception:
-        pass
-
     trainer = GsplatTrainer(
         image_dir=training_image_dir,
         colmap_dir=colmap_dir,
-        output_dir=output_dir,
+        output_dir=engine_output_dir,
         mode=mode,
         max_steps=max_steps,
         max_init_gaussians=p.get("gsplat_max_gaussians", None),
@@ -753,14 +856,14 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     logger.info("Saving evaluation metrics...")
     try:
         # Load metrics from adaptive_tuning_results.json if available
-        tuning_results_file = output_dir / "adaptive_tuning_results.json"
+        tuning_results_file = engine_output_dir / "adaptive_tuning_results.json"
         if tuning_results_file.exists():
             with open(tuning_results_file) as f:
                 tuning_data = json.load(f)
                 final_metrics = tuning_data.get("final_evaluation", {})
                 
                 # Save to metadata.json for easy access
-                metadata_file = output_dir / "metadata.json"
+                metadata_file = engine_output_dir / "metadata.json"
                 metadata = {}
                 if metadata_file.exists():
                     with open(metadata_file) as f:
@@ -780,11 +883,19 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         logger.info("Training stopped by user, skipping export and completion status.")
         # Set status to 'stopped' for clarity, and record stopped_stage/stopped_step
         # Try to read most recent metrics (written by progress_callback) for accurate step/progress
-        metrics_file = output_dir.parent / "outputs" / "metrics.json"
+        metrics_candidates = [
+            engine_output_dir / "metrics.json",
+            base_output_dir / "metrics.json",
+        ]
+        metrics_file = None
+        for candidate in metrics_candidates:
+            if candidate.exists():
+                metrics_file = candidate
+                break
         last_progress = None
         last_percentage = None
         last_step = None
-        if metrics_file.exists():
+        if metrics_file and metrics_file.exists():
             try:
                 with open(metrics_file) as f:
                     m = json.load(f)
@@ -801,7 +912,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
                 pass
         # Fallback to status.json if metrics not available
         if last_percentage is None:
-            status_path = output_dir.parent / "status.json"
+            status_path = project_dir / "status.json"
             if status_path.exists():
                 try:
                     with open(status_path) as f:
@@ -819,7 +930,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
             progress_to_write = int(last_progress) if last_progress is not None else 0
 
         update_status(
-            output_dir.parent,
+            project_dir,
             "stopped",
             progress=progress_to_write,
             stage="training",
@@ -835,31 +946,31 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     # Only run export and completion logic if not stopped
     logger.info("Training complete, exporting final checkpoint...")
     update_status(
-        output_dir.parent, "processing", stage="training", stage_progress=100,
+        project_dir, "processing", stage="training", stage_progress=100,
         message="✅ Gsplat training complete",
         timing={"start": gsplat_start, "end": gsplat_end, "elapsed": gsplat_end - gsplat_start}
     )
     update_status(
-        output_dir.parent, "completed", progress=90, stage="training", message="Training done"
+        project_dir, "completed", progress=90, stage="training", message="Training done"
     )
     time.sleep(1.5)
-    update_status(output_dir.parent, "processing", stage="export", stage_progress=10, message="📦 Preparing export of final artifacts...")
-    ckpt_dir = output_dir / "checkpoints"
+    update_status(project_dir, "processing", stage="export", stage_progress=10, message="📦 Preparing export of final artifacts...")
+    ckpt_dir = engine_output_dir / "checkpoints"
     ckpts = sorted(ckpt_dir.glob("ckpt_*.pt"))
     if ckpts:
         latest = ckpts[-1]
         logger.info(f"Exporting checkpoint: {latest}")
-        update_status(output_dir.parent, "processing", stage="export", stage_progress=40, message="📝 Exporting .splat file...")
+        update_status(project_dir, "processing", stage="export", stage_progress=40, message="📝 Exporting .splat file...")
         # Allow stop requests to interrupt export
         if stop_flag.exists():
-            update_status(output_dir.parent, "stopped", progress=0, stop_requested=True, stage="export", message="⏸️ Processing stopped by user before export.", stopped_stage="export")
+            update_status(project_dir, "stopped", progress=0, stop_requested=True, stage="export", message="⏸️ Processing stopped by user before export.", stopped_stage="export")
             try:
                 stop_flag.unlink()
             except Exception:
                 pass
             return None
-        _export_with_gsplat(latest, output_dir)
-        update_status(output_dir.parent, "processing", stage="export", stage_progress=100, message="✅ Export complete")
+        _export_with_gsplat(latest, engine_output_dir)
+        update_status(project_dir, "processing", stage="export", stage_progress=100, message="✅ Export complete")
     else:
         logger.info("No saved checkpoints found; skipping checkpoint export")
 
@@ -1107,12 +1218,10 @@ def main():
             time.sleep(1.5)
             stop_reason = None
         elif stage == "train_only":
-            # Always use outputs/sparse/0 if it exists, else outputs/sparse
-            colmap_dir = output_dir / "sparse"
-            if (colmap_dir / "0").exists():
-                colmap_dir = colmap_dir / "0"
-            elif not (colmap_dir).exists():
+            sparse_root = output_dir / "sparse"
+            if not sparse_root.exists():
                 raise RuntimeError("Sparse model not found. Run COLMAP first.")
+            colmap_dir = _select_best_sparse_model(sparse_root, active_image_dir)
             trainer_label = "LiteGS" if engine == "litegs" else "Gaussian Splatting"
             msg = f"🎯 Starting {trainer_label} training..."
             update_status(project_dir, "processing", progress=55, stage="training", message=msg, engine=engine)
@@ -1126,9 +1235,7 @@ def main():
             colmap_dir = run_colmap(active_image_dir, output_dir, params)
             logger.info("COLMAP completed")
 
-            # Always use outputs/sparse/0 if it exists, else outputs/sparse
-            if (colmap_dir / "0").exists():
-                colmap_dir = colmap_dir / "0"
+            colmap_dir = _select_best_sparse_model(output_dir / "sparse", active_image_dir)
             trainer_label = "LiteGS" if engine == "litegs" else "Gaussian Splatting"
             msg = f"🎯 Starting {trainer_label} training..."
             update_status(project_dir, "processing", progress=55, stage="training", message=msg, engine=engine)
