@@ -1664,6 +1664,118 @@ def get_metrics(project_id: str):
         raise HTTPException(status_code=500, detail="Failed to get metrics")
 
 
+@router.get("/{project_id}/experiment-summary")
+def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
+    """Return an engine-aware summary payload for comparing two runs."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        status_info = status.get_status(project_id)
+        sanitized_engine = _sanitize_engine(engine) if engine is not None else None
+        search_order, inferred_engine = _engine_search_order(project_id, sanitized_engine)
+        selected_engine = search_order[0] if search_order else None
+
+        def _read_json_if_exists(path: Path | None):
+            if path is None or not path.exists():
+                return None
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception as exc:
+                logger.warning("Failed to parse JSON %s: %s", path, exc)
+                return None
+
+        metadata_path, resolved_engine, _, _ = _find_existing_path(project_id, "metadata.json", selected_engine)
+        eval_history_path, _, _, _ = _find_existing_path(project_id, "eval_history.json", selected_engine)
+        tuning_results_path, _, _, _ = _find_existing_path(project_id, "adaptive_tuning_results.json", selected_engine)
+
+        metadata = _read_json_if_exists(metadata_path)
+        eval_history = _read_json_if_exists(eval_history_path) or []
+        tuning_results = _read_json_if_exists(tuning_results_path)
+
+        latest_eval = eval_history[-1] if isinstance(eval_history, list) and eval_history else {}
+        first_eval = eval_history[0] if isinstance(eval_history, list) and eval_history else {}
+
+        # Prefer eval history fields, then final metadata fallback.
+        metrics = {
+            "convergence_speed": latest_eval.get("convergence_speed"),
+            "final_loss": latest_eval.get("final_loss"),
+            "loss_at_1000": latest_eval.get("loss_at_1000"),
+            "loss_at_5000": latest_eval.get("loss_at_5000"),
+            "loss_at_10000": latest_eval.get("loss_at_10000"),
+            "loss_at_20000": latest_eval.get("loss_at_20000"),
+            "lpips_mean": latest_eval.get("lpips_mean"),
+            "sharpness_mean": latest_eval.get("sharpness_mean"),
+            "num_gaussians": latest_eval.get("num_gaussians"),
+        }
+
+        if metadata and isinstance(metadata, dict):
+            final_metrics = metadata.get("final_metrics") if isinstance(metadata.get("final_metrics"), dict) else {}
+            if metrics["convergence_speed"] is None:
+                metrics["convergence_speed"] = final_metrics.get("convergence_speed")
+            if metrics["final_loss"] is None:
+                metrics["final_loss"] = final_metrics.get("final_loss")
+            if metrics["lpips_mean"] is None:
+                metrics["lpips_mean"] = final_metrics.get("lpips_mean")
+            if metrics["sharpness_mean"] is None:
+                metrics["sharpness_mean"] = final_metrics.get("sharpness_mean")
+            if metrics["num_gaussians"] is None:
+                metrics["num_gaussians"] = metadata.get("num_gaussians")
+
+        final_tuning_params = {}
+        initial_tuning_params = {}
+        if isinstance(first_eval, dict):
+            initial_tuning_params = first_eval.get("tuning_params") or {}
+        if isinstance(latest_eval, dict):
+            final_tuning_params = latest_eval.get("tuning_params") or {}
+        if not final_tuning_params and isinstance(metadata, dict):
+            meta_final = metadata.get("final_tuning_params")
+            if isinstance(meta_final, dict):
+                final_tuning_params = meta_final
+
+        tuning_history_count = 0
+        if isinstance(tuning_results, dict):
+            tuning_history = tuning_results.get("tuning_history")
+            if isinstance(tuning_history, list):
+                tuning_history_count = len(tuning_history)
+
+        outputs = files.get_output_files(project_id)
+        preview_url = None
+        if resolved_engine and isinstance(outputs.get("engines"), dict):
+            engine_bundle = outputs["engines"].get(resolved_engine, {})
+            previews = engine_bundle.get("previews", {}) if isinstance(engine_bundle, dict) else {}
+            preview_url = previews.get("latest_url")
+        if not preview_url:
+            previews = outputs.get("previews", {}) if isinstance(outputs, dict) else {}
+            if isinstance(previews, dict):
+                preview_url = previews.get("latest_url")
+
+        return {
+            "project_id": project_id,
+            "name": status_info.get("name"),
+            "status": status_info.get("status"),
+            "mode": status_info.get("mode") or (metadata.get("mode") if isinstance(metadata, dict) else None),
+            "engine": resolved_engine or inferred_engine,
+            "metrics": metrics,
+            "tuning": {
+                "initial": initial_tuning_params,
+                "final": final_tuning_params,
+                "runs": metadata.get("tuning_runs") if isinstance(metadata, dict) else None,
+                "history_count": tuning_history_count,
+            },
+            "preview_url": preview_url,
+            "eval_points": len(eval_history) if isinstance(eval_history, list) else 0,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error building experiment summary for {project_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to build experiment summary")
+
+
 # ==================== COMPARISON ENDPOINTS ====================
 
 @router.post("/comparison", response_model=dict)
