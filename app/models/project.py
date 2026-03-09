@@ -74,6 +74,11 @@ class ProcessParams(BaseModel):
     densify_grad_threshold: Optional[float] = None  # [original]
     opacity_threshold: Optional[float] = None  # [original]
     lambda_dssim: Optional[float] = None  # [original]
+    feature_lr: Optional[float] = None  # [original]
+    opacity_lr: Optional[float] = None  # [original]
+    scaling_lr: Optional[float] = None  # [original]
+    rotation_lr: Optional[float] = None  # [original]
+    percent_dense: Optional[float] = None  # [original]
     splat_export_interval: Optional[int] = None  # [original]
     png_export_interval: Optional[int] = None  # [original]
     # --- CUSTOM PARAMETERS ---
@@ -89,6 +94,7 @@ class ProcessParams(BaseModel):
     litegs_target_primitives: Optional[int] = None  # [custom]
     litegs_alpha_shrink: Optional[float] = None  # [custom]
     sparse_preference: Optional[str] = None  # [custom]
+    sparse_merge_selection: Optional[list[str]] = None  # [custom]
 
 
 class EvaluationMetrics(BaseModel):
@@ -118,3 +124,7 @@ class SparseEditRequest(BaseModel):
     remove_point_ids: list[int]
     create_backup: Optional[bool] = True
     reoptimize: Optional[bool] = False
+
+
+class SparseMergeRequest(BaseModel):
+    selections: list[str]

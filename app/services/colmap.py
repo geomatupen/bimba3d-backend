@@ -101,6 +101,8 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
         "--name", _worker_container_name(project_id),
         "--label", "com.bimba3d.service=worker",
         "--label", f"com.bimba3d.project_id={project_id}",
+        "--ipc", "host",
+        "--shm-size", os.getenv("DOCKER_WORKER_SHM_SIZE", "8g"),
         "--gpus", "all",  # Enable GPU access
         # Mount project data and a writable cache into the container so PyTorch
         # can build extensions without trying to write to '/.cache' inside root.
@@ -108,6 +110,8 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
         "-v", f"{cache_dir}:/data/.cache",
         "-e", "TORCH_EXTENSIONS_DIR=/data/.cache/torch_extensions",
         "-e", "XDG_CACHE_HOME=/data/.cache",
+        "-e", "MPLCONFIGDIR=/data/.cache/matplotlib",
+        "-e", "BIMBA3D_DOCKER_WORKER=1",
         "bimba3d-worker:latest",
         project_id,
         "--data-dir", "/data/projects",

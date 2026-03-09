@@ -63,6 +63,28 @@ RUN set -euo \
 # Install gsplat from PyPI (rendering ops + exporter)
 RUN pip3 install --no-cache-dir gsplat
 
+# Install additional runtime deps required by vendored upstream simple_trainer path
+# (avoid reinstalling torch/gsplat from generic requirements to keep CUDA wheel pinning intact)
+RUN set -euo \
+ && for i in 1 2 3; do \
+            pip3 install --no-cache-dir --timeout 120 \
+                imageio \
+                opencv-python \
+                pycolmap \
+                piexif \
+                scikit-learn \
+                scipy \
+                matplotlib \
+                pyyaml \
+                torchmetrics \
+                tensorboard \
+            && break || sleep 5; \
+        done
+
+# Some wheels pulled by the extra deps may upgrade NumPy to 2.x, which breaks
+# several binary modules used in this stack. Force NumPy back to 1.x ABI.
+RUN pip3 install --no-cache-dir --force-reinstall "numpy<2"
+
 # Create workspace
 WORKDIR /workspace
 

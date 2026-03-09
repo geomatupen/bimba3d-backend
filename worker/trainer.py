@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Optional, Callable
@@ -69,7 +70,7 @@ from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
 
 from .utils import rgb_to_sh, knn, set_random_seed
-from .colmap_loader import COLMAPDataset
+from .gsplat_upstream.datasets.colmap import Parser, Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,11 @@ class GsplatTrainer:
         densify_grad_threshold: float | None = None,  # [original]
         opacity_threshold: float | None = None,  # [original]
         lambda_dssim: float | None = None,  # [original]
+        feature_lr: float = 2.5e-3,  # [original]
+        opacity_lr: float = 5.0e-2,  # [original]
+        scaling_lr: float = 5.0e-3,  # [original]
+        rotation_lr: float = 1.0e-3,  # [original]
+        percent_dense: float = 0.01,  # [original]
         position_lr_init: float = 1.6e-4,  # [original]
         position_lr_final: float = 1.6e-6,  # [original]
         position_lr_delay_mult: float = 0.01,  # [original]
@@ -165,6 +171,7 @@ class GsplatTrainer:
         self.image_dir = Path(image_dir)
         self.colmap_dir = Path(colmap_dir)
         self.output_dir = Path(output_dir)
+        self._staged_data_dir: Optional[Path] = None
         self.mode = mode  # "baseline" or "modified"
         self.max_steps = max_steps
         self.eval_interval = int(eval_interval) if eval_interval is not None else None
@@ -172,6 +179,11 @@ class GsplatTrainer:
         self.position_lr_final = float(position_lr_final)
         self.position_lr_delay_mult = float(position_lr_delay_mult)
         self.position_lr_max_steps = int(position_lr_max_steps)
+        self.feature_lr = float(feature_lr)
+        self.opacity_lr = float(opacity_lr)
+        self.scaling_lr = float(scaling_lr)
+        self.rotation_lr = float(rotation_lr)
+        self.percent_dense = float(percent_dense)
         default_test_iterations = [7_000, 30_000]
         default_save_iterations = [7_000, 30_000, int(self.max_steps)]
         self.test_iterations = sorted(
@@ -288,11 +300,35 @@ class GsplatTrainer:
         if self.png_export_interval:
             self.preview_dir.mkdir(parents=True, exist_ok=True)
         
-        # Load COLMAP data
-        logger.info("Loading COLMAP data...")
-        self.dataset = COLMAPDataset(colmap_dir, image_dir)
-        self.scene_scale = self.dataset.scene_scale * 1.1
-        logger.info(f"Loaded {len(self.dataset)} images, {len(self.dataset.points)} points")
+        # Load COLMAP data using upstream parser path (same normalization/split behavior).
+        logger.info("Loading COLMAP data with upstream parser...")
+        self._staged_data_dir = self._build_upstream_data_layout(self.image_dir, self.colmap_dir, self.output_dir)
+        self.parser = Parser(
+            data_dir=str(self._staged_data_dir),
+            factor=1,
+            normalize=True,
+            test_every=8,
+            load_exposure=False,
+        )
+        self.trainset = Dataset(self.parser, split="train", patch_size=None, load_depths=False)
+        self.valset = Dataset(self.parser, split="val", patch_size=None, load_depths=False)
+        self.scene_scale = self.parser.scene_scale * 1.1
+
+        # Keep compatibility object shape for existing metrics and helper logic.
+        class _DatasetView:
+            def __init__(self, parser: Parser):
+                self.points = parser.points
+                self.points_rgb = parser.points_rgb
+                self.image_names = parser.image_names
+                self.camtoworlds = parser.camtoworlds
+                self.Ks = np.stack([parser.Ks_dict[cid] for cid in parser.camera_ids], axis=0)
+
+            def __len__(self) -> int:
+                return len(self.image_names)
+
+        self.dataset = _DatasetView(self.parser)
+
+        logger.info("Loaded %d images (%d train/%d val), %d points", len(self.parser.image_names), len(self.trainset), len(self.valset), len(self.parser.points))
         logger.info(f"Scene scale: {self.scene_scale:.3f}")
         
         # Initialize Gaussian parameters
@@ -328,7 +364,7 @@ class GsplatTrainer:
             verbose=True,
             prune_opa=self.opacity_threshold,
             grow_grad2d=self.tuning_params["densify_threshold"],
-            grow_scale3d=0.01,
+            grow_scale3d=self.percent_dense,
             grow_scale2d=0.05,
             prune_scale3d=0.1,
             prune_scale2d=0.15,
@@ -351,6 +387,29 @@ class GsplatTrainer:
         self.tuning_history = []
         self.tuner_runs = 0
         self.eval_history: list[dict] = []
+
+    def _build_upstream_data_layout(self, image_dir: Path, colmap_dir: Path, output_dir: Path) -> Path:
+        """Stage a gsplat-compatible dataset layout with images + sparse/0 symlinks."""
+        stage_root = Path(output_dir) / "gsplat_upstream_data"
+        stage_root.mkdir(parents=True, exist_ok=True)
+
+        images_link = stage_root / "images"
+        sparse_root = stage_root / "sparse"
+        sparse_root.mkdir(parents=True, exist_ok=True)
+        sparse_zero_link = sparse_root / "0"
+
+        for link_path, target in ((images_link, image_dir), (sparse_zero_link, colmap_dir)):
+            if link_path.exists() or link_path.is_symlink():
+                try:
+                    if link_path.is_symlink() or link_path.is_file():
+                        link_path.unlink()
+                    else:
+                        shutil.rmtree(link_path)
+                except Exception:
+                    pass
+            os.symlink(str(Path(target).resolve()), str(link_path), target_is_directory=True)
+
+        return stage_root
 
     def _init_gaussians(self):
         """Initialize Gaussian parameters from COLMAP points."""
@@ -405,23 +464,23 @@ class GsplatTrainer:
                 eps=1e-15,
             ),
             "scales": torch.optim.Adam(
-                [{"params": self.splats["scales"], "lr": 5e-3 * lr_scale, "name": "scales"}],
+                [{"params": self.splats["scales"], "lr": self.scaling_lr * lr_scale, "name": "scales"}],
                 eps=1e-15,
             ),
             "quats": torch.optim.Adam(
-                [{"params": self.splats["quats"], "lr": 1e-3 * lr_scale, "name": "quats"}],
+                [{"params": self.splats["quats"], "lr": self.rotation_lr * lr_scale, "name": "quats"}],
                 eps=1e-15,
             ),
             "opacities": torch.optim.Adam(
-                [{"params": self.splats["opacities"], "lr": 2.5e-2 * lr_scale, "name": "opacities"}],
+                [{"params": self.splats["opacities"], "lr": self.opacity_lr * lr_scale, "name": "opacities"}],
                 eps=1e-15,
             ),
             "sh0": torch.optim.Adam(
-                [{"params": self.splats["sh0"], "lr": 2.5e-3 * lr_scale, "name": "sh0"}],
+                [{"params": self.splats["sh0"], "lr": self.feature_lr * lr_scale, "name": "sh0"}],
                 eps=1e-15,
             ),
             "shN": torch.optim.Adam(
-                [{"params": self.splats["shN"], "lr": 2.5e-3 / 20 * lr_scale, "name": "shN"}],
+                [{"params": self.splats["shN"], "lr": self.feature_lr / 20 * lr_scale, "name": "shN"}],
                 eps=1e-15,
             ),
         }
@@ -912,7 +971,7 @@ class GsplatTrainer:
                 logger.info(f"Resuming training from step {start_step}")
         
         # Prepare image indices for training
-        num_images = len(self.dataset)
+        num_images = len(self.trainset)
         train_indices = list(range(num_images))
         
         start_time = time.time()
@@ -928,21 +987,18 @@ class GsplatTrainer:
                 return  # Exit immediately, do not continue or save/export anything
 
             # Random image selection
-            idx = np.random.choice(train_indices)
-            
-            # Load image
-            img_path = self.image_dir / self.dataset.image_names[idx]
+            idx = int(np.random.choice(train_indices))
+
             try:
-                image = Image.open(img_path).convert("RGB")
-                pixels = torch.from_numpy(np.array(image)).float() / 255.0
-                pixels = pixels.to(self.device)
+                batch = self.trainset[idx]
+                pixels = (batch["image"].float() / 255.0).to(self.device)
+                camtoworld = batch["camtoworld"].float().to(self.device)
+                K = batch["K"].float().to(self.device)
             except Exception as e:
-                logger.warning(f"Failed to load image {img_path}: {e}")
+                logger.warning("Failed to load training sample %d: %s", idx, e)
                 continue
-            
-            height, width = pixels.shape[0], pixels.shape[1]
-            camtoworld = torch.from_numpy(self.dataset.camtoworlds[idx]).float().to(self.device)
-            K = torch.from_numpy(self.dataset.Ks[idx]).float().to(self.device)
+
+            height, width = int(pixels.shape[0]), int(pixels.shape[1])
             
             # Match upstream behavior: progressively unlock SH degree every 1000 steps.
             sh_degree_to_use = min(step // self.sh_degree_interval, self.sh_degree)

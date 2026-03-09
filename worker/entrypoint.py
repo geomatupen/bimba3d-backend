@@ -5,24 +5,109 @@ Runs COLMAP + faithful gsplat training (with research hooks) + export.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 import time
 
+import numpy as np
+
 from .image_resize import prepare_training_images, normalize_max_size
-from .colmap_loader import COLMAPDataset
+from .colmap_loader import COLMAPDataset, qvec2rotmat, read_images_binary, read_points3D_binary
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 ENGINE_SUBDIR = "engines"
 BEST_SPARSE_META = ".best_sparse_selection.json"
+SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
+
+
+def _read_registered_image_names(images_bin_path: Path) -> list[str]:
+    """Return sorted registered image names from a COLMAP images.bin file."""
+    try:
+        images = read_images_binary(images_bin_path)
+    except Exception:
+        return []
+
+    names: list[str] = []
+    for entry in images.values():
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    names.sort()
+    return names
+
+
+def _persist_sparse_image_membership(
+    sparse_root: Path,
+    candidate_membership: list[dict],
+):
+    """Persist sparse candidate -> image-name mapping for debugging/verification."""
+    sparse_root = Path(sparse_root)
+    target = sparse_root / SPARSE_IMAGE_MEMBERSHIP_META
+    payload = {
+        "updated_at": time.time(),
+        "candidates": candidate_membership,
+    }
+    try:
+        tmp_target = target.with_suffix(target.suffix + ".tmp")
+        with open(tmp_target, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        tmp_target.replace(target)
+    except Exception as exc:
+        logger.debug("Failed to persist sparse image membership at %s: %s", target, exc)
+
+
+def _run_colmap_image_registration_pass(
+    database_path: Path,
+    image_dir: Path,
+    reconstruction_dir: Path,
+    mapper_refine_focal_length: bool,
+    mapper_refine_principal_point: bool,
+    mapper_refine_extra_params: bool,
+) -> bool:
+    """Try to register additional images into an existing sparse model.
+
+    Returns True when post-registration commands completed without error.
+    """
+    logger.info("COLMAP: image_registrator pass for %s", reconstruction_dir)
+    try:
+        _run_cmd_with_retry([
+            "colmap", "image_registrator",
+            "--database_path", str(database_path),
+            "--input_path", str(reconstruction_dir),
+            "--output_path", str(reconstruction_dir),
+        ])
+        _run_cmd_with_retry([
+            "colmap", "point_triangulator",
+            "--database_path", str(database_path),
+            "--image_path", str(image_dir),
+            "--input_path", str(reconstruction_dir),
+            "--output_path", str(reconstruction_dir),
+            "--Mapper.ba_refine_principal_point", "1" if mapper_refine_principal_point else "0",
+            "--Mapper.ba_refine_focal_length", "1" if mapper_refine_focal_length else "0",
+            "--Mapper.ba_refine_extra_params", "1" if mapper_refine_extra_params else "0",
+        ])
+        _run_cmd_with_retry([
+            "colmap", "bundle_adjuster",
+            "--input_path", str(reconstruction_dir),
+            "--output_path", str(reconstruction_dir),
+            "--BundleAdjustment.refine_principal_point", "1" if mapper_refine_principal_point else "0",
+            "--BundleAdjustment.refine_focal_length", "1" if mapper_refine_focal_length else "0",
+            "--BundleAdjustment.refine_extra_params", "1" if mapper_refine_extra_params else "0",
+        ])
+        return True
+    except Exception as exc:
+        logger.warning("Post-mapper image registration pass failed for %s: %s", reconstruction_dir, exc)
+        return False
 
 
 def update_status(
@@ -448,6 +533,21 @@ def _cleanup_sqlite_sidecars(db_path: Path):
                 logger.warning(f"Failed to remove sidecar {sidecar}: {e}")
 
 
+def _clear_sparse_outputs(sparse_dir: Path):
+    """Remove previous sparse outputs so COLMAP starts from a clean slate."""
+    sparse_dir = Path(sparse_dir)
+    if not sparse_dir.exists():
+        return
+    for child in sparse_dir.iterdir():
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Failed to remove old sparse artifact %s: %s", child, exc)
+
+
 def _persist_best_sparse_choice(sparse_root: Path, best_entry: dict, candidates: list[dict]):
     """Record the strongest sparse candidate so other components can reuse it."""
     sparse_root = Path(sparse_root)
@@ -501,13 +601,16 @@ def _evaluate_sparse_candidates(sparse_root: Path, image_dir: Path) -> list[dict
             candidates.append(child)
 
     summaries: list[dict] = []
+    membership_rows: list[dict] = []
     for candidate in candidates:
         num_images = -1
         num_points = -1
+        image_names: list[str] = []
         try:
             dataset = COLMAPDataset(candidate, image_dir)
             num_images = len(dataset)
             num_points = len(dataset.points)
+            image_names = _read_registered_image_names(candidate / "images.bin")
             logger.info(
                 "Sparse candidate %s contains %d images and %d points",
                 candidate,
@@ -536,8 +639,494 @@ def _evaluate_sparse_candidates(sparse_root: Path, image_dir: Path) -> list[dict
                 "points": max(num_points, 0),
             }
         )
+        membership_rows.append(
+            {
+                "relative_path": rel_path,
+                "label": label,
+                "images": max(num_images, 0),
+                "image_names": image_names,
+            }
+        )
+
+    _persist_sparse_image_membership(sparse_root, membership_rows)
 
     return summaries
+
+
+def _normalize_merge_selection(raw_selection) -> list[str]:
+    if not isinstance(raw_selection, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_selection:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value:
+            continue
+        normalized.append("." if value in {".", "root"} else value)
+    # preserve order while deduplicating
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in normalized:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
+def _build_sparse_merge_signature(sparse_root: Path, selected_rel_paths: list[str]) -> str:
+    pieces: list[str] = []
+    for rel in selected_rel_paths:
+        folder = (sparse_root / rel).resolve()
+        points_path = folder / "points3D.bin"
+        images_path = folder / "images.bin"
+        points_sig = "missing"
+        images_sig = "missing"
+        if points_path.exists():
+            stat = points_path.stat()
+            points_sig = f"{stat.st_mtime_ns}-{stat.st_size}"
+        if images_path.exists():
+            stat = images_path.stat()
+            images_sig = f"{stat.st_mtime_ns}-{stat.st_size}"
+        pieces.append(f"{rel}|{points_sig}|{images_sig}")
+    digest = hashlib.sha1("\n".join(pieces).encode("utf-8")).hexdigest()
+    return digest[:14]
+
+
+def _write_points3d_binary(path: Path, xyz: np.ndarray, rgb: np.ndarray):
+    with open(path, "wb") as handle:
+        handle.write(int(len(xyz)).to_bytes(8, byteorder="little", signed=False))
+        for idx, (point_xyz, point_rgb) in enumerate(zip(xyz, rgb), start=1):
+            handle.write(int(idx).to_bytes(8, byteorder="little", signed=False))
+            handle.write(np.asarray(point_xyz, dtype=np.float64).tobytes())
+            rgb_uint8 = np.asarray(np.clip(point_rgb, 0, 255), dtype=np.uint8)
+            handle.write(rgb_uint8.tobytes())
+            handle.write(np.float64(0.0).tobytes())
+            handle.write((0).to_bytes(8, byteorder="little", signed=False))
+
+
+def _load_camera_centers_by_name(images_bin_path: Path) -> dict[str, np.ndarray]:
+    images = read_images_binary(images_bin_path)
+    centers: dict[str, np.ndarray] = {}
+    for image_data in images.values():
+        name = image_data.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        qvec = np.asarray(image_data.get("qvec"), dtype=np.float64)
+        tvec = np.asarray(image_data.get("tvec"), dtype=np.float64)
+        if qvec.shape != (4,) or tvec.shape != (3,):
+            continue
+        rotation = qvec2rotmat(qvec)
+        center = -rotation.T @ tvec
+        if np.all(np.isfinite(center)):
+            centers[name] = center
+    return centers
+
+
+def _read_images_binary_with_ids(path: Path) -> list[dict]:
+    entries: list[dict] = []
+    with open(path, "rb") as handle:
+        num_images = struct.unpack("Q", handle.read(8))[0]
+        for _ in range(num_images):
+            image_id = struct.unpack("I", handle.read(4))[0]
+            qw, qx, qy, qz = struct.unpack("dddd", handle.read(32))
+            tx, ty, tz = struct.unpack("ddd", handle.read(24))
+            camera_id = struct.unpack("I", handle.read(4))[0]
+            name_bytes = b""
+            while True:
+                ch = handle.read(1)
+                if ch == b"\x00":
+                    break
+                if not ch:
+                    raise ValueError("Unexpected EOF while reading image name")
+                name_bytes += ch
+            name = name_bytes.decode("utf-8")
+            num_points = struct.unpack("Q", handle.read(8))[0]
+            # Skip x,y,point3D_id tuples
+            handle.read(24 * num_points)
+            entries.append(
+                {
+                    "image_id": int(image_id),
+                    "qvec": np.array([qw, qx, qy, qz], dtype=np.float64),
+                    "tvec": np.array([tx, ty, tz], dtype=np.float64),
+                    "camera_id": int(camera_id),
+                    "name": name,
+                }
+            )
+    return entries
+
+
+def _write_images_binary(path: Path, images: list[dict]):
+    with open(path, "wb") as handle:
+        handle.write(struct.pack("<Q", len(images)))
+        for idx, image in enumerate(images, start=1):
+            qvec = np.asarray(image["qvec"], dtype=np.float64)
+            tvec = np.asarray(image["tvec"], dtype=np.float64)
+            name = str(image["name"])
+            camera_id = int(image["camera_id"])
+
+            handle.write(struct.pack("<I", idx))
+            handle.write(struct.pack("<dddd", float(qvec[0]), float(qvec[1]), float(qvec[2]), float(qvec[3])))
+            handle.write(struct.pack("<ddd", float(tvec[0]), float(tvec[1]), float(tvec[2])))
+            handle.write(struct.pack("<I", camera_id))
+            handle.write(name.encode("utf-8") + b"\x00")
+            # No point2D tracks in merged views.
+            handle.write(struct.pack("<Q", 0))
+
+
+def _rotmat2qvec(rot: np.ndarray) -> np.ndarray:
+    """Convert a rotation matrix to a unit quaternion (qw, qx, qy, qz)."""
+    r = np.asarray(rot, dtype=np.float64)
+    if r.shape != (3, 3):
+        raise ValueError("Rotation matrix must be 3x3")
+
+    trace = float(np.trace(r))
+    if trace > 0.0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        qw = 0.25 / s
+        qx = (r[2, 1] - r[1, 2]) * s
+        qy = (r[0, 2] - r[2, 0]) * s
+        qz = (r[1, 0] - r[0, 1]) * s
+    else:
+        if r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+            s = 2.0 * np.sqrt(max(1.0 + r[0, 0] - r[1, 1] - r[2, 2], 1e-12))
+            qw = (r[2, 1] - r[1, 2]) / s
+            qx = 0.25 * s
+            qy = (r[0, 1] + r[1, 0]) / s
+            qz = (r[0, 2] + r[2, 0]) / s
+        elif r[1, 1] > r[2, 2]:
+            s = 2.0 * np.sqrt(max(1.0 + r[1, 1] - r[0, 0] - r[2, 2], 1e-12))
+            qw = (r[0, 2] - r[2, 0]) / s
+            qx = (r[0, 1] + r[1, 0]) / s
+            qy = 0.25 * s
+            qz = (r[1, 2] + r[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(max(1.0 + r[2, 2] - r[0, 0] - r[1, 1], 1e-12))
+            qw = (r[1, 0] - r[0, 1]) / s
+            qx = (r[0, 2] + r[2, 0]) / s
+            qy = (r[1, 2] + r[2, 1]) / s
+            qz = 0.25 * s
+
+    q = np.array([qw, qx, qy, qz], dtype=np.float64)
+    q_norm = np.linalg.norm(q)
+    if q_norm <= 1e-12:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return q / q_norm
+
+
+def _transform_source_image_pose(
+    qvec: np.ndarray,
+    tvec: np.ndarray,
+    scale: float,
+    rot: np.ndarray,
+    trans: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Transform source world pose to anchor world frame and return (qvec, tvec) world-to-camera."""
+    r_cw_src = qvec2rotmat(np.asarray(qvec, dtype=np.float64))
+    r_wc_src = r_cw_src.T
+    c_src = -r_wc_src @ np.asarray(tvec, dtype=np.float64)
+
+    c_dst = (float(scale) * (rot @ c_src)) + trans
+    r_wc_dst = rot @ r_wc_src
+    r_cw_dst = r_wc_dst.T
+    t_dst = -r_cw_dst @ c_dst
+    q_dst = _rotmat2qvec(r_cw_dst)
+    return q_dst, np.asarray(t_dst, dtype=np.float64)
+
+
+def _camera_pose_rmse(overlap: list[str], source_images: dict[int, dict], anchor_centers: dict[str, np.ndarray], scale: float, rot: np.ndarray, trans: np.ndarray) -> float:
+    errs: list[float] = []
+    by_name = {entry.get("name"): entry for entry in source_images.values() if isinstance(entry, dict)}
+    for name in overlap:
+        src_entry = by_name.get(name)
+        dst_center = anchor_centers.get(name)
+        if not src_entry or dst_center is None:
+            continue
+        r_cw_src = qvec2rotmat(np.asarray(src_entry.get("qvec"), dtype=np.float64))
+        c_src = -r_cw_src.T @ np.asarray(src_entry.get("tvec"), dtype=np.float64)
+        c_est = (float(scale) * (rot @ c_src)) + trans
+        errs.append(float(np.linalg.norm(c_est - dst_center)))
+    if not errs:
+        return float("inf")
+    return float(np.sqrt(np.mean(np.square(errs))))
+
+
+def _estimate_similarity_transform(src_pts: np.ndarray, dst_pts: np.ndarray) -> tuple[float, np.ndarray, np.ndarray] | None:
+    """Estimate dst ≈ s * R @ src + t using Umeyama alignment."""
+    if src_pts.shape != dst_pts.shape or src_pts.shape[0] < 3 or src_pts.shape[1] != 3:
+        return None
+
+    src_mean = src_pts.mean(axis=0)
+    dst_mean = dst_pts.mean(axis=0)
+    src_centered = src_pts - src_mean
+    dst_centered = dst_pts - dst_mean
+
+    src_var = float(np.sum(src_centered ** 2) / src_pts.shape[0])
+    if src_var <= 1e-12:
+        return None
+
+    cov = (dst_centered.T @ src_centered) / src_pts.shape[0]
+    try:
+        u, singular_vals, vh = np.linalg.svd(cov)
+    except Exception:
+        return None
+    d = np.ones(3, dtype=np.float64)
+    if np.linalg.det(u @ vh) < 0:
+        d[-1] = -1.0
+    r = u @ np.diag(d) @ vh
+    scale = float((singular_vals * d).sum() / src_var)
+    t = dst_mean - scale * (r @ src_mean)
+
+    if not np.isfinite(scale) or not np.all(np.isfinite(r)) or not np.all(np.isfinite(t)):
+        return None
+    return scale, r, t
+
+
+def _align_points_to_anchor(
+    source_xyz: np.ndarray,
+    source_images_bin: Path,
+    anchor_centers: dict[str, np.ndarray],
+) -> tuple[np.ndarray | None, dict]:
+    try:
+        source_centers = _load_camera_centers_by_name(source_images_bin)
+    except Exception:
+        return None, {"aligned": False, "reason": "invalid_images_bin", "overlap_images": 0}
+    overlap = sorted(set(anchor_centers.keys()) & set(source_centers.keys()))
+    if len(overlap) < 3:
+        return None, {"aligned": False, "reason": "insufficient_overlap", "overlap_images": len(overlap)}
+
+    src = np.asarray([source_centers[name] for name in overlap], dtype=np.float64)
+    dst = np.asarray([anchor_centers[name] for name in overlap], dtype=np.float64)
+    transform = _estimate_similarity_transform(src, dst)
+    if transform is None:
+        return None, {"aligned": False, "reason": "failed_transform", "overlap_images": len(overlap)}
+
+    scale, rot, trans = transform
+    aligned = (scale * (rot @ source_xyz.T)).T + trans
+    if not np.all(np.isfinite(aligned)):
+        return None, {"aligned": False, "reason": "non_finite_aligned_points", "overlap_images": len(overlap)}
+
+    return aligned, {
+        "aligned": True,
+        "overlap_images": len(overlap),
+        "scale": float(scale),
+    }
+
+
+def _create_merged_sparse_model(sparse_root: Path, candidates: list[dict], selected_rel_paths: list[str]) -> Path:
+    score_map = {entry.get("relative_path"): entry for entry in candidates}
+    selected = [score_map[rel] for rel in selected_rel_paths if rel in score_map]
+    if len(selected) < 2:
+        raise RuntimeError("Sparse merge requested, but fewer than two valid candidates were selected")
+
+    def _score(entry: dict) -> tuple[int, int]:
+        return int(entry.get("images", 0) or 0), int(entry.get("points", 0) or 0)
+
+    anchor = max(selected, key=_score)
+    anchor_rel = anchor.get("relative_path") or "."
+    anchor_dir = (sparse_root / anchor_rel).resolve()
+
+    merge_root = sparse_root / "_merged"
+    merge_root.mkdir(parents=True, exist_ok=True)
+    signature = _build_sparse_merge_signature(sparse_root, selected_rel_paths)
+    merged_dir = merge_root / f"selection_{signature}"
+
+    required = [merged_dir / "cameras.bin", merged_dir / "images.bin", merged_dir / "points3D.bin"]
+    if all(path.exists() for path in required):
+        logger.info("Reusing cached merged sparse model: %s", merged_dir)
+        return merged_dir
+
+    tmp_dir = merge_root / f".tmp_selection_{signature}_{int(time.time())}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(anchor_dir / "cameras.bin", tmp_dir / "cameras.bin")
+    shutil.copy2(anchor_dir / "images.bin", tmp_dir / "images.bin")
+    anchor_centers = _load_camera_centers_by_name(anchor_dir / "images.bin")
+
+    merged_xyz: list[np.ndarray] = []
+    merged_rgb: list[np.ndarray] = []
+    merged_images = _read_images_binary_with_ids(anchor_dir / "images.bin")
+    known_image_names = {entry.get("name") for entry in merged_images}
+    allowed_camera_ids = {int(entry.get("camera_id")) for entry in merged_images if entry.get("camera_id") is not None}
+    source_details: list[dict] = []
+    for entry in selected:
+        rel = entry.get("relative_path") or "."
+        source_dir = (sparse_root / rel).resolve()
+        points_path = source_dir / "points3D.bin"
+        if not points_path.exists():
+            logger.warning("Skipping sparse candidate without points3D.bin: %s", source_dir)
+            source_details.append({"relative_path": rel, "used": False, "reason": "missing_points3D.bin"})
+            continue
+        xyz, rgb = read_points3D_binary(points_path)
+        if len(xyz) == 0:
+            source_details.append({"relative_path": rel, "used": False, "reason": "empty_points"})
+            continue
+
+        xyz_source = np.asarray(xyz, dtype=np.float64)
+        if rel == anchor_rel:
+            aligned_xyz = xyz_source
+            align_info = {"aligned": True, "anchor": True, "overlap_images": len(anchor_centers), "scale": 1.0}
+        else:
+            aligned_xyz, align_info = _align_points_to_anchor(
+                xyz_source,
+                source_dir / "images.bin",
+                anchor_centers,
+            )
+            if aligned_xyz is None:
+                logger.warning(
+                    "Skipping sparse candidate %s due to alignment failure (%s)",
+                    rel,
+                    align_info.get("reason"),
+                )
+                source_details.append({"relative_path": rel, "used": False, **align_info})
+                continue
+
+            source_images = read_images_binary(source_dir / "images.bin")
+            source_centers = _load_camera_centers_by_name(source_dir / "images.bin")
+            overlap = sorted(set(anchor_centers.keys()) & set(source_centers.keys()))
+            transform = _estimate_similarity_transform(
+                np.asarray([source_centers[name] for name in overlap], dtype=np.float64),
+                np.asarray([anchor_centers[name] for name in overlap], dtype=np.float64),
+            )
+            added_images = 0
+            discarded_images = 0
+            if transform is None:
+                discarded_images = len(source_images)
+                align_info["camera_merge"] = "skipped_failed_transform"
+            else:
+                scale, rot, trans = transform
+                rmse = _camera_pose_rmse(overlap, source_images, anchor_centers, scale, rot, trans)
+                align_info["camera_fit_rmse"] = rmse
+                if not np.isfinite(rmse) or rmse > 2.0:
+                    # Discard all source images if fit is poor.
+                    discarded_images = len(source_images)
+                    align_info["camera_merge"] = "discarded_high_fit_error"
+                else:
+                    for src in source_images.values():
+                        name = src.get("name")
+                        if name in known_image_names:
+                            discarded_images += 1
+                            continue
+                        cam_id = int(src.get("camera_id"))
+                        if cam_id not in allowed_camera_ids:
+                            discarded_images += 1
+                            continue
+                        try:
+                            q_dst, t_dst = _transform_source_image_pose(
+                                np.asarray(src.get("qvec"), dtype=np.float64),
+                                np.asarray(src.get("tvec"), dtype=np.float64),
+                                scale,
+                                rot,
+                                trans,
+                            )
+                        except Exception:
+                            discarded_images += 1
+                            continue
+                        if not (np.all(np.isfinite(q_dst)) and np.all(np.isfinite(t_dst))):
+                            discarded_images += 1
+                            continue
+                        merged_images.append(
+                            {
+                                "qvec": q_dst,
+                                "tvec": t_dst,
+                                "camera_id": cam_id,
+                                "name": str(name),
+                            }
+                        )
+                        known_image_names.add(str(name))
+                        added_images += 1
+                    align_info["camera_merge"] = "ok"
+            align_info["added_images"] = added_images
+            align_info["discarded_images"] = discarded_images
+
+        merged_xyz.append(aligned_xyz)
+        merged_rgb.append(np.asarray(rgb, dtype=np.uint8))
+        source_details.append(
+            {
+                "relative_path": rel,
+                "used": True,
+                "points": int(len(xyz_source)),
+                **align_info,
+            }
+        )
+
+    if len(merged_xyz) < 2:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise RuntimeError(
+            "Sparse merge needs at least two alignable reconstructions with overlapping registered images"
+        )
+
+    xyz_concat = np.concatenate(merged_xyz, axis=0)
+    rgb_concat = np.concatenate(merged_rgb, axis=0)
+    _write_points3d_binary(tmp_dir / "points3D.bin", xyz_concat, rgb_concat)
+    _write_images_binary(tmp_dir / "images.bin", merged_images)
+
+    merge_meta = {
+        "anchor_relative_path": anchor_rel,
+        "selected_relative_paths": selected_rel_paths,
+        "merged_points": int(len(xyz_concat)),
+        "merged_images": int(len(merged_images)),
+        "created_at": time.time(),
+        "alignment": "similarity_transform_from_overlapping_camera_centers",
+        "source_details": source_details,
+    }
+    with open(tmp_dir / "merge_meta.json", "w", encoding="utf-8") as handle:
+        json.dump(merge_meta, handle, indent=2)
+
+    if merged_dir.exists():
+        shutil.rmtree(merged_dir, ignore_errors=True)
+    tmp_dir.rename(merged_dir)
+    logger.info(
+        "Created merged sparse model %s from %s folders (%s points total)",
+        merged_dir,
+        len(selected_rel_paths),
+        len(xyz_concat),
+    )
+    return merged_dir
+
+
+def _resolve_sparse_model_for_training(
+    sparse_root: Path,
+    image_dir: Path,
+    preference: str | None = None,
+    merge_selection: list[str] | None = None,
+) -> Path:
+    sparse_root = Path(sparse_root)
+    pref = (preference or "best").strip().lower()
+    if pref != "merge_selected":
+        return _select_best_sparse_model(sparse_root, image_dir, preference)
+
+    summaries = _evaluate_sparse_candidates(sparse_root, image_dir)
+    if not summaries:
+        raise RuntimeError(f"No COLMAP reconstructions found under {sparse_root}")
+
+    selected_rel_paths = _normalize_merge_selection(merge_selection)
+    if not selected_rel_paths:
+        logger.warning("merge_selected requested, but no folders were provided; falling back to best")
+        return _select_best_sparse_model(sparse_root, image_dir, "best")
+
+    score_map = {entry.get("relative_path"): entry for entry in summaries}
+    valid = [rel for rel in selected_rel_paths if rel in score_map]
+    invalid = [rel for rel in selected_rel_paths if rel not in score_map]
+    if invalid:
+        logger.warning("Ignoring invalid sparse merge selections: %s", invalid)
+
+    if len(valid) == 0:
+        logger.warning("No valid sparse merge selections remained; falling back to best")
+        return _select_best_sparse_model(sparse_root, image_dir, "best")
+    if len(valid) == 1:
+        logger.info("Only one sparse selection provided for merge; using %s directly", valid[0])
+        return _select_best_sparse_model(sparse_root, image_dir, valid[0])
+
+    _persist_best_sparse_choice(
+        sparse_root,
+        max(summaries, key=lambda entry: (int(entry.get("images", 0) or 0), int(entry.get("points", 0) or 0))),
+        summaries,
+    )
+    return _create_merged_sparse_model(sparse_root, summaries, valid)
 
 
 def _select_best_sparse_model(sparse_root: Path, image_dir: Path, preference: str | None = None) -> Path:
@@ -545,6 +1134,16 @@ def _select_best_sparse_model(sparse_root: Path, image_dir: Path, preference: st
     sparse_root = Path(sparse_root)
     if not sparse_root.exists():
         raise FileNotFoundError(f"Sparse directory not found: {sparse_root}")
+
+    pref = (preference or "best").strip()
+    if pref and pref.lower() != "best":
+        direct_rel = "." if pref in {".", "root"} else pref
+        direct_target = (sparse_root / direct_rel).resolve()
+        base = sparse_root.resolve()
+        if direct_target == base or base in direct_target.parents:
+            if all((direct_target / name).exists() for name in ("cameras.bin", "images.bin", "points3D.bin")):
+                logger.info("Using explicitly selected sparse candidate path '%s'", direct_rel)
+                return direct_target
 
     summaries = _evaluate_sparse_candidates(sparse_root, image_dir)
     if not summaries:
@@ -557,7 +1156,6 @@ def _select_best_sparse_model(sparse_root: Path, image_dir: Path, preference: st
     _persist_best_sparse_choice(sparse_root, best_entry, summaries)
 
     chosen_entry = best_entry
-    pref = (preference or "best").strip()
     if pref and pref.lower() != "best":
         norm = pref.lower()
         for entry in summaries:
@@ -656,6 +1254,15 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
     # allow colmap tuning via params.colmap
     p = params.get("colmap", {}) if isinstance(params, dict) else {}
 
+    mapper_refine_principal_point = bool(p.get("mapper_refine_principal_point", True))
+    mapper_refine_focal_length = bool(p.get("mapper_refine_focal_length", True))
+    mapper_refine_extra_params = bool(p.get("mapper_refine_extra_params", True))
+    clean_sparse_before_run = bool(p.get("clean_sparse_before_run", True))
+
+    if clean_sparse_before_run:
+        logger.info("Clearing previous sparse outputs under %s", sparse_dir)
+        _clear_sparse_outputs(sparse_dir)
+
     logger.info("COLMAP: Feature extraction...")
     update_status(
         output_dir.parent, "processing", progress=5, stage="colmap", stage_progress=10,
@@ -683,6 +1290,8 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
         feat_cmd += ["--SiftExtraction.max_image_size", "1600"]
     if p.get("peak_threshold") is not None:
         feat_cmd += ["--SiftExtraction.peak_threshold", str(p.get("peak_threshold"))]
+    if p.get("max_num_features") is not None:
+        feat_cmd += ["--SiftExtraction.max_num_features", str(p.get("max_num_features"))]
     try:
         _run_cmd_with_retry(feat_cmd)
     except subprocess.CalledProcessError as e:
@@ -720,6 +1329,9 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
         match_cmd = ["colmap", "exhaustive_matcher", "--database_path", str(database_path)]
     if guided is not None:
         match_cmd += ["--SiftMatching.guided_matching", "1" if guided else "0"]
+    if p.get("sift_matching_min_num_inliers") is not None:
+        # Compatibility: many COLMAP builds expose this under TwoViewGeometry, not SiftMatching.
+        match_cmd += ["--TwoViewGeometry.min_num_inliers", str(p.get("sift_matching_min_num_inliers"))]
     try:
         _run_cmd_with_retry(match_cmd)
     except subprocess.CalledProcessError as e:
@@ -744,12 +1356,30 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
         update_status(output_dir.parent, "stopped", progress=0, stop_requested=True, stage="colmap", message="⏸️ Processing stopped by user before sparse reconstruction.", stopped_stage="colmap")
         sys.exit(0)
     try:
-        mapper_cmd = ["colmap", "mapper", "--database_path", str(database_path), "--image_path", str(image_dir), "--output_path", str(sparse_dir), "--Mapper.ba_refine_principal_point", "1", "--Mapper.ba_refine_focal_length", "1", "--Mapper.ba_refine_extra_params", "1"]
+        mapper_cmd = [
+            "colmap", "mapper",
+            "--database_path", str(database_path),
+            "--image_path", str(image_dir),
+            "--output_path", str(sparse_dir),
+            "--Mapper.ba_refine_principal_point", "1" if mapper_refine_principal_point else "0",
+            "--Mapper.ba_refine_focal_length", "1" if mapper_refine_focal_length else "0",
+            "--Mapper.ba_refine_extra_params", "1" if mapper_refine_extra_params else "0",
+        ]
         if p.get("mapper_num_threads"):
             mapper_cmd += ["--Mapper.num_threads", str(p.get("mapper_num_threads"))]
         else:
             # Default to 2 mapper threads to reduce memory usage
             mapper_cmd += ["--Mapper.num_threads", "2"]
+        if p.get("mapper_min_num_matches") is not None:
+            mapper_cmd += ["--Mapper.min_num_matches", str(p.get("mapper_min_num_matches"))]
+        if p.get("mapper_abs_pose_min_num_inliers") is not None:
+            mapper_cmd += ["--Mapper.abs_pose_min_num_inliers", str(p.get("mapper_abs_pose_min_num_inliers"))]
+        if p.get("mapper_abs_pose_min_inlier_ratio") is not None:
+            mapper_cmd += ["--Mapper.abs_pose_min_inlier_ratio", str(p.get("mapper_abs_pose_min_inlier_ratio"))]
+        if p.get("mapper_init_min_num_inliers") is not None:
+            mapper_cmd += ["--Mapper.init_min_num_inliers", str(p.get("mapper_init_min_num_inliers"))]
+        if p.get("mapper_filter_max_reproj_error") is not None:
+            mapper_cmd += ["--Mapper.filter_max_reproj_error", str(p.get("mapper_filter_max_reproj_error"))]
         # Do not capture stdout/stderr into pipes here; allow the child to inherit the
         # container's stdout/stderr so COLMAP can stream directly to Docker logs.
         # Capturing into pipes without continuously reading can lead to pipe buffer
@@ -817,6 +1447,23 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
     if not reconstruction_dirs:
         raise RuntimeError("COLMAP reconstruction failed - no output")
 
+    # Optional second-pass registration recovers images that failed initial mapper pass.
+    run_image_registrator = bool(p.get("run_image_registrator", True))
+    if run_image_registrator:
+        improved_dirs: list[Path] = []
+        for recon_dir in reconstruction_dirs:
+            if _run_colmap_image_registration_pass(
+                database_path,
+                image_dir,
+                recon_dir,
+                mapper_refine_focal_length=mapper_refine_focal_length,
+                mapper_refine_principal_point=mapper_refine_principal_point,
+                mapper_refine_extra_params=mapper_refine_extra_params,
+            ):
+                improved_dirs.append(recon_dir)
+        if improved_dirs:
+            logger.info("COLMAP: post-registration completed for %d sparse model(s)", len(improved_dirs))
+
     # Convert COLMAP outputs into lightweight points.bin files for the frontend
     converter = None
     try:
@@ -866,6 +1513,8 @@ def _export_with_gsplat(checkpoint_path: Path, output_dir: Path):
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         state = ckpt["state_dict"]
+    elif isinstance(ckpt, dict) and "splats" in ckpt and isinstance(ckpt["splats"], dict):
+        state = ckpt["splats"]
     else:
         state = ckpt if isinstance(ckpt, dict) else {}
 
@@ -947,83 +1596,67 @@ def _export_with_gsplat(checkpoint_path: Path, output_dir: Path):
 
 
 def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, params: dict, resume: bool = False):
-    """Run faithful gsplat training with research intervention hooks."""
-    from .trainer import GsplatTrainer
-    
-    logger.info("Starting gsplat training...")
+    """Run upstream simple_trainer-compatible gsplat training."""
+    from .gsplat_upstream.simple_trainer import Config, DefaultStrategy, Runner
+
+    logger.info("Starting gsplat training (upstream simple_trainer path)...")
     base_output_dir = Path(output_dir)
     base_output_dir.mkdir(parents=True, exist_ok=True)
     engine_name = "gsplat"
     engine_output_dir = _get_engine_output_dir(base_output_dir, engine_name)
     _sync_engine_artifact_dirs(base_output_dir, engine_output_dir, ("checkpoints", "previews", "snapshots"))
-    
-    # Extract parameters
-    p = params or {}
-    mode = p.get("mode", "baseline")  # "baseline" or "modified"
-    max_steps = int(p.get("max_steps", 30_000))
-    tune_start_step = 50
-    tune_end_step = max(tune_start_step, int(p.get("tune_end_step", 300)))
-    project_dir = base_output_dir.parent
-    training_image_dir = image_dir
-    images_max_size = normalize_max_size(p.get("images_max_size"))
 
+    p = params or {}
+    mode = p.get("mode", "baseline")
+    max_steps = int(p.get("max_steps", 30_000))
+    project_dir = base_output_dir.parent
     stop_flag = project_dir / "stop_requested"
+    gsplat_start = time.time()
 
     def stop_checker() -> bool:
         return stop_flag.exists()
-    
-    # Track gsplat training timing
-    gsplat_start = time.time()
-    # Progress callback for status updates (single status text per substep)
-    def progress_callback(step, progress, loss, last_tuning=None):
-        # Only update every 100 steps to avoid I/O overhead
-        if step % 100 == 0:
-            requested_stop = stop_checker()
-            status_text = "stopping" if requested_stop else "processing"
-            # Compose a single, clear status message for this substep
-            if requested_stop:
-                msg = f"⏸️ Stopping after step {step}/{max_steps} completes (loss: {loss:.6f})..."
-            elif progress < 0.1:
-                msg = f"🎯 Training step {step}/{max_steps} - Initial optimization (loss: {loss:.6f})"
-            elif progress < 0.3:
-                msg = f"🔧 Training step {step}/{max_steps} - Refining gaussians (loss: {loss:.6f})"
-            elif progress < 0.7:
-                msg = f"✨ Training step {step}/{max_steps} - Optimizing quality (loss: {loss:.6f})"
-            else:
-                msg = f"🎨 Training step {step}/{max_steps} - Final refinement (loss: {loss:.6f})"
-            if mode == "modified" and tune_start_step <= step <= tune_end_step:
-                msg += " [Adaptive tuning active]"
-            # Estimate elapsed and ETA for gsplat
-            now = time.time()
-            elapsed = now - gsplat_start
-            eta = (elapsed / (progress if progress > 0 else 1e-6)) * (1 - progress) if progress > 0 else None
-            timing = {"start": gsplat_start, "elapsed": elapsed}
-            if eta is not None:
-                timing["eta"] = eta
-            # Only one status/progress per substep update
-            update_status(
-                project_dir,
-                status_text,
-                progress=60 + int(progress * 0.35),
-                mode=mode,
-                currentStep=step,
-                maxSteps=max_steps,
-                tuning_active=(mode == "modified" and tune_start_step <= step <= tune_end_step),
-                last_tuning=last_tuning,
-                stop_requested=requested_stop,
-                stage="training",
-                stage_progress=int(max(0, min(100, progress * 100))),
-                message=msg,
-                timing=timing,
-            )
-            write_metrics(project_dir, {
-                "step": step,
-                "loss": loss,
-                "progress": progress,
-            }, engine=engine_name)
-    
-    # Initialize and run trainer
-    # Determine device availability
+
+    def progress_callback(step: int, max_steps: int, loss: float) -> None:
+        requested_stop = stop_checker()
+        status_text = "stopping" if requested_stop else "processing"
+        progress_fraction = 0.0 if max_steps <= 0 else float(step) / float(max_steps)
+        progress_fraction = max(0.0, min(1.0, progress_fraction))
+        message = (
+            f"⏸️ Stopping after step {step}/{max_steps} completes (loss: {loss:.6f})..."
+            if requested_stop
+            else f"🎯 Training step {step}/{max_steps} (loss: {loss:.6f})"
+        )
+
+        now = time.time()
+        elapsed = now - gsplat_start
+        eta = (
+            (elapsed / progress_fraction) * (1 - progress_fraction)
+            if progress_fraction > 0
+            else None
+        )
+        timing = {"start": gsplat_start, "elapsed": elapsed}
+        if eta is not None:
+            timing["eta"] = eta
+
+        update_status(
+            project_dir,
+            status_text,
+            progress=60 + int(progress_fraction * 35),
+            mode=mode,
+            currentStep=step,
+            maxSteps=max_steps,
+            stop_requested=requested_stop,
+            stage="training",
+            stage_progress=int(progress_fraction * 100),
+            message=message,
+            timing=timing,
+        )
+        write_metrics(project_dir, {
+            "step": step,
+            "loss": loss,
+            "progress": progress_fraction,
+        }, engine=engine_name)
+
     try:
         import torch
         cuda_ok = torch.cuda.is_available()
@@ -1031,18 +1664,9 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         cuda_ok = False
     device = "cuda" if (p.get("use_cuda", True) and cuda_ok) else "cpu"
 
-    # Log the received params for debugging
-    try:
-        logger.info(f"Worker params: {p}")
-        logger.info(f"Top-level params (raw): {params}")
-    except Exception:
-        pass
-
-    init_message = f"🚀 Initializing Gaussian Splatting trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'}, {mode} mode)..."
-    if images_max_size:
-        init_message = (
-            f"{init_message}\n📐 Input images limited to ≤ {images_max_size}px"
-        )
+    if stop_flag.exists():
+        update_status(project_dir, "stopped", progress=55, stage="training", message="⏸️ Processing stopped before gsplat training.", stop_requested=True, stopped_stage="training")
+        return 0
 
     update_status(
         project_dir,
@@ -1050,52 +1674,102 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
         progress=55,
         stage="training",
         stage_progress=0,
-        message=init_message,
+        message=f"🚀 Initializing upstream simple_trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'})...",
         mode=mode,
         timing={"start": gsplat_start},
     )
 
-    # Frontend-provided parameters are honored for both baseline and modified modes.
-    # The `mode` flag only controls algorithmic behavior inside the trainer (e.g. tuner logic).
+    dataset_dir = engine_output_dir / "simple_trainer_data"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    images_link = dataset_dir / "images"
+    sparse_zero = dataset_dir / "sparse" / "0"
+    sparse_zero.parent.mkdir(parents=True, exist_ok=True)
+    for link_path, target in ((images_link, image_dir), (sparse_zero, colmap_dir)):
+        if link_path.exists() or link_path.is_symlink():
+            try:
+                if link_path.is_symlink() or link_path.is_file():
+                    link_path.unlink()
+                else:
+                    shutil.rmtree(link_path)
+            except Exception:
+                pass
+        os.symlink(str(Path(target).resolve()), str(link_path), target_is_directory=True)
 
-    trainer = GsplatTrainer(
-        image_dir=training_image_dir,
-        colmap_dir=colmap_dir,
-        output_dir=engine_output_dir,
-        mode=mode,
-        max_steps=max_steps,
-        eval_interval=p.get("eval_interval", 1000),
-        max_init_gaussians=p.get("gsplat_max_gaussians", None),
-        amp_enabled=bool(p.get("amp", False)),
-        pruning_enabled=bool(p.get("pruning_enabled", False)),
-        pruning_policy=p.get("pruning_policy", "opacity"),
-        pruning_weights=p.get("pruning_weights", {}),
-        progress_callback=progress_callback,
-        splat_export_interval=p.get("splat_export_interval"),
-        png_export_interval=p.get("png_export_interval"),
-        checkpoint_interval=p.get("save_interval"),
-        auto_early_stop=bool(p.get("auto_early_stop", False)),
-        tune_end_step=tune_end_step,
-        stop_checker=stop_checker,
-        resume=resume,
-        densify_from_iter=p.get("densify_from_iter"),
-        densify_until_iter=p.get("densify_until_iter"),
-        densification_interval=p.get("densification_interval"),
-        densify_grad_threshold=p.get("densify_grad_threshold"),
-        opacity_reset_interval=p.get("opacity_reset_interval"),
-        opacity_threshold=p.get("opacity_threshold"),
-        lambda_dssim=p.get("lambda_dssim"),
-        position_lr_init=float(p.get("position_lr_init", 1.6e-4)),
-        position_lr_final=float(p.get("position_lr_final", 1.6e-6)),
-        position_lr_delay_mult=float(p.get("position_lr_delay_mult", 0.01)),
-        position_lr_max_steps=int(p.get("position_lr_max_steps", max_steps)),
-        test_iterations=p.get("test_iterations"),
-        save_iterations=p.get("save_iterations"),
+    def _build_steps(interval_value, fallback):
+        if interval_value is None:
+            return fallback
+        try:
+            interval = max(1, int(interval_value))
+        except Exception:
+            return fallback
+        out = list(range(interval, max_steps + 1, interval))
+        if max_steps not in out:
+            out.append(max_steps)
+        return sorted(set(out))
+
+    strategy = DefaultStrategy(
+        verbose=True,
+        prune_opa=float(p.get("opacity_threshold", 0.005)),
+        grow_grad2d=float(p.get("densify_grad_threshold", 0.0002)),
+        grow_scale3d=float(p.get("percent_dense", 0.01)),
+        refine_start_iter=int(p.get("densify_from_iter", 500)),
+        refine_stop_iter=int(p.get("densify_until_iter", 15000)),
+        refine_every=max(1, int(p.get("densification_interval", 100))),
+        reset_every=max(1, int(p.get("opacity_reset_interval", 3000))),
     )
-    
-    logger.info(f"Training mode: {mode}")
-    trainer.train()
+
+    feature_lr = float(p.get("feature_lr", 2.5e-3))
+    cfg = Config(
+        disable_viewer=True,
+        disable_video=True,
+        load_exposure=False,
+        data_dir=str(dataset_dir),
+        data_factor=1,
+        result_dir=str(engine_output_dir),
+        test_every=8,
+        normalize_world_space=True,
+        batch_size=1,
+        max_steps=max_steps,
+        eval_steps=_build_steps(p.get("eval_interval"), [7000, 30000]),
+        save_steps=_build_steps(p.get("save_interval"), [7000, 30000]),
+        save_ply=False,
+        ssim_lambda=float(p.get("lambda_dssim", 0.2)),
+        means_lr=float(p.get("position_lr_init", 1.6e-4)),
+        scales_lr=float(p.get("scaling_lr", 5.0e-3)),
+        opacities_lr=float(p.get("opacity_lr", 5.0e-2)),
+        quats_lr=float(p.get("rotation_lr", 1.0e-3)),
+        sh0_lr=feature_lr,
+        shN_lr=feature_lr / 20.0,
+        strategy=strategy,
+        tb_every=0,
+    )
+
+    # Hook worker-level stop/progress into vendored upstream runner.
+    cfg.stop_checker = stop_checker
+    cfg.progress_callback = progress_callback
+
+    if device == "cpu":
+        # Upstream runner assumes CUDA device naming; keep compatibility guard.
+        raise RuntimeError("Upstream simple_trainer currently requires CUDA in this worker path")
+
+    runner = Runner(local_rank=0, world_rank=0, world_size=1, cfg=cfg)
+    stop_reason = runner.train()
     gsplat_end = time.time()
+
+    if stop_reason is not None or stop_flag.exists():
+        logger.info("Training stopped by user, skipping export and completion status.")
+        update_status(
+            project_dir,
+            "stopped",
+            progress=60,
+            stage="training",
+            message="⏸️ Training stopped by user.",
+            stopped_stage="training",
+            stopped_step=stop_reason if isinstance(stop_reason, int) else None,
+        )
+        if stop_flag.exists():
+            stop_flag.unlink()
+        return stop_reason if isinstance(stop_reason, int) else 1
 
     # After training completes, save final metrics to metadata.json
     logger.info("Saving evaluation metrics...")
@@ -1122,73 +1796,12 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     except Exception as e:
         logger.warning(f"Could not save evaluation metrics: {e}")
     
-    # If stopped, do not export or mark as completed, just exit immediately
+    # Keep legacy location expected by downstream export flow.
+    ckpt_src = engine_output_dir / "ckpts"
+    ckpt_dst = engine_output_dir / "checkpoints"
+    if ckpt_src.exists():
+        _ensure_symlink(ckpt_src, ckpt_dst)
 
-    if trainer.stop_reason:
-        logger.info("Training stopped by user, skipping export and completion status.")
-        # Set status to 'stopped' for clarity, and record stopped_stage/stopped_step
-        # Try to read most recent metrics (written by progress_callback) for accurate step/progress
-        metrics_candidates = [
-            engine_output_dir / "metrics.json",
-            base_output_dir / "metrics.json",
-        ]
-        metrics_file = None
-        for candidate in metrics_candidates:
-            if candidate.exists():
-                metrics_file = candidate
-                break
-        last_progress = None
-        last_percentage = None
-        last_step = None
-        if metrics_file and metrics_file.exists():
-            try:
-                with open(metrics_file) as f:
-                    m = json.load(f)
-                    last_step = m.get("step")
-                    mprogress = m.get("progress")
-                    # mprogress expected to be fraction in [0,1] representing training completion
-                    if isinstance(mprogress, (int, float)):
-                        # Map training fraction to overall percentage (training occupies ~35% range from 60->95)
-                        try:
-                            last_percentage = 60 + (float(mprogress) * 35)
-                        except Exception:
-                            last_percentage = None
-            except Exception:
-                pass
-        # Fallback to status.json if metrics not available
-        if last_percentage is None:
-            status_path = project_dir / "status.json"
-            if status_path.exists():
-                try:
-                    with open(status_path) as f:
-                        sd = json.load(f)
-                        last_progress = sd.get("progress")
-                        last_percentage = sd.get("percentage")
-                except Exception:
-                    pass
-        if last_percentage is not None:
-            try:
-                progress_to_write = int(round(float(last_percentage)))
-            except Exception:
-                progress_to_write = last_progress if last_progress is not None else 0
-        else:
-            progress_to_write = int(last_progress) if last_progress is not None else 0
-
-        update_status(
-            project_dir,
-            "stopped",
-            progress=progress_to_write,
-            stage="training",
-            message="⏸️ Training stopped by user.",
-            stopped_stage="training",
-            stopped_step=trainer.stop_reason if isinstance(trainer.stop_reason, int) else None,
-            stopped_percentage=last_percentage,
-        )
-        if stop_flag.exists():
-            stop_flag.unlink()
-        return trainer.stop_reason
-
-    # Only run export and completion logic if not stopped
     logger.info("Training complete, exporting final checkpoint...")
     update_status(
         project_dir, "processing", stage="training", stage_progress=100,
@@ -1222,7 +1835,7 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     if stop_flag.exists():
         stop_flag.unlink()
 
-    return trainer.stop_reason
+    return None
 
 
 def run_litegs_training(image_dir: Path, colmap_dir: Path, output_dir: Path, params: dict, resume: bool = False):
@@ -1401,6 +2014,9 @@ def main():
     sparse_preference = params.get("sparse_preference") if isinstance(params, dict) else None
     if isinstance(sparse_preference, str):
         sparse_preference = sparse_preference.strip() or None
+    sparse_merge_selection = params.get("sparse_merge_selection") if isinstance(params, dict) else None
+    if not isinstance(sparse_merge_selection, list):
+        sparse_merge_selection = None
 
 
     # Configure file logging per project
@@ -1418,12 +2034,11 @@ def main():
 
     stop_reason = None
     try:
-        if not image_dir.exists():
-            raise FileNotFoundError(f"Images directory not found: {image_dir}")
-
         output_dir.mkdir(parents=True, exist_ok=True)
 
         stage = params.get("stage", "full")
+        if not image_dir.exists():
+            raise FileNotFoundError(f"Images directory not found: {image_dir}")
         # Respect resume flag passed in params
         resume = False
         try:
@@ -1479,7 +2094,12 @@ def main():
             sparse_root = output_dir / "sparse"
             if not sparse_root.exists():
                 raise RuntimeError("Sparse model not found. Run COLMAP first.")
-            colmap_dir = _select_best_sparse_model(sparse_root, active_image_dir, sparse_preference)
+            colmap_dir = _resolve_sparse_model_for_training(
+                sparse_root,
+                active_image_dir,
+                sparse_preference,
+                sparse_merge_selection,
+            )
             trainer_label = "LiteGS" if engine == "litegs" else "Gaussian Splatting"
             msg = f"🎯 Starting {trainer_label} training..."
             update_status(project_dir, "processing", progress=55, stage="training", message=msg, engine=engine)
@@ -1493,7 +2113,12 @@ def main():
             colmap_dir = run_colmap(active_image_dir, output_dir, params)
             logger.info("COLMAP completed")
 
-            colmap_dir = _select_best_sparse_model(output_dir / "sparse", active_image_dir, sparse_preference)
+            colmap_dir = _resolve_sparse_model_for_training(
+                output_dir / "sparse",
+                active_image_dir,
+                sparse_preference,
+                sparse_merge_selection,
+            )
             trainer_label = "LiteGS" if engine == "litegs" else "Gaussian Splatting"
             msg = f"🎯 Starting {trainer_label} training..."
             update_status(project_dir, "processing", progress=55, stage="training", message=msg, engine=engine)

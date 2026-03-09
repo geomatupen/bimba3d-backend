@@ -24,12 +24,29 @@ from app.models.project import (
     ComparisonRequest,
     ComparisonStatus,
     SparseEditRequest,
+    SparseMergeRequest,
 )
 from app.services import status, storage, colmap, gsplat, files, sparse_edit, pointsbin
 from worker import pipeline
 
 COLMAP_TO_OPENGL = (1.0, -1.0, -1.0)
 BEST_SPARSE_META = ".best_sparse_selection.json"
+SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
+
+
+def _read_sparse_image_names(candidate_dir: Path) -> list[str]:
+    images_bin = candidate_dir / "images.bin"
+    if not images_bin.exists():
+        return []
+    try:
+        from worker.colmap_loader import read_images_binary  # pylint: disable=import-outside-toplevel
+        images = read_images_binary(images_bin)
+        names = [entry.get("name") for entry in images.values() if isinstance(entry.get("name"), str)]
+        names.sort()
+        return names
+    except Exception as exc:
+        logger.debug("Failed to read image names from %s: %s", images_bin, exc)
+        return []
 def _load_sparse_metadata(sparse_root: Path) -> tuple[dict | None, Path]:
     meta_path = sparse_root / BEST_SPARSE_META
     meta = None
@@ -476,6 +493,27 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
 
         # Prepare params payload with defaults (engine defaults to gsplat)
         params_payload = params.dict(exclude_none=True) if params else {}
+
+        # Repro defaults for provided COLMAP pipelines.
+        params_payload.setdefault("stage", "train_only")
+        params_payload.setdefault("max_steps", 30000)
+        params_payload.setdefault("batch_size", 1)
+        params_payload.setdefault("densify_from_iter", 500)
+        params_payload.setdefault("densify_until_iter", 15000)
+        params_payload.setdefault("densification_interval", 100)
+        params_payload.setdefault("densify_grad_threshold", 0.0002)
+        params_payload.setdefault("opacity_reset_interval", 3000)
+        params_payload.setdefault("lambda_dssim", 0.2)
+        params_payload.setdefault("feature_lr", 2.5e-3)
+        params_payload.setdefault("opacity_lr", 5.0e-2)
+        params_payload.setdefault("scaling_lr", 5.0e-3)
+        params_payload.setdefault("rotation_lr", 1.0e-3)
+        params_payload.setdefault("percent_dense", 0.01)
+        params_payload.setdefault("position_lr_init", 1.6e-4)
+        params_payload.setdefault("position_lr_final", 1.6e-6)
+        params_payload.setdefault("position_lr_delay_mult", 0.01)
+        params_payload.setdefault("position_lr_max_steps", 30000)
+
         engine = params_payload.get("engine", "gsplat")
         if engine not in {"gsplat", "litegs"}:
             raise HTTPException(status_code=400, detail=f"Invalid training engine: {engine}")
@@ -1176,6 +1214,35 @@ def list_sparse_candidates(project_id: str):
                 }
             )
 
+    # Include cached merged sparse models so users can re-select them later.
+    discovered: set[str] = {
+        (entry.get("relative_path") or ".")
+        for entry in candidates
+        if isinstance(entry, dict)
+    }
+    merged_root = sparse_root / "_merged"
+    if merged_root.exists() and merged_root.is_dir():
+        try:
+            for child in sorted(p for p in merged_root.iterdir() if p.is_dir()):
+                rel_path = os.path.relpath(child, sparse_root)
+                if rel_path in discovered:
+                    continue
+                if not all((child / name).exists() for name in ("cameras.bin", "images.bin", "points3D.bin")):
+                    continue
+                images, points = _read_sparse_stats(child)
+                label = f"merged/{child.name}"
+                candidates.append(
+                    {
+                        "relative_path": rel_path,
+                        "label": label,
+                        "images": images,
+                        "points": points,
+                    }
+                )
+                discovered.add(rel_path)
+        except Exception as exc:
+            logger.debug("Failed to enumerate merged sparse candidates in %s: %s", merged_root, exc)
+
     if not candidates:
         try:
             for child in sorted(p for p in sparse_root.iterdir() if p.is_dir() and (p / "points.bin").exists()):
@@ -1201,6 +1268,173 @@ def list_sparse_candidates(project_id: str):
         "best_relative_path": best_rel,
         "candidates": candidates,
         "updated_at": updated_at,
+    }
+
+
+@router.get("/{project_id}/sparse/image-membership")
+def get_sparse_image_membership(project_id: str):
+    """Return registered image names for each sparse candidate."""
+    project_dir = DATA_DIR / project_id
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    sparse_root = project_dir / "outputs" / "sparse"
+    if not sparse_root.exists() or not sparse_root.is_dir():
+        raise HTTPException(status_code=404, detail="Sparse outputs not found")
+
+    membership_path = sparse_root / SPARSE_IMAGE_MEMBERSHIP_META
+    if membership_path.exists():
+        try:
+            payload = json.loads(membership_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception as exc:
+            logger.debug("Failed to parse sparse image membership JSON at %s: %s", membership_path, exc)
+
+    # Fallback generation when worker metadata is not present yet.
+    candidates_payload = list_sparse_candidates(project_id)
+    rows = []
+    for entry in candidates_payload.get("candidates", []):
+        if not isinstance(entry, dict):
+            continue
+        rel_path = entry.get("relative_path") or "."
+        candidate_dir = _resolve_sparse_candidate_dir(sparse_root, rel_path)
+        image_names = _read_sparse_image_names(candidate_dir)
+        rows.append(
+            {
+                "relative_path": rel_path,
+                "label": entry.get("label"),
+                "images": entry.get("images") if entry.get("images") is not None else len(image_names),
+                "image_names": image_names,
+            }
+        )
+
+    payload = {
+        "updated_at": time.time(),
+        "candidates": rows,
+    }
+    try:
+        membership_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Failed to persist sparse image membership metadata at %s: %s", membership_path, exc)
+    return payload
+
+
+@router.get("/{project_id}/sparse/merge-report")
+def get_sparse_merge_report(project_id: str, candidate: str | None = Query(None)):
+    """Return merge metadata for a cached merged sparse candidate.
+
+    - If `candidate` is provided, it can be either `_merged/<name>` or `<name>`.
+    - If omitted, the latest merged candidate with `merge_meta.json` is returned.
+    """
+    project_dir = DATA_DIR / project_id
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    sparse_root = project_dir / "outputs" / "sparse"
+    merged_root = sparse_root / "_merged"
+    if not merged_root.exists() or not merged_root.is_dir():
+        return {"available": False, "candidate": None, "report": None}
+
+    target_dir: Path | None = None
+    if candidate:
+        token = candidate.strip()
+        if token.startswith("_merged/"):
+            token = token.split("/", 1)[1]
+        if token:
+            resolved = (merged_root / token).resolve()
+            root_resolved = merged_root.resolve()
+            if resolved == root_resolved or root_resolved not in resolved.parents:
+                raise HTTPException(status_code=400, detail="Invalid merge candidate")
+            if resolved.exists() and resolved.is_dir():
+                target_dir = resolved
+            else:
+                raise HTTPException(status_code=404, detail="Merge candidate not found")
+    else:
+        candidates = [
+            p for p in merged_root.iterdir()
+            if p.is_dir() and (p / "merge_meta.json").exists()
+        ]
+        if not candidates:
+            return {"available": False, "candidate": None, "report": None}
+        target_dir = max(candidates, key=lambda p: p.stat().st_mtime)
+
+    if target_dir is None:
+        return {"available": False, "candidate": None, "report": None}
+
+    meta_path = target_dir / "merge_meta.json"
+    if not meta_path.exists():
+        return {
+            "available": False,
+            "candidate": os.path.relpath(target_dir, sparse_root),
+            "report": None,
+        }
+
+    try:
+        report = json.loads(meta_path.read_text())
+    except Exception as exc:
+        logger.warning("Failed to parse merge metadata at %s: %s", meta_path, exc)
+        raise HTTPException(status_code=500, detail="Failed to parse merge metadata")
+
+    return {
+        "available": True,
+        "candidate": os.path.relpath(target_dir, sparse_root),
+        "report": report,
+    }
+
+
+@router.post("/{project_id}/sparse/merge")
+def build_sparse_merge(project_id: str, payload: SparseMergeRequest | None = Body(None)):
+    """Build a merged sparse model from selected candidate folders without starting training."""
+    project_dir = DATA_DIR / project_id
+    if not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    selections = payload.selections if payload else []
+    if not isinstance(selections, list) or len(selections) < 2:
+        raise HTTPException(status_code=400, detail="Provide at least two sparse selections to merge")
+
+    sparse_root = project_dir / "outputs" / "sparse"
+    if not sparse_root.exists() or not sparse_root.is_dir():
+        raise HTTPException(status_code=404, detail="Sparse outputs not found")
+
+    image_dir = project_dir / "images"
+    if not image_dir.exists() or not image_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Project images not found")
+
+    try:
+        # Imported lazily to avoid importing worker internals during API startup.
+        from worker.entrypoint import _resolve_sparse_model_for_training  # pylint: disable=import-outside-toplevel
+
+        merged_dir = _resolve_sparse_model_for_training(
+            sparse_root,
+            image_dir,
+            "merge_selected",
+            selections,
+        )
+    except Exception as exc:
+        logger.warning("Sparse merge build failed for %s: %s", project_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    merged_dir = Path(merged_dir)
+    sparse_base = sparse_root.resolve()
+    merged_resolved = merged_dir.resolve()
+    if merged_resolved == sparse_base or sparse_base not in merged_resolved.parents:
+        raise HTTPException(status_code=500, detail="Unexpected merged model location")
+
+    rel_path = os.path.relpath(merged_resolved, sparse_root)
+    report = None
+    meta_path = merged_resolved / "merge_meta.json"
+    if meta_path.exists():
+        try:
+            report = json.loads(meta_path.read_text())
+        except Exception as exc:
+            logger.debug("Failed to parse merge metadata after build (%s): %s", meta_path, exc)
+
+    return {
+        "status": "ok",
+        "candidate": rel_path,
+        "report": report,
     }
 
 
