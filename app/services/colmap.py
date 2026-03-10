@@ -3,9 +3,20 @@ import time
 import logging
 import json
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_BAR_PATTERN = re.compile(r"\b\d{1,3}%\|.*\|\s*\d+(?:\.\d+)?[KMG]?/\d+(?:\.\d+)?[KMG]?")
+
+
+def _is_noisy_progress_line(line: str) -> bool:
+    """Return True for transient progress-bar style lines that flood API logs."""
+    text = (line or "").strip()
+    if not text:
+        return True
+    return bool(_PROGRESS_BAR_PATTERN.search(text))
 
 # Check if running in Docker mode
 USE_DOCKER = os.getenv("USE_DOCKER_WORKER", "true").lower() == "true"
@@ -96,6 +107,7 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
         "-e", "TORCH_EXTENSIONS_DIR=/data/.cache/torch_extensions",
         "-e", "XDG_CACHE_HOME=/data/.cache",
         "-e", "MPLCONFIGDIR=/data/.cache/matplotlib",
+        "-e", "TORCH_HUB_DISABLE_PROGRESS_BARS=1",
         "-e", "BIMBA3D_DOCKER_WORKER=1",
         "bimba3d-worker:latest",
         project_id,
@@ -110,6 +122,8 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip('\n')
+            if _is_noisy_progress_line(line):
+                continue
             try:
                 logger.info(line)
             except Exception:

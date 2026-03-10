@@ -830,10 +830,17 @@ def get_logs(project_id: str, lines: int = 500):
         if not log_file.exists():
             return {"project_id": project_id, "logs": "No logs available yet."}
         
-        # Read last N lines
+        # Read lines from the latest run block (appended logs may contain older runs).
         with open(log_file, "r") as f:
             all_lines = f.readlines()
-            recent_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+            latest_run_start = 0
+            marker = "Initialized project log file:"
+            for idx, line in enumerate(all_lines):
+                if marker in line:
+                    latest_run_start = idx
+
+            scoped_lines = all_lines[latest_run_start:] if latest_run_start < len(all_lines) else all_lines
+            recent_lines = scoped_lines[-lines:] if len(scoped_lines) > lines else scoped_lines
             log_content = "".join(recent_lines)
         
         return {"project_id": project_id, "logs": log_content}
