@@ -42,6 +42,12 @@ def _colmap_cmd(*args: str) -> list[str]:
     return [COLMAP_EXE, *args]
 
 
+def _prepare_subprocess_command(cmd: list[str]) -> tuple[list[str] | str, bool]:
+    if os.name == "nt" and cmd and str(cmd[0]).lower().endswith((".bat", ".cmd")):
+        return subprocess.list2cmdline(cmd), True
+    return cmd, False
+
+
 def _read_registered_image_names(images_bin_path: Path) -> list[str]:
     """Return sorted registered image names from a COLMAP images.bin file."""
     try:
@@ -149,7 +155,7 @@ def update_status(
 
     try:
         if status_file.exists():
-            with open(status_file, 'r') as f:
+            with open(status_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         else:
             data = {"status": "pending", "progress": 0}
@@ -213,7 +219,7 @@ def update_status(
         data["percentage"] = round(percentage, 2) if percentage is not None else 0.0
 
         temp_file = status_file.with_suffix('.tmp')
-        with open(temp_file, 'w') as f:
+        with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f)
         temp_file.replace(status_file)
 
@@ -233,7 +239,7 @@ def write_metrics(project_dir: Path, metrics: dict, engine: str | None = None):
 
     try:
         temp_file = metrics_file.with_suffix('.tmp')
-        with open(temp_file, 'w') as f:
+        with open(temp_file, 'w', encoding='utf-8') as f:
             json.dump(metrics, f, indent=2)
         temp_file.replace(metrics_file)
     except Exception as e:
@@ -508,7 +514,8 @@ def _run_cmd_with_retry(cmd: list[str], retries: int = 3, delay_sec: float = 2.0
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            run_cmd, use_shell = _prepare_subprocess_command(cmd)
+            res = subprocess.run(run_cmd, check=True, capture_output=True, text=True, shell=use_shell)
             if res.stdout:
                 logger.info(res.stdout.strip())
             if res.stderr:
@@ -1366,12 +1373,14 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
         # Stream COLMAP mapper output into the application logger so it is
         # persisted to the project's processing.log and visible via frontend.
         # Use a pipe and continuously read to avoid deadlocks.
+        popen_cmd, popen_shell = _prepare_subprocess_command(mapper_cmd)
         proc = subprocess.Popen(
-            mapper_cmd,
+            popen_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            shell=popen_shell,
         )
         try:
             assert proc.stdout is not None
@@ -2878,14 +2887,14 @@ def main():
         images_max_size = normalize_max_size(params.get("images_max_size"))
         if images_max_size:
             resize_stage = "training" if stage == "train_only" else "colmap"
-            logger.info("Preparing resized image set (≤%d px) for project %s", images_max_size, args.project_id)
+            logger.info("Preparing resized image set (<=%d px) for project %s", images_max_size, args.project_id)
             update_status(
                 project_dir,
                 "processing",
                 progress=5 if resize_stage == "colmap" else 55,
                 stage=resize_stage,
                 stage_progress=2 if resize_stage == "training" else 5,
-                message=f"📐 Resizing input images to ≤ {images_max_size}px...",
+                message=f"📐 Resizing input images to <= {images_max_size}px...",
                 engine=engine,
             )
             try:
@@ -2896,7 +2905,7 @@ def main():
                     "processing",
                     stage=resize_stage,
                     stage_progress=6 if resize_stage == "training" else 8,
-                    message=f"✅ Image set ready at ≤ {images_max_size}px",
+                    message=f"✅ Image set ready at <= {images_max_size}px",
                 )
                 colmap_cfg = dict(params.get("colmap") or {})
                 colmap_cfg.setdefault("max_image_size", images_max_size)

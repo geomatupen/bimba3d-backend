@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 
 COLMAP_EXE = (os.getenv("COLMAP_EXE") or "colmap").strip() or "colmap"
 
+
+def _prepare_subprocess_command(cmd: list[str]) -> tuple[list[str] | str, bool]:
+    if os.name == "nt" and cmd and str(cmd[0]).lower().endswith((".bat", ".cmd")):
+        return subprocess.list2cmdline(cmd), True
+    return cmd, False
+
 _PROGRESS_BAR_PATTERN = re.compile(r"\b\d{1,3}%\|.*\|\s*\d+(?:\.\d+)?[KMG]?/\d+(?:\.\d+)?[KMG]?")
 
 
@@ -211,7 +217,8 @@ def _run_cmd_with_retry(cmd: list[str], retries: int = 3, delay_sec: float = 2.0
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            res = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            run_cmd, use_shell = _prepare_subprocess_command(cmd)
+            res = subprocess.run(run_cmd, check=True, capture_output=True, text=True, shell=use_shell)
             if res.stdout:
                 logger.info(res.stdout.strip())
             if res.stderr:
