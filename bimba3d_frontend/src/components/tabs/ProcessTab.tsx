@@ -100,7 +100,7 @@ const getDefaultProcessConfig = () => ({
     run_image_registrator: true,
   },
   images_max_size: 1600,
-  images_resize_enabled: false,
+  images_resize_enabled: true,
   densifyFromIter: 500,
   densifyUntilIter: 15000,
   densificationInterval: 100,
@@ -154,7 +154,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [evalInterval, setEvalInterval] = useState<number>(cfg.evalInterval ?? 1000);
   const [saveInterval, setSaveInterval] = useState<number>(cfg.saveInterval ?? 150);
   const [imagesMaxSize, setImagesMaxSize] = useState<number | undefined>(cfg.images_max_size ?? 1600);
-  const [imagesResizeEnabled, setImagesResizeEnabled] = useState<boolean>(cfg.images_resize_enabled ?? false);
+  const [imagesResizeEnabled, setImagesResizeEnabled] = useState<boolean>(cfg.images_resize_enabled ?? true);
   const [, setShowAdvancedTraining] = useState<boolean>(cfg.showAdvancedTraining ?? false);
 
   const [litegsTargetPrimitives, setLitegsTargetPrimitives] = useState<number>(cfg.litegs_target_primitives ?? 50000);
