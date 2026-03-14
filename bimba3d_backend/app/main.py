@@ -3,6 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from bimba3d_backend.app.api.projects import router as projects_router
 from bimba3d_backend.app.config import ALLOWED_ORIGINS
 from bimba3d_backend.app.config import DATA_DIR
@@ -17,6 +18,16 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="Gaussian Splat Backend")
+
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
 
 app.add_middleware(
     CORSMiddleware,
@@ -107,7 +118,7 @@ def gpu_health():
 DEFAULT_FRONTEND_DIST = Path(__file__).resolve().parents[2] / "bimba3d_frontend" / "dist"
 FRONTEND_DIST = Path(os.getenv("FRONTEND_DIST", str(DEFAULT_FRONTEND_DIST))).resolve()
 if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    app.mount("/", SPAStaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
     logging.info("Serving frontend build from %s", FRONTEND_DIST)
 else:
     logging.info("Frontend dist not found at %s; API-only mode", FRONTEND_DIST)
