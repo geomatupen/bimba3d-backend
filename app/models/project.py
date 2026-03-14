@@ -52,11 +52,14 @@ class StatusResponse(BaseModel):
     can_resume: Optional[bool] = None  # Whether project has checkpoints/outputs to resume
     last_completed_step: Optional[int] = None
     engine: Optional[str] = None
+    worker_mode: Optional[str] = None
 
 
 class ProcessParams(BaseModel):
     # Training mode
     mode: Optional[str] = None  # "baseline" or "modified"
+    # Worker runtime selection: "docker" (default) or "local"
+    worker_mode: Optional[str] = None
     # Training engine selection: "gsplat" (default) or "litegs"
     engine: Optional[str] = None
     # Pipeline stage: "full" (default), "colmap_only", "train_only"

@@ -27,6 +27,7 @@ from app.models.project import (
     SparseMergeRequest,
 )
 from app.services import status, storage, colmap, gsplat, files, sparse_edit, pointsbin
+from app.services.worker_mode import normalize_worker_mode, resolve_worker_mode
 from worker import pipeline
 
 COLMAP_TO_OPENGL = (1.0, -1.0, -1.0)
@@ -533,6 +534,15 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         params_payload.setdefault("position_lr_delay_mult", 0.01)
         params_payload.setdefault("position_lr_max_steps", 30000)
 
+        # Validate/resolve worker runtime mode
+        try:
+            normalize_worker_mode(params_payload.get("worker_mode"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        resolved_worker_mode = resolve_worker_mode(params_payload.get("worker_mode"))
+        params_payload["worker_mode"] = resolved_worker_mode
+
         engine = params_payload.get("engine", "gsplat")
         if engine not in {"gsplat", "litegs"}:
             raise HTTPException(status_code=400, detail=f"Invalid training engine: {engine}")
@@ -564,15 +574,25 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             logger.warning("Failed to persist run configuration for %s: %s", project_id, exc)
 
         # Prevent overlapping runs for the same project.
-        running_workers = colmap.get_project_worker_container_ids(project_id)
-        if running_workers:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "A worker is already running for this project. "
-                    "Stop it first or wait for it to finish."
-                ),
-            )
+        if resolved_worker_mode == "docker":
+            running_workers = colmap.get_project_worker_container_ids(project_id)
+            if running_workers:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A docker worker is already running for this project. "
+                        "Stop it first or wait for it to finish."
+                    ),
+                )
+        else:
+            if pipeline.is_local_project_active(project_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "A local worker is already running for this project. "
+                        "Stop it first or wait for it to finish."
+                    ),
+                )
 
         # Update status to processing with the resolved engine
         status.update_status(
@@ -580,8 +600,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             "processing",
             progress=5,
             engine=engine,
+            worker_mode=resolved_worker_mode,
             stop_requested=False,
-            message="Processing started.",
+            message=f"Processing started ({resolved_worker_mode} mode).",
             error=None,
         )
 

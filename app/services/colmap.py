@@ -4,6 +4,7 @@ import logging
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,58 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
             raise subprocess.CalledProcessError(rc, cmd)
     except subprocess.CalledProcessError as e:
         logger.error(f"Docker worker failed: returncode={getattr(e, 'returncode', None)}")
+        raise
+
+
+def run_worker_local(project_id: str, params: dict = None) -> None:
+    """Run the same worker.entrypoint pipeline locally (without Docker)."""
+    from app.config import DATA_DIR
+
+    worker_params = dict(params or {})
+    if worker_params.get("engine") == "gsplat":
+        worker_params.pop("litegs_target_primitives", None)
+        worker_params.pop("litegs_alpha_shrink", None)
+
+    params_json = json.dumps(worker_params)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "worker.entrypoint",
+        project_id,
+        "--data-dir",
+        str(DATA_DIR),
+        "--params",
+        params_json,
+    ]
+
+    logger.info("Running local worker: %s", " ".join(cmd))
+    child_env = os.environ.copy()
+    child_env["BIMBA3D_DOCKER_WORKER"] = "0"
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=child_env,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if _is_noisy_progress_line(line):
+                continue
+            try:
+                logger.info(line)
+            except Exception:
+                pass
+        rc = proc.wait()
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, cmd)
+    except subprocess.CalledProcessError as e:
+        logger.error("Local worker failed: returncode=%s", getattr(e, "returncode", None))
         raise
 
 

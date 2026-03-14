@@ -1,0 +1,19 @@
+# Python dependencies for the Docker worker runtime.
+# NOTE:
+# - torch/torchvision are installed in Dockerfile.worker with CUDA-pinned wheels.
+# - gsplat is installed separately in Dockerfile.worker.
+
+numpy<2
+pillow
+tqdm
+imageio
+opencv-python
+pycolmap
+piexif
+scikit-learn
+scipy
+matplotlib
+pyyaml
+torchmetrics
+tensorboard
+tyro

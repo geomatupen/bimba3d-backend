@@ -1714,6 +1714,16 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     from .gsplat_upstream.simple_trainer import Config, DefaultStrategy, Runner
 
     logger.info("Starting gsplat training (upstream simple_trainer path)...")
+
+    try:
+        import gsplat.cuda._wrapper as _gsplat_cuda_wrapper
+        _gsplat_cuda_wrapper._make_lazy_cuda_obj("CameraModelType")
+    except Exception as exc:
+        raise RuntimeError(
+            "Local gsplat CUDA backend is unavailable (CUDA toolkit/runtime extensions not loaded). "
+            "For local mode, install a CUDA-enabled gsplat environment; otherwise use worker_mode='docker'."
+        ) from exc
+
     base_output_dir = Path(output_dir)
     base_output_dir.mkdir(parents=True, exist_ok=True)
     engine_name = "gsplat"
@@ -1723,6 +1733,16 @@ def run_gsplat_training(image_dir: Path, colmap_dir: Path, output_dir: Path, par
     tuning_history_path = engine_output_dir / "rule_update_history.json"
 
     p = params or {}
+    runtime_mode = str(p.get("worker_mode") or "").strip().lower()
+    if runtime_mode not in {"docker", "local"}:
+        docker_flag = str(os.getenv("BIMBA3D_DOCKER_WORKER", "")).strip().lower()
+        runtime_mode = "docker" if docker_flag in {"1", "true", "yes", "on"} else "local"
+    logger.info(
+        "Worker runtime mode before training: %s (BIMBA3D_DOCKER_WORKER=%s)",
+        runtime_mode,
+        os.getenv("BIMBA3D_DOCKER_WORKER"),
+    )
+
     mode = p.get("mode", "baseline")
     max_steps = int(p.get("max_steps", 30_000))
     raw_tune_end_step = p.get("tune_end_step", 200)

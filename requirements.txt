@@ -1,17 +1,2 @@
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-pydantic-settings
-numpy
-torch
-gsplat
-Pillow
-imageio
-tqdm
-opencv-python
-pycolmap
-piexif
-scikit-learn
-scipy
-matplotlib
+# Backward-compatible alias for local development dependencies.
+-r requirements.local.txt

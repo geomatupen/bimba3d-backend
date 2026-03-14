@@ -550,18 +550,23 @@ class Runner:
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
         self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+        self.lpips = None
 
-        if cfg.lpips_net == "alex":
-            self.lpips = LearnedPerceptualImagePatchSimilarity(
-                net_type="alex", normalize=True
-            ).to(self.device)
-        elif cfg.lpips_net == "vgg":
-            # The 3DGS official repo uses lpips vgg, which is equivalent with the following:
-            self.lpips = LearnedPerceptualImagePatchSimilarity(
-                net_type="vgg", normalize=False
-            ).to(self.device)
-        else:
-            raise ValueError(f"Unknown LPIPS network: {cfg.lpips_net}")
+        try:
+            if cfg.lpips_net == "alex":
+                self.lpips = LearnedPerceptualImagePatchSimilarity(
+                    net_type="alex", normalize=True
+                ).to(self.device)
+            elif cfg.lpips_net == "vgg":
+                # The 3DGS official repo uses lpips vgg, which is equivalent with the following:
+                self.lpips = LearnedPerceptualImagePatchSimilarity(
+                    net_type="vgg", normalize=False
+                ).to(self.device)
+            else:
+                raise ValueError(f"Unknown LPIPS network: {cfg.lpips_net}")
+        except Exception as exc:
+            print(f"[Warning] LPIPS unavailable ({exc}). Continuing without LPIPS metric.")
+            self.lpips = None
 
         # Viewer
         if not self.cfg.disable_viewer and viser is not None and GsplatViewer is not None:
@@ -1187,7 +1192,8 @@ class Runner:
                 colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
-                metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+                if self.lpips is not None:
+                    metrics["lpips"].append(self.lpips(colors_p, pixels_p))
                 # Compute color-corrected metrics for fair comparison across methods
                 if cfg.use_color_correction_metric:
                     if cfg.color_correct_method == "affine":
@@ -1197,7 +1203,8 @@ class Runner:
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
                     metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
-                    metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
+                    if self.lpips is not None:
+                        metrics["cc_lpips"].append(self.lpips(cc_colors_p, pixels_p))
 
         if world_rank == 0:
             ellipse_time /= len(valloader)
@@ -1209,16 +1216,18 @@ class Runner:
                     "num_GS": len(self.splats["means"]),
                 }
             )
+            lpips_str = f", LPIPS: {stats['lpips']:.3f}" if 'lpips' in stats else ""
             if cfg.use_color_correction_metric:
+                cc_lpips_str = f", CC_LPIPS: {stats['cc_lpips']:.3f}" if 'cc_lpips' in stats else ""
                 print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
-                    f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}, CC_LPIPS: {stats['cc_lpips']:.3f} "
+                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}{lpips_str} "
+                    f"CC_PSNR: {stats['cc_psnr']:.3f}, CC_SSIM: {stats['cc_ssim']:.4f}{cc_lpips_str} "
                     f"Time: {stats['ellipse_time']:.3f}s/image "
                     f"Number of GS: {stats['num_GS']}"
                 )
             else:
                 print(
-                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
+                    f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}{lpips_str} "
                     f"Time: {stats['ellipse_time']:.3f}s/image "
                     f"Number of GS: {stats['num_GS']}"
                 )

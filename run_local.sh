@@ -22,7 +22,7 @@ source "$VENV_DIR/bin/activate"
 
 echo "[backend] Installing requirements"
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements.local.txt
 
 # Environment toggles
 export USE_DEMO_MODE=${USE_DEMO_MODE:-false}

@@ -25,6 +25,7 @@ def initialize_status(project_id: str, name: Optional[str] = None) -> None:
         "stage_progress": None,
         "message": None,
         "engine": None,
+        "worker_mode": None,
     }
     status_file.parent.mkdir(parents=True, exist_ok=True)
     
@@ -61,6 +62,7 @@ def get_status(project_id: str) -> dict:
     data.setdefault("stage", None)
     data.setdefault("stage_progress", None)
     data.setdefault("engine", None)
+    data.setdefault("worker_mode", None)
     return data
 
 
@@ -94,6 +96,7 @@ def update_status(
     message: Optional[str] = None,
     device: Optional[str] = None,
     engine: Optional[str] = None,
+    worker_mode: Optional[str] = None,
 ) -> None:
     """Update project status while preserving metadata fields."""
     status_file = get_status_file(project_id)
@@ -127,6 +130,8 @@ def update_status(
         current["device"] = device
     if engine is not None:
         current["engine"] = engine
+    if worker_mode is not None:
+        current["worker_mode"] = worker_mode
     
     # Write atomically using a temporary file
     temp_file = status_file.with_suffix('.tmp')
