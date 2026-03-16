@@ -6,7 +6,8 @@ if "%~1"=="" (
   exit /b 2
 )
 
-set "DEFAULT_INSTALL_DIR=%ProgramFiles%\Bimba3D\third_party\colmap"
+set "DEFAULT_INSTALL_DIR=%ProgramW6432%\Bimba3D\third_party\colmap"
+if "%DEFAULT_INSTALL_DIR%"=="\Bimba3D\third_party\colmap" set "DEFAULT_INSTALL_DIR=%ProgramFiles%\Bimba3D\third_party\colmap"
 
 if "%~2"=="" (
   set "INSTALL_DIR=%DEFAULT_INSTALL_DIR%"
@@ -33,10 +34,8 @@ if errorlevel 1 (
 
 set "COLMAP_BAT=%INSTALL_DIR%\COLMAP.bat"
 if not exist "%COLMAP_BAT%" (
-  for /f "delims=" %%D in ('dir /b /ad "%INSTALL_DIR%"') do (
-    if exist "%INSTALL_DIR%\%%D\COLMAP.bat" (
-      xcopy "%INSTALL_DIR%\%%D\*" "%INSTALL_DIR%\" /E /I /Y >nul
-    )
+  for /f "usebackq delims=" %%F in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-ChildItem -LiteralPath '%INSTALL_DIR%' -Filter 'COLMAP.bat' -Recurse -File -ErrorAction SilentlyContinue ^| Select-Object -First 1 -ExpandProperty FullName; if ($p) { Write-Output $p }"`) do (
+    set "COLMAP_BAT=%%F"
   )
 )
 
