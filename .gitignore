@@ -51,3 +51,20 @@ tmp/
 
 #scripts
 scripts/
+
+# Installer artifacts
+installer/wix/Bimba3D-Setup.exe
+installer/wix/*.wixpdb
+installer/wix/*.log
+installer/wix/logs/
+installer/wix/payloads/*.exe
+installer/wix/payloads/*.msi
+installer/wix/payloads/*.zip
+installer/wix/payloads/*.7z
+installer/wix/payloads/*.nupkg
+installer/wix/payloads/*.tmp
+installer/wix/payloads/*.part
+
+# Local stray files
+/40.8.0
+/No

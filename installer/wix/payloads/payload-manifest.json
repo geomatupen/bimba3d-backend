@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "notes": "Replace all sha256 values before release.",
+  "payloads": [
+    {
+      "id": "vs_buildtools_2022",
+      "file": "vs_BuildTools.exe",
+      "url": "https://aka.ms/vs/17/release/vs_BuildTools.exe",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "id": "vc_redist_x64",
+      "file": "vc_redist.x64.exe",
+      "url": "https://aka.ms/vc14/vc_redist.x64.exe",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "id": "cuda_toolkit_12_5_windows",
+      "file": "cuda_installer.exe",
+      "url": "https://developer.download.nvidia.com/compute/cuda/12.5.0/local_installers/cuda_12.5.0_windows.exe",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "id": "colmap_4_0_1_windows_cuda",
+      "file": "colmap-x64-windows-cuda.zip",
+      "url": "https://github.com/colmap/colmap/releases/download/4.0.1/colmap-x64-windows-cuda.zip",
+      "sha256": "REPLACE_WITH_SHA256"
+    },
+    {
+      "id": "bimba3d_app_msi",
+      "file": "Bimba3D.msi",
+      "url": "https://github.com/geomatupen/bimba3d/releases/latest/download/Bimba3D.msi",
+      "sha256": "REPLACE_WITH_SHA256"
+    }
+  ]
+}

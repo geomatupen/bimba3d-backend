@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+    xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+    xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Bundle
+      Name="Bimba3D Setup"
+      Version="1.0.0.0"
+      Manufacturer="Bimba3D"
+      UpgradeCode="2CBDBF2C-F413-4E26-969A-788991D4A82B"
+      Compressed="yes"
+      DisableModify="yes"
+      DisableRemove="no">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          Theme="hyperlinkLicense"
+          LicenseUrl="https://github.com/colmap/colmap/blob/main/COPYING.txt"
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Variable Name="Bimba3DInstallDir" Type="string" Value="[ProgramFiles64Folder]Bimba3D" />
+    <Variable Name="LogRoot" Type="string" Value="[ProgramDataFolder]Bimba3D\\Logs" />
+    <Variable Name="ColmapInstallDir" Type="string" Value="[Bimba3DInstallDir]\\third_party\\colmap" />
+    <Variable Name="CudaInstallDir" Type="string" Value="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5" />
+    <Variable Name="ColmapVersion" Type="string" Value="4.0.1" />
+    <Variable Name="InstallBuildTools" Type="numeric" Value="0" />
+
+    <util:RegistrySearch
+        Id="SearchVCRedistInstalled"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+        Value="Installed"
+        Variable="VCREDIST_X64_INSTALLED"
+        Result="value" />
+
+    <util:RegistrySearch
+        Id="SearchBuildToolsPath"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\Setup\Instances\BuildTools_17"
+        Value="InstallationPath"
+        Variable="VSBT_17_PATH"
+        Result="value" />
+
+    <util:FileSearch
+        Id="SearchCudaNvcc"
+        Path="[CudaInstallDir]\\bin\\nvcc.exe"
+        Variable="CUDA_NVCC_PATH"
+        Result="exists" />
+
+    <util:FileSearch
+        Id="SearchColmapBat"
+        Path="[ColmapInstallDir]\\COLMAP.bat"
+        Variable="COLMAP_BAT_EXISTS"
+        Result="exists" />
+
+    <Chain>
+      <!-- Optional Build Tools install: only if InstallBuildTools=1 -->
+      <ExePackage
+          Id="VsBuildTools2022"
+          DisplayName="Microsoft Visual Studio Build Tools 2022"
+          SourceFile="payloads\\vs_BuildTools.exe"
+          InstallArguments="--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+          DetectCondition="VSBT_17_PATH"
+          InstallCondition="InstallBuildTools = 1"
+          PerMachine="yes"
+          Vital="yes"
+          Compressed="yes"
+          Permanent="no" />
+
+      <!-- VC++ Runtime -->
+      <ExePackage
+          Id="VcRedistX64"
+          DisplayName="Microsoft Visual C++ Runtime (x64)"
+          SourceFile="payloads\\vc_redist.x64.exe"
+          InstallArguments="/install /quiet /norestart"
+          RepairArguments="/repair /quiet /norestart"
+          DetectCondition="VCREDIST_X64_INSTALLED = 1"
+          PerMachine="yes"
+          Vital="yes"
+          Compressed="yes"
+          Permanent="no" />
+
+      <!-- CUDA Toolkit (or replace with runtime-only package strategy) -->
+      <ExePackage
+          Id="CudaToolkit"
+          DisplayName="NVIDIA CUDA Toolkit 12.5"
+          SourceFile="payloads\\cuda_installer.exe"
+          InstallArguments="-s"
+          DetectCondition="CUDA_NVCC_PATH"
+          PerMachine="yes"
+          Vital="yes"
+          Compressed="yes"
+          Permanent="no" />
+
+      <!-- COLMAP zip extracted by helper package/script -->
+      <ExePackage
+          Id="ColmapInstall"
+          DisplayName="COLMAP [ColmapVersion]"
+          SourceFile="payloads\\install-colmap.cmd"
+          InstallArguments="&quot;[ColmapInstallDir]&quot; &quot;[WixBundleOriginalSourceFolder]payloads\\colmap-x64-windows-cuda.zip&quot;"
+          DetectCondition="COLMAP_BAT_EXISTS"
+          PerMachine="yes"
+          Vital="yes"
+          Compressed="yes"
+          Permanent="no" />
+
+      <!-- Bimba3D app payload -->
+      <MsiPackage
+          Id="Bimba3DApp"
+          DisplayName="Bimba3D"
+          SourceFile="payloads\\Bimba3D.msi"
+          InstallCondition="VersionNT64"
+          Vital="yes"
+          Compressed="yes" />
+
+    </Chain>
+
+  </Bundle>
+</Wix>
