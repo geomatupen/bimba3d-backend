@@ -2,17 +2,21 @@
 setlocal ENABLEEXTENSIONS
 
 if "%~1"=="" (
-  echo Usage: install-colmap.cmd ^<install-dir^> ^<colmap-zip^>
+  echo Usage: install-colmap.cmd ^<colmap-zip^> OR install-colmap.cmd ^<install-dir^> ^<colmap-zip^>
   exit /b 2
 )
+
+set "DEFAULT_INSTALL_DIR=%ProgramFiles%\Bimba3D\third_party\colmap"
 
 if "%~2"=="" (
-  echo Usage: install-colmap.cmd ^<install-dir^> ^<colmap-zip^>
-  exit /b 2
+  set "INSTALL_DIR=%DEFAULT_INSTALL_DIR%"
+  set "ZIP_FILE=%~1"
+) else (
+  set "INSTALL_DIR=%~1"
+  set "ZIP_FILE=%~2"
 )
 
-set "INSTALL_DIR=%~1"
-set "ZIP_FILE=%~2"
+if "%INSTALL_DIR:~0,1%"=="[" set "INSTALL_DIR=%DEFAULT_INSTALL_DIR%"
 
 if not exist "%ZIP_FILE%" (
   echo ERROR: COLMAP zip not found: "%ZIP_FILE%"
@@ -21,7 +25,7 @@ if not exist "%ZIP_FILE%" (
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%ZIP_FILE%' -DestinationPath '%INSTALL_DIR%' -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '%ZIP_FILE%' -DestinationPath '%INSTALL_DIR%' -Force"
 if errorlevel 1 (
   echo ERROR: Failed to extract COLMAP archive.
   exit /b 4
