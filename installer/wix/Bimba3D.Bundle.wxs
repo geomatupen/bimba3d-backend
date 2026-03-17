@@ -8,6 +8,7 @@
       Version="1.0.0.0"
       Manufacturer="Bimba3D"
       UpgradeCode="2CBDBF2C-F413-4E26-969A-788991D4A82B"
+      IconSourceFile="assets\Bimba3D.ico"
       Compressed="yes"
       DisableModify="yes"
       DisableRemove="no">
@@ -15,16 +16,19 @@
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"
-          LicenseUrl="https://github.com/colmap/colmap/blob/main/COPYING.txt"
+            LogoFile="assets\Bimba3D-setup-logo.png"
+            LicenseUrl="https://github.com/geomatupen/bimba3d/blob/main/installer/wix/EULA.md"
           SuppressOptionsUI="yes" />
     </BootstrapperApplication>
 
     <Variable Name="Bimba3DInstallDir" Type="string" Value="[ProgramFiles64Folder]Bimba3D" />
     <Variable Name="LogRoot" Type="string" Value="[ProgramDataFolder]Bimba3D\\Logs" />
-    <Variable Name="ColmapInstallDir" Type="string" Value="[Bimba3DInstallDir]\\third_party\\colmap" />
+    <Variable Name="ColmapInstallDir" Type="string" Value="C:\\ProgramData\\Bimba3D\\third_party\\colmap" />
     <Variable Name="CudaInstallDir" Type="string" Value="C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5" />
+    <Variable Name="PythonInstallDir" Type="string" Value="C:\\Program Files\\Python312" />
     <Variable Name="ColmapVersion" Type="string" Value="4.0.1" />
     <Variable Name="InstallBuildTools" Type="numeric" Value="0" />
+    <Variable Name="InstallCudaToolkit" Type="numeric" Value="0" />
 
     <util:RegistrySearch
         Id="SearchVCRedistInstalled"
@@ -42,11 +46,34 @@
         Variable="VSBT_17_PATH"
         Result="value" />
 
+    <util:RegistrySearch
+        Id="SearchVs2022SxS"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\SxS\VS7"
+        Value="17.0"
+        Variable="VS2022_SXS_PATH"
+        Result="value" />
+
     <util:FileSearch
         Id="SearchCudaNvcc"
         Path="[CudaInstallDir]\\bin\\nvcc.exe"
         Variable="CUDA_NVCC_PATH"
         Result="exists" />
+
+    <util:RegistrySearch Id="SearchCudaV128" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.8" Value="InstallDir" Variable="CUDA_V128_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV127" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.7" Value="InstallDir" Variable="CUDA_V127_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV126" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.6" Value="InstallDir" Variable="CUDA_V126_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV125" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.5" Value="InstallDir" Variable="CUDA_V125_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV124" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.4" Value="InstallDir" Variable="CUDA_V124_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV123" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.3" Value="InstallDir" Variable="CUDA_V123_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV122" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.2" Value="InstallDir" Variable="CUDA_V122_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV121" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.1" Value="InstallDir" Variable="CUDA_V121_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV120" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.0" Value="InstallDir" Variable="CUDA_V120_DIR" Result="value" />
+       <util:FileSearch
+           Id="SearchPythonX64"
+           Path="[PythonInstallDir]\\python.exe"
+           Variable="PYTHON_X64_EXISTS"
+           Result="exists" />
 
     <util:FileSearch
         Id="SearchColmapBat"
@@ -61,12 +88,23 @@
           DisplayName="Microsoft Visual Studio Build Tools 2022"
           SourceFile="payloads\\vs_BuildTools.exe"
           InstallArguments="--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-          DetectCondition="VSBT_17_PATH"
-          InstallCondition="InstallBuildTools = 1"
+          DetectCondition="VSBT_17_PATH OR VS2022_SXS_PATH"
+          InstallCondition="InstallBuildTools = 1 AND NOT RebootPending"
+          PerMachine="yes"
+          Vital="no"
+          Compressed="yes"
+          Permanent="yes" />
+
+      <ExePackage
+          Id="Python312X64"
+          DisplayName="Python 3.12 (x64)"
+          SourceFile="payloads\\python-3.12.8-amd64.exe"
+          InstallArguments="/quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 Include_test=0 Include_tcltk=0 Include_doc=0 Include_launcher=1 Shortcuts=0 TargetDir=&quot;[PythonInstallDir]&quot;"
+          DetectCondition="PYTHON_X64_EXISTS"
           PerMachine="yes"
           Vital="yes"
           Compressed="yes"
-          Permanent="no" />
+          Permanent="yes" />
 
       <!-- VC++ Runtime -->
       <ExePackage
@@ -79,7 +117,7 @@
           PerMachine="yes"
           Vital="yes"
           Compressed="yes"
-          Permanent="no" />
+          Permanent="yes" />
 
       <!-- CUDA Toolkit (or replace with runtime-only package strategy) -->
       <ExePackage
@@ -87,23 +125,27 @@
           DisplayName="NVIDIA CUDA Toolkit 12.5"
           SourceFile="payloads\\cuda_installer.exe"
           InstallArguments="-s"
-          DetectCondition="CUDA_NVCC_PATH"
+          DetectCondition="CUDA_NVCC_PATH OR CUDA_V128_DIR OR CUDA_V127_DIR OR CUDA_V126_DIR OR CUDA_V125_DIR OR CUDA_V124_DIR OR CUDA_V123_DIR OR CUDA_V122_DIR OR CUDA_V121_DIR OR CUDA_V120_DIR"
+          InstallCondition="InstallCudaToolkit = 1"
           PerMachine="yes"
-          Vital="yes"
+          Vital="no"
           Compressed="yes"
-          Permanent="no" />
+          Permanent="yes" />
 
       <!-- COLMAP zip extracted by helper package/script -->
       <ExePackage
           Id="ColmapInstall"
           DisplayName="COLMAP [ColmapVersion]"
           SourceFile="payloads\\install-colmap.cmd"
-          InstallArguments="&quot;[ColmapInstallDir]&quot; &quot;[WixBundleOriginalSourceFolder]payloads\\colmap-x64-windows-cuda.zip&quot;"
+          InstallArguments="&quot;[ColmapInstallDir]&quot; &quot;[WixBundleExecutePackageCacheFolder]colmap-x64-windows-cuda.zip&quot;"
           DetectCondition="COLMAP_BAT_EXISTS"
           PerMachine="yes"
-          Vital="yes"
+                    Vital="yes"
           Compressed="yes"
-          Permanent="no" />
+                    Permanent="yes">
+                <Payload SourceFile="payloads\\install-colmap.ps1" />
+                <Payload SourceFile="payloads\\colmap-x64-windows-cuda.zip" />
+            </ExePackage>
 
       <!-- Bimba3D app payload -->
       <MsiPackage

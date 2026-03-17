@@ -1,48 +1,42 @@
 @echo off
 setlocal ENABLEEXTENSIONS
 
+set "LOG_ROOT=C:\ProgramData\Bimba3D\Logs"
+if not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%" >nul 2>nul
+set "LOG_FILE=%LOG_ROOT%\colmap-wrapper.log"
+echo ==== %DATE% %TIME% START install-colmap.cmd ====>>"%LOG_FILE%"
+
 if "%~1"=="" (
   echo Usage: install-colmap.cmd ^<install-dir^> ^<colmap-zip^>
+  echo ERROR missing arg1>>"%LOG_FILE%"
   exit /b 2
 )
 
 if "%~2"=="" (
   echo Usage: install-colmap.cmd ^<install-dir^> ^<colmap-zip^>
+  echo ERROR missing arg2>>"%LOG_FILE%"
   exit /b 2
 )
 
 set "INSTALL_DIR=%~1"
 set "ZIP_FILE=%~2"
+set "PS_SCRIPT=%~dp0install-colmap.ps1"
+echo INSTALL_DIR=%INSTALL_DIR%>>"%LOG_FILE%"
+echo ZIP_FILE=%ZIP_FILE%>>"%LOG_FILE%"
+echo PS_SCRIPT=%PS_SCRIPT%>>"%LOG_FILE%"
 
-if not exist "%ZIP_FILE%" (
-  echo ERROR: COLMAP zip not found: "%ZIP_FILE%"
-  exit /b 3
+if not exist "%PS_SCRIPT%" (
+  echo ERROR: Missing helper script: "%PS_SCRIPT%"
+  echo ERROR helper script missing>>"%LOG_FILE%"
+  exit /b 10
 )
 
-if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%ZIP_FILE%' -DestinationPath '%INSTALL_DIR%' -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -ZipPath "%ZIP_FILE%" -InstallDir "%INSTALL_DIR%" >>"%LOG_FILE%" 2>>&1
 if errorlevel 1 (
-  echo ERROR: Failed to extract COLMAP archive.
-  exit /b 4
+  set "RC=1"
+) else (
+  set "RC=0"
 )
-
-set "COLMAP_BAT=%INSTALL_DIR%\COLMAP.bat"
-if not exist "%COLMAP_BAT%" (
-  for /f "delims=" %%D in ('dir /b /ad "%INSTALL_DIR%"') do (
-    if exist "%INSTALL_DIR%\%%D\COLMAP.bat" (
-      xcopy "%INSTALL_DIR%\%%D\*" "%INSTALL_DIR%\" /E /I /Y >nul
-    )
-  )
-)
-
-if not exist "%COLMAP_BAT%" (
-  echo ERROR: COLMAP.bat not found after extraction.
-  exit /b 5
-)
-
-setx COLMAP_EXE "%COLMAP_BAT%" /M >nul 2>nul
-
-echo COLMAP installed at "%INSTALL_DIR%"
-echo COLMAP_EXE set to "%COLMAP_BAT%"
-exit /b 0
+echo RC=%RC%>>"%LOG_FILE%"
+echo ==== %DATE% %TIME% END install-colmap.cmd ====>>"%LOG_FILE%"
+exit /b %RC%

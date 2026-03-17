@@ -1,8 +1,116 @@
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
+
+
+def _find_vswhere_exe() -> Path | None:
+    candidates = []
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(Path(base) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_msvc_build_env(logger) -> bool:
+    """Ensure cl.exe is available in current process env on Windows.
+
+    Returns True when cl.exe can be resolved after bootstrapping.
+    """
+    if os.name != "nt":
+        return True
+    if shutil.which("cl"):
+        return True
+
+    vswhere = _find_vswhere_exe()
+    if not vswhere:
+        logger.warning("vswhere.exe not found; cannot auto-load MSVC build environment.")
+        return False
+
+    try:
+        install_query = subprocess.run(
+            [
+                str(vswhere),
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property",
+                "installationPath",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        install_path = (install_query.stdout or "").strip().splitlines()
+        if not install_path:
+            logger.warning("Visual Studio C++ build tools installation not found via vswhere.")
+            return False
+        root = Path(install_path[0].strip())
+    except Exception as exc:
+        logger.warning("Failed querying Visual Studio installation with vswhere: %s", exc)
+        return False
+
+    vcvars = root / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    devcmd = root / "Common7" / "Tools" / "VsDevCmd.bat"
+
+    bootstrap_cmds: list[str] = []
+    if vcvars.exists():
+        bootstrap_cmds.append(f'call "{vcvars}" && set')
+    if devcmd.exists():
+        bootstrap_cmds.append(f'call "{devcmd}" -arch=x64 -host_arch=x64 -no_logo && set')
+
+    if not bootstrap_cmds:
+        logger.warning("No vcvars64.bat or VsDevCmd.bat found under %s", root)
+        return False
+
+    loaded = False
+    for bootstrap_cmd in bootstrap_cmds:
+        try:
+            env_dump = subprocess.run(
+                ["cmd.exe", "/d", "/s", "/c", bootstrap_cmd],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            for line in (env_dump.stdout or "").splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key:
+                    os.environ[key] = value
+            loaded = True
+            break
+        except Exception as exc:
+            logger.warning("MSVC env command failed (%s): %s", bootstrap_cmd, exc)
+
+    if not loaded:
+        msvc_glob = root / "VC" / "Tools" / "MSVC"
+        if msvc_glob.exists():
+            versions = sorted([p for p in msvc_glob.iterdir() if p.is_dir()])
+            if versions:
+                latest = versions[-1]
+                cl_dir = latest / "bin" / "Hostx64" / "x64"
+                if (cl_dir / "cl.exe").exists():
+                    os.environ["PATH"] = str(cl_dir) + os.pathsep + os.environ.get("PATH", "")
+                    logger.warning(
+                        "Fell back to direct cl.exe PATH injection from %s (INCLUDE/LIB env may be incomplete).",
+                        cl_dir,
+                    )
+
+    if shutil.which("cl"):
+        logger.info("Loaded MSVC build environment for gsplat CUDA extension.")
+        return True
+
+    logger.warning("MSVC environment bootstrap completed but cl.exe is still not on PATH.")
+    return False
 
 
 def run_training(
@@ -289,8 +397,12 @@ def run_training(
             _log_training_snapshot(step, max_steps_local, loss, progress_fraction, elapsed, eta)
             last_snapshot_step["value"] = step
 
+    torch_version = None
+    torch_cuda_version = None
     try:
         import torch
+        torch_version = getattr(torch, "__version__", None)
+        torch_cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
         cuda_ok = torch.cuda.is_available()
     except Exception:
         cuda_ok = False
@@ -437,7 +549,18 @@ def run_training(
     cfg.checkpoint_callback = checkpoint_callback
 
     if device == "cpu":
-        raise RuntimeError("Upstream simple_trainer currently requires CUDA in this worker path")
+        cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "<unset>"
+        nvcc_path = shutil.which("nvcc") or "<not-found>"
+        cl_path = shutil.which("cl") or "<not-found>"
+        msg = (
+            "Upstream simple_trainer requires CUDA in this worker path. "
+            f"torch={torch_version or '<unknown>'}, torch.version.cuda={torch_cuda_version or '<none>'}, "
+            f"torch.cuda.is_available={cuda_ok}, CUDA_HOME/CUDA_PATH={cuda_home}, nvcc={nvcc_path}, cl={cl_path}."
+        )
+        update_status(project_dir, "failed", progress=55, stage="training", message=msg, error=msg)
+        raise RuntimeError(msg)
+
+    _load_msvc_build_env(logger)
 
     gsplat_cuda_error: str | None = None
     try:

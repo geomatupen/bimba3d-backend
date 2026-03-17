@@ -46,6 +46,13 @@ Option B (if using normal cmd):
 - Run:
   call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" amd64
 
+Installed app behavior (Windows)
+- The packaged launcher now auto-attempts x64 toolchain activation before gsplat build:
+  - `vcvarsall.bat amd64` (preferred), or
+  - `VsDevCmd.bat -arch=x64 -host_arch=x64`
+- This means you should not need to manually switch from 32-bit to x64 every run for installed-app bootstrap.
+- If Build Tools scripts are missing, gsplat install will fail and status will show guidance links.
+
 Then run these steps:
 
 1) Go to project
