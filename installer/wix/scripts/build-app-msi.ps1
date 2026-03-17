@@ -176,13 +176,6 @@ if "%NEED_BOOTSTRAP%"=="1" (
         exit /b 1
     )
 
-    "%VENV_PY%" -m pip install -r bimba3d_backend\requirements.windows.txt
-    if errorlevel 1 (
-        echo Failed to install backend requirements.
-        pause
-        exit /b 1
-    )
-
     "%VENV_PY%" -m pip install --index-url %TORCH_INDEX% --force-reinstall "torch==%TORCH_VERSION%"
     if errorlevel 1 (
         echo CUDA torch install failed.
@@ -259,10 +252,17 @@ if "%NEED_BOOTSTRAP%"=="1" (
         if errorlevel 1 (
             echo Warning: failed to install ninja. gsplat build may be unavailable.
         )
-        "%VENV_PY%" -m pip install --force-reinstall --no-binary=gsplat "gsplat==%GSPLAT_VERSION%" --no-build-isolation -v
+        "%VENV_PY%" -m pip install --no-binary=gsplat --no-deps "gsplat==%GSPLAT_VERSION%" --no-build-isolation -v
         if errorlevel 1 (
             echo Warning: failed to build/install gsplat %GSPLAT_VERSION%. gsplat training will fail until CUDA/toolchain is repaired.
         )
+    )
+
+    "%VENV_PY%" -m pip install --upgrade-strategy only-if-needed -r bimba3d_backend\requirements.windows.txt
+    if errorlevel 1 (
+        echo Failed to install backend requirements.
+        pause
+        exit /b 1
     )
 
     set "TORCH_INSTALLED=<unknown>"
