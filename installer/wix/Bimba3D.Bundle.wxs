@@ -16,6 +16,7 @@
     <BootstrapperApplication>
       <bal:WixStandardBootstrapperApplication
           Theme="hyperlinkLicense"
+            LogoFile="assets\Bimba3D-setup-logo.png"
             LicenseUrl="https://github.com/geomatupen/bimba3d/blob/main/installer/wix/EULA.md"
           SuppressOptionsUI="yes" />
     </BootstrapperApplication>
