@@ -229,7 +229,7 @@ if "%NEED_BOOTSTRAP%"=="1" (
             if not defined VSWHERE if exist "%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
 
             if defined VSWHERE (
-                for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do if not defined VSINSTALL set "VSINSTALL=%%~I"
+                for /f "delims=" %%I in ('"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath') do if not defined VSINSTALL set "VSINSTALL=%%~I"
                 if defined VSINSTALL (
                     set "VCVARS64=%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat"
                     set "VSDEVCMD=%VSINSTALL%\Common7\Tools\VsDevCmd.bat"
@@ -265,8 +265,11 @@ if "%NEED_BOOTSTRAP%"=="1" (
         )
     )
 
+    set "TORCH_INSTALLED=<unknown>"
+    for /f "delims=" %%I in ('"%VENV_PY%" -c "import torch; print(getattr(torch,'__version__','unknown'))" 2^>nul') do set "TORCH_INSTALLED=%%I"
     > "%BOOTSTRAP_STATE%" echo TORCH_VERSION=%TORCH_VERSION%
     >> "%BOOTSTRAP_STATE%" echo TORCH_FLAVOR=%TORCH_FLAVOR%
+    >> "%BOOTSTRAP_STATE%" echo TORCH_INSTALLED=%TORCH_INSTALLED%
     >> "%BOOTSTRAP_STATE%" echo GSPLAT_VERSION=%GSPLAT_VERSION%
 )
 
