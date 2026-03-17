@@ -43,11 +43,29 @@
         Variable="VSBT_17_PATH"
         Result="value" />
 
+    <util:RegistrySearch
+        Id="SearchVs2022SxS"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\VisualStudio\SxS\VS7"
+        Value="17.0"
+        Variable="VS2022_SXS_PATH"
+        Result="value" />
+
     <util:FileSearch
         Id="SearchCudaNvcc"
         Path="[CudaInstallDir]\\bin\\nvcc.exe"
         Variable="CUDA_NVCC_PATH"
         Result="exists" />
+
+    <util:RegistrySearch Id="SearchCudaV128" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.8" Value="InstallDir" Variable="CUDA_V128_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV127" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.7" Value="InstallDir" Variable="CUDA_V127_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV126" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.6" Value="InstallDir" Variable="CUDA_V126_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV125" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.5" Value="InstallDir" Variable="CUDA_V125_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV124" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.4" Value="InstallDir" Variable="CUDA_V124_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV123" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.3" Value="InstallDir" Variable="CUDA_V123_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV122" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.2" Value="InstallDir" Variable="CUDA_V122_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV121" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.1" Value="InstallDir" Variable="CUDA_V121_DIR" Result="value" />
+    <util:RegistrySearch Id="SearchCudaV120" Root="HKLM" Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA\v12.0" Value="InstallDir" Variable="CUDA_V120_DIR" Result="value" />
        <util:FileSearch
            Id="SearchPythonX64"
            Path="[PythonInstallDir]\\python.exe"
@@ -67,7 +85,7 @@
           DisplayName="Microsoft Visual Studio Build Tools 2022"
           SourceFile="payloads\\vs_BuildTools.exe"
           InstallArguments="--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-          DetectCondition="VSBT_17_PATH"
+          DetectCondition="VSBT_17_PATH OR VS2022_SXS_PATH"
           InstallCondition="InstallBuildTools = 1"
           PerMachine="yes"
           Vital="yes"
@@ -104,7 +122,7 @@
           DisplayName="NVIDIA CUDA Toolkit 12.5"
           SourceFile="payloads\\cuda_installer.exe"
           InstallArguments="-s"
-          DetectCondition="CUDA_NVCC_PATH"
+          DetectCondition="CUDA_NVCC_PATH OR CUDA_V128_DIR OR CUDA_V127_DIR OR CUDA_V126_DIR OR CUDA_V125_DIR OR CUDA_V124_DIR OR CUDA_V123_DIR OR CUDA_V122_DIR OR CUDA_V121_DIR OR CUDA_V120_DIR"
           PerMachine="yes"
           Vital="no"
           Compressed="yes"

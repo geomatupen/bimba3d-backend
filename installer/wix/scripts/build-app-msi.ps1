@@ -111,7 +111,12 @@ set "TORCH_INDEX=https://download.pytorch.org/whl/cu121"
 set "TORCH_VERSION=2.5.1+cu121"
 set "TORCH_CPU_VERSION=2.5.1"
 set "GSPLAT_VERSION=1.5.3"
-set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5"
+set "CUDA_HOME="
+if defined CUDA_PATH if exist "%CUDA_PATH%\bin\nvcc.exe" set "CUDA_HOME=%CUDA_PATH%"
+if not defined CUDA_HOME for %%V in (12.8 12.7 12.6 12.5 12.4 12.3 12.2 12.1 12.0) do (
+    if not defined CUDA_HOME if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%V\bin\nvcc.exe" set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%V"
+)
+if not defined CUDA_HOME set "CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5"
 set "CUDA_PATH=%CUDA_HOME%"
 set "DISTUTILS_USE_SDK=1"
 set "PATH=%CUDA_PATH%\bin;%CUDA_PATH%\libnvvp;%PATH%"
