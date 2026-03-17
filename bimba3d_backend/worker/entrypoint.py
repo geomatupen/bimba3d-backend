@@ -2938,14 +2938,22 @@ def _run_selected_training_engine(
             raise
 
         project_dir = Path(output_dir).parent
-        guidance = (
-            "CUDA is not available for gsplat training on this machine. "
-            "Install compatible x64 components and retry. "
-            "Required: NVIDIA driver + CUDA Toolkit x64 (recommended 12.5 for this build) + Visual Studio 2022 Build Tools x64 with C++ workload. "
-            "CUDA compatibility/downloads: https://developer.nvidia.com/cuda-downloads . "
-            "Visual Studio Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/ . "
-            "Do not use x86 installers."
-        )
+        if os.name == "nt":
+            guidance = (
+                "CUDA is not available for gsplat training on this Windows machine. "
+                "Install compatible x64 components and retry. "
+                "Required: NVIDIA driver + CUDA Toolkit x64 (recommended 12.5 for this build) + Visual Studio 2022 Build Tools x64 with C++ workload. "
+                "Before reinstalling gsplat, run: call \"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvarsall.bat\" amd64 . "
+                "CUDA compatibility/downloads: https://developer.nvidia.com/cuda-downloads . "
+                "Visual Studio Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/ . "
+                "Do not use x86 installers."
+            )
+        else:
+            guidance = (
+                "CUDA is not available for gsplat training on this machine. "
+                "Install compatible NVIDIA driver + CUDA toolkit and retry. "
+                "CUDA compatibility/downloads: https://developer.nvidia.com/cuda-downloads ."
+            )
         logger.error("gsplat training failed with CUDA/toolchain issue: %s", exc, exc_info=True)
         update_status(
             project_dir,

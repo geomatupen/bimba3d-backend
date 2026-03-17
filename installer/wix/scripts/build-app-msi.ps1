@@ -181,6 +181,21 @@ if "%NEED_BOOTSTRAP%"=="1" (
     )
 
     if /I "%TORCH_FLAVOR%"=="cu121" (
+        set "VCVARS64=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+        set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+        if exist "%VCVARS64%" (
+            call "%VCVARS64%" amd64 >nul
+        ) else if exist "%VSDEVCMD%" (
+            call "%VSDEVCMD%" -arch=x64 -host_arch=x64 -no_logo >nul
+        ) else (
+            echo Warning: Visual Studio Build Tools environment scripts not found. gsplat build may fail.
+        )
+
+        where cl >nul 2>nul
+        if errorlevel 1 (
+            echo Warning: cl.exe is not available in current shell. Ensure Visual Studio 2022 Build Tools x64 is installed.
+        )
+
         "%VENV_PY%" -m pip install --force-reinstall ninja
         if errorlevel 1 (
             echo Warning: failed to install ninja. gsplat build may be unavailable.
