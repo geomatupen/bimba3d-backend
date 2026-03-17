@@ -8,6 +8,7 @@
       Version="1.0.0.0"
       Manufacturer="Bimba3D"
       UpgradeCode="2CBDBF2C-F413-4E26-969A-788991D4A82B"
+      IconSourceFile="assets\Bimba3D.ico"
       Compressed="yes"
       DisableModify="yes"
       DisableRemove="no">
