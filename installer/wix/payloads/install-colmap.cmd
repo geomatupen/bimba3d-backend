@@ -1,8 +1,13 @@
 @echo off
 setlocal ENABLEEXTENSIONS
 
-set "EARLY_TRACE=%WINDIR%\Temp\Bimba3D-colmap-early.log"
-if "%EARLY_TRACE%"=="" set "EARLY_TRACE=C:\Windows\Temp\Bimba3D-colmap-early.log"
+set "EARLY_TRACE=%ProgramData%\Bimba3D\Logs\colmap-early.log"
+if "%EARLY_TRACE%"=="" set "EARLY_TRACE=C:\ProgramData\Bimba3D\Logs\colmap-early.log"
+if not exist "%ProgramData%\Bimba3D\Logs" mkdir "%ProgramData%\Bimba3D\Logs" >nul 2>nul
+if not exist "%ProgramData%\Bimba3D\Logs" (
+  set "EARLY_TRACE=%WINDIR%\Temp\Bimba3D-colmap-early.log"
+  if "%EARLY_TRACE%"=="" set "EARLY_TRACE=C:\Windows\Temp\Bimba3D-colmap-early.log"
+)
 echo ==== %DATE% %TIME% PRE-BOOT install-colmap.cmd ====>>"%EARLY_TRACE%" 2>nul
 set "EARLY_TRACE_CACHE=%~dp0install-colmap-early.log"
 echo ==== %DATE% %TIME% PRE-BOOT install-colmap.cmd ====>>"%EARLY_TRACE_CACHE%" 2>nul
@@ -14,6 +19,8 @@ if "%SAFE_TEMP%"=="" set "SAFE_TEMP=%TMP%"
 if "%SAFE_TEMP%"=="" set "SAFE_TEMP=%WINDIR%\Temp"
 if "%SAFE_TEMP%"=="" set "SAFE_TEMP=C:\Windows\Temp"
 echo SAFE_TEMP=%SAFE_TEMP%>>"%EARLY_TRACE%" 2>nul
+set "EARLY_TRACE_TEMP=%SAFE_TEMP%\Bimba3D-colmap-early.log"
+echo ==== %DATE% %TIME% PRE-BOOT install-colmap.cmd ====>>"%EARLY_TRACE_TEMP%" 2>nul
 
 set "LOG_ROOT=C:\ProgramData\Bimba3D\Logs"
 if not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%" >nul 2>nul
@@ -52,7 +59,19 @@ set "NOCUDA_ZIP_FILE=%~3"
 set "BURN_LOG_FILE=%~4"
 set "PS_SCRIPT=%~dp0install-colmap.ps1"
 set "DETAIL_LOG=%LOG_ROOT%\colmap-install-detail.log"
+if not "%BURN_LOG_FILE%"=="" (
+  echo [COLMAP] WRAPPER_START %DATE% %TIME%>>"%BURN_LOG_FILE%"
+)
 where powershell >>"%EARLY_TRACE%" 2>&1
+set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%POWERSHELL_EXE%" set "POWERSHELL_EXE=powershell"
+for %%I in ("%DETAIL_LOG%") do set "DETAIL_DIR=%%~dpI"
+if not "%DETAIL_DIR%"=="" (
+  if not exist "%DETAIL_DIR%" mkdir "%DETAIL_DIR%" >nul 2>nul
+)
+if not exist "%DETAIL_DIR%" (
+  set "DETAIL_LOG=%~dp0colmap-install-detail.log"
+)
 echo INSTALL_DIR=%INSTALL_DIR%>>"%LOG_FILE%"
 echo CUDA_ZIP_FILE=%CUDA_ZIP_FILE%>>"%LOG_FILE%"
 echo NOCUDA_ZIP_FILE=%NOCUDA_ZIP_FILE%>>"%LOG_FILE%"
@@ -76,17 +95,26 @@ if not exist "%PS_SCRIPT%" (
 
 if "%NOCUDA_ZIP_FILE%"=="" (
   echo POWERSHELL_LAUNCH mode=cuda-only script="%PS_SCRIPT%">>"%EARLY_TRACE%" 2>nul
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -CudaZipPath "%CUDA_ZIP_FILE%" -InstallDir "%INSTALL_DIR%" -LogPath "%DETAIL_LOG%" -BurnLogPath "%BURN_LOG_FILE%" >>"%DETAIL_LOG%" 2>&1
+  "%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -CudaZipPath "%CUDA_ZIP_FILE%" -InstallDir "%INSTALL_DIR%" -LogPath "%DETAIL_LOG%" -BurnLogPath "%BURN_LOG_FILE%"
 ) else (
   echo POWERSHELL_LAUNCH mode=cuda+nocuda script="%PS_SCRIPT%">>"%EARLY_TRACE%" 2>nul
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -CudaZipPath "%CUDA_ZIP_FILE%" -NoCudaZipPath "%NOCUDA_ZIP_FILE%" -InstallDir "%INSTALL_DIR%" -LogPath "%DETAIL_LOG%" -BurnLogPath "%BURN_LOG_FILE%" >>"%DETAIL_LOG%" 2>&1
+  "%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -CudaZipPath "%CUDA_ZIP_FILE%" -NoCudaZipPath "%NOCUDA_ZIP_FILE%" -InstallDir "%INSTALL_DIR%" -LogPath "%DETAIL_LOG%" -BurnLogPath "%BURN_LOG_FILE%"
 )
-echo POWERSHELL_EXITCODE=%ERRORLEVEL%>>"%EARLY_TRACE%" 2>nul
-if errorlevel 1 (
-  set "RC=1"
-) else (
-  set "RC=0"
+set "PS_RC=%ERRORLEVEL%"
+echo POWERSHELL_EXITCODE=%PS_RC%>>"%EARLY_TRACE%" 2>nul
+
+if not exist "%DETAIL_LOG%" (
+  echo %DATE% %TIME% DETAIL_LOG_MISSING RC=%ERRORLEVEL%>"%SAFE_TEMP%\bimba3d-colmap-detail-missing.log" 2>nul
 )
+
+set "DETAIL_MIRROR=%LOG_ROOT%\colmap-install-detail.log"
+if exist "%DETAIL_LOG%" (
+  if /I not "%DETAIL_LOG%"=="%DETAIL_MIRROR%" copy /Y "%DETAIL_LOG%" "%DETAIL_MIRROR%" >nul 2>nul
+  if not "%BURN_LOG_FILE%"=="" echo [COLMAP] DETAIL_LOG_MIRROR=%DETAIL_MIRROR%>>"%BURN_LOG_FILE%"
+)
+
+set "RC=%PS_RC%"
+if "%RC%"=="" set "RC=1"
 echo RC=%RC%>>"%LOG_FILE%"
 echo ==== %DATE% %TIME% END install-colmap.cmd ====>>"%LOG_FILE%"
 if not "%BURN_LOG_FILE%"=="" (

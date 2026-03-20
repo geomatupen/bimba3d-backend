@@ -145,21 +145,42 @@ function Get-Bimba3DInstalledVsMajor {
         }
     }
 
-    $vs17Path = Get-Bimba3DRegistryValue -Hive LocalMachine -SubKey 'SOFTWARE\Microsoft\VisualStudio\SxS\VS7' -ValueName '17.0'
-    if ($vs17Path) {
-        return 17
+    return $null
+}
+
+function Test-Bimba3DHasVsX64Tools {
+    $vswherePath = Get-Bimba3DVsWherePath
+    if (-not $vswherePath) {
+        return $false
+    }
+
+    try {
+        $installationPath = & $vswherePath -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath -latest 2>$null
+        if ($LASTEXITCODE -eq 0 -and $installationPath -and $installationPath.Trim()) {
+            return $true
+        }
+    } catch {
+    }
+
+    return $false
+}
+
+function Get-Bimba3DInstalledCudaVersion {
+    $versions = Get-Bimba3DInstalledCudaVersions
+    if ($versions.Count -gt 0) {
+        return $versions[0]
     }
 
     return $null
 }
 
-function Get-Bimba3DInstalledCudaVersion {
-    $candidates = New-Object System.Collections.Generic.List[string]
+function Get-Bimba3DInstalledCudaVersions {
+    $candidates = New-Object System.Collections.Generic.HashSet[string]
 
     if ($env:CUDA_PATH) {
         $match = [regex]::Match($env:CUDA_PATH, 'CUDA\\v(?<v>\d+\.\d+)')
         if ($match.Success) {
-            $candidates.Add($match.Groups['v'].Value)
+            [void]$candidates.Add($match.Groups['v'].Value)
         }
     }
 
@@ -167,7 +188,7 @@ function Get-Bimba3DInstalledCudaVersion {
         if ($cudaEnv.Value) {
             $match = [regex]::Match($cudaEnv.Value, 'CUDA\\v(?<v>\d+\.\d+)')
             if ($match.Success) {
-                $candidates.Add($match.Groups['v'].Value)
+                [void]$candidates.Add($match.Groups['v'].Value)
             }
         }
     }
@@ -178,14 +199,14 @@ function Get-Bimba3DInstalledCudaVersion {
             $nvccOut = & $nvcc.Source --version 2>$null | Out-String
             $match = [regex]::Match($nvccOut, 'release\s+(?<v>\d+\.\d+)')
             if ($match.Success) {
-                $candidates.Add($match.Groups['v'].Value)
+                [void]$candidates.Add($match.Groups['v'].Value)
             }
         } catch {
         }
 
         $pathMatch = [regex]::Match($nvcc.Source, 'CUDA\\v(?<v>\d+\.\d+)')
         if ($pathMatch.Success) {
-            $candidates.Add($pathMatch.Groups['v'].Value)
+            [void]$candidates.Add($pathMatch.Groups['v'].Value)
         }
     }
 
@@ -194,7 +215,7 @@ function Get-Bimba3DInstalledCudaVersion {
         foreach ($dir in (Get-ChildItem -Path $cudaRoot -Directory -ErrorAction SilentlyContinue)) {
             $match = [regex]::Match($dir.Name, '^v(?<v>\d+\.\d+)$')
             if ($match.Success) {
-                $candidates.Add($match.Groups['v'].Value)
+                [void]$candidates.Add($match.Groups['v'].Value)
             }
         }
     }
@@ -208,7 +229,7 @@ function Get-Bimba3DInstalledCudaVersion {
                 foreach ($subName in $root.GetSubKeyNames()) {
                     $match = [regex]::Match($subName, '^v(?<v>\d+\.\d+)$')
                     if ($match.Success) {
-                        $candidates.Add($match.Groups['v'].Value)
+                        [void]$candidates.Add($match.Groups['v'].Value)
                     }
                 }
             }
@@ -216,19 +237,84 @@ function Get-Bimba3DInstalledCudaVersion {
         }
     }
 
-    $bestVersion = $null
-    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+    $parsedVersions = @()
+    foreach ($candidate in $candidates) {
         $parsed = ConvertTo-Bimba3DVersion -VersionText $candidate
-        if ($parsed -and ((-not $bestVersion) -or $parsed -gt $bestVersion)) {
-            $bestVersion = $parsed
+        if ($parsed) {
+            $parsedVersions += [pscustomobject]@{
+                text = "$($parsed.Major).$($parsed.Minor)"
+                version = $parsed
+            }
         }
     }
 
-    if ($bestVersion) {
-        return "$($bestVersion.Major).$($bestVersion.Minor)"
+    if ($parsedVersions.Count -eq 0) {
+        return @()
+    }
+
+    $ordered = $parsedVersions |
+        Sort-Object -Property @{ Expression = { $_.version }; Descending = $true } |
+        ForEach-Object { $_.text } |
+        Select-Object -Unique
+
+    return @($ordered)
+}
+
+function Get-Bimba3DCudaInstallPathByVersion {
+    param([string]$VersionText)
+
+    if (-not $VersionText) {
+        return $null
+    }
+
+    $versionKey = $VersionText -replace '\\.', '_'
+    $envVarName = "CUDA_PATH_V$versionKey"
+    $envVarPath = [Environment]::GetEnvironmentVariable($envVarName, 'Process')
+    if (-not $envVarPath) {
+        $envVarPath = [Environment]::GetEnvironmentVariable($envVarName, 'Machine')
+    }
+    if (-not $envVarPath) {
+        $envVarPath = [Environment]::GetEnvironmentVariable($envVarName, 'User')
+    }
+    if ($envVarPath -and (Test-Path (Join-Path $envVarPath 'bin\\nvcc.exe'))) {
+        return $envVarPath
+    }
+
+    if ($env:CUDA_PATH) {
+        $match = [regex]::Match($env:CUDA_PATH, 'CUDA\\v(?<v>\d+\.\d+)')
+        if ($match.Success -and ($match.Groups['v'].Value -eq $VersionText) -and (Test-Path (Join-Path $env:CUDA_PATH 'bin\\nvcc.exe'))) {
+            return $env:CUDA_PATH
+        }
+    }
+
+    $registrySubKey = "SOFTWARE\\NVIDIA Corporation\\GPU Computing Toolkit\\CUDA\\v$VersionText"
+    $registryPath = Get-Bimba3DRegistryValue -Hive LocalMachine -SubKey $registrySubKey -ValueName 'InstallDir'
+    if ($registryPath -and (Test-Path (Join-Path $registryPath 'bin\\nvcc.exe'))) {
+        return $registryPath
+    }
+
+    $defaultPath = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v$VersionText"
+    if (Test-Path (Join-Path $defaultPath 'bin\\nvcc.exe')) {
+        return $defaultPath
     }
 
     return $null
+}
+
+function Get-Bimba3DCudaInstallerUrl {
+    param([string]$VersionText)
+
+    if (-not $VersionText) {
+        return $null
+    }
+
+    $parsed = ConvertTo-Bimba3DVersion -VersionText $VersionText
+    if (-not $parsed) {
+        return $null
+    }
+
+    $normalized = "$($parsed.Major).$($parsed.Minor).0"
+    return "https://developer.download.nvidia.com/compute/cuda/$normalized/network_installers/cuda_$normalized`_windows_network.exe"
 }
 
 function Get-Bimba3DCompatibilityMatrix {
@@ -279,36 +365,133 @@ function Resolve-Bimba3DCompatibility {
 
     $matrix = Get-Bimba3DCompatibilityMatrix -MatrixPath $MatrixPath
 
+    $installedCudaVersions = @()
     if (-not $CudaVersion) {
-        $CudaVersion = Get-Bimba3DInstalledCudaVersion
+        $installedCudaVersions = @(Get-Bimba3DInstalledCudaVersions)
     }
-    if (-not $VsMajor) {
+
+    $detectedCudaVersion = $CudaVersion
+    if (-not $detectedCudaVersion -and $installedCudaVersions.Count -gt 0) {
+        $detectedCudaVersion = $installedCudaVersions[0]
+    }
+
+    $selectedCudaVersion = $CudaVersion
+    if (-not $selectedCudaVersion -and $installedCudaVersions.Count -gt 0) {
+        $cudaCandidatesWithTorchAndGsplat = @()
+        $cudaCandidatesWithTorch = @()
+
+        foreach ($candidateCuda in $installedCudaVersions) {
+            $hasTorchProfile = $false
+            foreach ($profile in $matrix.torchProfiles) {
+                if (Test-Bimba3DVersionInRange -Actual $candidateCuda -Minimum $profile.minCuda -Maximum $profile.maxCuda) {
+                    $hasTorchProfile = $true
+                    break
+                }
+            }
+
+            if (-not $hasTorchProfile) {
+                continue
+            }
+
+            $cudaCandidatesWithTorch += $candidateCuda
+
+            $gsplatMin = $null
+            if ($matrix.gsplat -and $matrix.gsplat.minCuda) {
+                $gsplatMin = [string]$matrix.gsplat.minCuda
+            }
+            $gsplatMax = $null
+            if ($matrix.gsplat -and $matrix.gsplat.maxCuda) {
+                $gsplatMax = [string]$matrix.gsplat.maxCuda
+            }
+
+            $supportsGsplat = $true
+            if ($gsplatMin -and -not (Test-Bimba3DVersionAtLeast -Actual $candidateCuda -Minimum $gsplatMin)) {
+                $supportsGsplat = $false
+            }
+            if ($supportsGsplat -and $gsplatMax -and -not (Test-Bimba3DVersionInRange -Actual $candidateCuda -Minimum $gsplatMin -Maximum $gsplatMax)) {
+                $supportsGsplat = $false
+            }
+
+            if ($supportsGsplat) {
+                $cudaCandidatesWithTorchAndGsplat += $candidateCuda
+            }
+        }
+
+        if ($cudaCandidatesWithTorchAndGsplat.Count -gt 0) {
+            $selectedCudaVersion = $cudaCandidatesWithTorchAndGsplat[0]
+        } elseif ($cudaCandidatesWithTorch.Count -gt 0) {
+            $selectedCudaVersion = $cudaCandidatesWithTorch[0]
+        } else {
+            $selectedCudaVersion = $installedCudaVersions[0]
+        }
+    }
+
+    $selectedCudaPath = Get-Bimba3DCudaInstallPathByVersion -VersionText $selectedCudaVersion
+
+    if ($null -eq $VsMajor) {
         $VsMajor = Get-Bimba3DInstalledVsMajor
     }
+    $vsHasX64VcTools = Test-Bimba3DHasVsX64Tools
 
     $defaults = $matrix.defaults
     $cudaMeetsMinimum = $false
-    if ($CudaVersion) {
-        $cudaMeetsMinimum = Test-Bimba3DVersionAtLeast -Actual $CudaVersion -Minimum $defaults.cudaMin
+    if ($selectedCudaVersion) {
+        $cudaMeetsMinimum = Test-Bimba3DVersionAtLeast -Actual $selectedCudaVersion -Minimum $defaults.cudaMin
     }
 
     $cudaNeedsUpgrade = -not $cudaMeetsMinimum
     $vsMeetsDefault = $false
-    if ($VsMajor) {
-        $vsMeetsDefault = ([int]$VsMajor -ge [int]$defaults.vsMajor)
+
+    $gsplatMinCuda = $null
+    if ($matrix.gsplat -and $matrix.gsplat.minCuda) {
+        $gsplatMinCuda = [string]$matrix.gsplat.minCuda
+    }
+
+    $gsplatMaxCuda = $null
+    if ($matrix.gsplat -and $matrix.gsplat.maxCuda) {
+        $gsplatMaxCuda = [string]$matrix.gsplat.maxCuda
+    }
+
+    $gsplatSupportedVsMajors = @()
+    if ($matrix.gsplat -and $matrix.gsplat.supportedVsMajors) {
+        foreach ($vsMajorCandidate in @($matrix.gsplat.supportedVsMajors)) {
+            if ($null -ne $vsMajorCandidate -and [string]$vsMajorCandidate -ne '') {
+                $gsplatSupportedVsMajors += [int]$vsMajorCandidate
+            }
+        }
+    }
+
+    $recommendedCudaVersion = [string]$defaults.cudaPreferred
+    if ($selectedCudaVersion -and $cudaMeetsMinimum) {
+        $recommendedCudaVersion = [string]$selectedCudaVersion
+    }
+
+    if ($selectedCudaVersion -and $gsplatMinCuda -and $gsplatMaxCuda -and -not (Test-Bimba3DVersionInRange -Actual $selectedCudaVersion -Minimum $gsplatMinCuda -Maximum $gsplatMaxCuda)) {
+        $recommendedCudaVersion = [string]$defaults.cudaPreferred
+    }
+
+    $recommendedCudaInstallerUrl = Get-Bimba3DCudaInstallerUrl -VersionText $recommendedCudaVersion
+    if (-not $recommendedCudaInstallerUrl) {
+        $recommendedCudaInstallerUrl = [string]$defaults.cudaRecommendedInstallerUrl
     }
 
     $resolved = [ordered]@{
         matrix = $matrix
-        detectedCudaVersion = $CudaVersion
+        detectedCudaVersion = $detectedCudaVersion
+        selectedCudaVersion = $selectedCudaVersion
+        selectedCudaPath = $selectedCudaPath
+        installedCudaVersions = ($installedCudaVersions -join ',')
         detectedVsMajor = $VsMajor
+        vsHasX64VcTools = [bool]$vsHasX64VcTools
         cudaMin = [string]$defaults.cudaMin
         cudaPreferred = [string]$defaults.cudaPreferred
+        recommendedCudaVersion = $recommendedCudaVersion
+        recommendedCudaInstallerUrl = $recommendedCudaInstallerUrl
         defaultVsMajor = [int]$defaults.vsMajor
         requiredVsMajor = [int]$defaults.vsMajor
         recommendedVsInstallerUrl = [string]$defaults.vsRecommendedInstallerUrl
         selectedVsProfile = 'default'
-        cudaIsInstalled = [bool]$CudaVersion
+        cudaIsInstalled = [bool]$selectedCudaVersion
         cudaMeetsMinimum = [bool]$cudaMeetsMinimum
         cudaNeedsUpgrade = [bool]$cudaNeedsUpgrade
         vsMeetsDefault = [bool]$vsMeetsDefault
@@ -323,10 +506,18 @@ function Resolve-Bimba3DCompatibility {
         torchaudioCpuVersion = [string]$defaults.torchaudioCpuVersion
         gsplatVersion = [string]$matrix.gsplat.version
         gsplatSupportedTorchTracks = @($matrix.gsplat.supportedTorchTracks)
+        gsplatSupportedVsMajors = @($gsplatSupportedVsMajors)
+        gsplatMinCuda = $gsplatMinCuda
+        gsplatMaxCuda = $gsplatMaxCuda
+        gsplatCudaSupported = $true
+        gsplatVsSupported = $true
+        gsplatBuildSupported = $true
+        gsplatUnsupportedReason = ''
         colmapCudaVersion = [string]$matrix.colmap.cuda.version
         colmapCudaUrl = [string]$matrix.colmap.cuda.url
         colmapNoCudaVersion = [string]$matrix.colmap.nocuda.version
         colmapNoCudaUrl = [string]$matrix.colmap.nocuda.url
+        colmapAssetProfile = 'default'
         colmapPreferredVariant = 'nocuda'
     }
 
@@ -334,9 +525,39 @@ function Resolve-Bimba3DCompatibility {
         $resolved.colmapPreferredVariant = 'cuda'
     }
 
+    if ($resolved.cudaMeetsMinimum -and $matrix.colmapProfiles) {
+        foreach ($colmapProfile in $matrix.colmapProfiles) {
+            if (Test-Bimba3DVersionInRange -Actual $selectedCudaVersion -Minimum $colmapProfile.minCuda -Maximum $colmapProfile.maxCuda) {
+                if ($colmapProfile.name) {
+                    $resolved.colmapAssetProfile = [string]$colmapProfile.name
+                }
+
+                if ($colmapProfile.cuda) {
+                    if ($colmapProfile.cuda.version) {
+                        $resolved.colmapCudaVersion = [string]$colmapProfile.cuda.version
+                    }
+                    if ($colmapProfile.cuda.url) {
+                        $resolved.colmapCudaUrl = [string]$colmapProfile.cuda.url
+                    }
+                }
+
+                if ($colmapProfile.nocuda) {
+                    if ($colmapProfile.nocuda.version) {
+                        $resolved.colmapNoCudaVersion = [string]$colmapProfile.nocuda.version
+                    }
+                    if ($colmapProfile.nocuda.url) {
+                        $resolved.colmapNoCudaUrl = [string]$colmapProfile.nocuda.url
+                    }
+                }
+
+                break
+            }
+        }
+    }
+
     if ($resolved.cudaMeetsMinimum -and $matrix.vsProfiles) {
         foreach ($vsProfile in $matrix.vsProfiles) {
-            if (Test-Bimba3DVersionInRange -Actual $CudaVersion -Minimum $vsProfile.minCuda -Maximum $vsProfile.maxCuda) {
+            if (Test-Bimba3DVersionInRange -Actual $selectedCudaVersion -Minimum $vsProfile.minCuda -Maximum $vsProfile.maxCuda) {
                 if ($vsProfile.vsMajor) {
                     $resolved.requiredVsMajor = [int]$vsProfile.vsMajor
                 }
@@ -351,19 +572,19 @@ function Resolve-Bimba3DCompatibility {
         }
     }
 
-    if ($VsMajor) {
-        $resolved.vsMeetsDefault = ([int]$VsMajor -ge [int]$resolved.requiredVsMajor)
+    if ($null -ne $VsMajor) {
+        $resolved.vsMeetsDefault = ([int]$VsMajor -eq [int]$resolved.requiredVsMajor)
     } else {
         $resolved.vsMeetsDefault = $false
     }
 
-    if ($resolved.cudaMeetsMinimum -and $VsMajor -eq [int]$defaults.vsMajor -and $CudaVersion -eq [string]$defaults.cudaPreferred) {
+    if ($resolved.cudaMeetsMinimum -and $VsMajor -eq [int]$defaults.vsMajor -and $selectedCudaVersion -eq [string]$defaults.cudaPreferred) {
         $resolved.useDefaultStack = $true
     }
 
     if ($resolved.cudaMeetsMinimum) {
         foreach ($profile in $matrix.torchProfiles) {
-            if (Test-Bimba3DVersionInRange -Actual $CudaVersion -Minimum $profile.minCuda -Maximum $profile.maxCuda) {
+            if (Test-Bimba3DVersionInRange -Actual $selectedCudaVersion -Minimum $profile.minCuda -Maximum $profile.maxCuda) {
                 $resolved.torchTrack = [string]$profile.track
                 $resolved.torchIndexUrl = [string]$profile.indexUrl
                 $resolved.torchVersion = [string]$profile.torchVersion
@@ -373,6 +594,33 @@ function Resolve-Bimba3DCompatibility {
             }
         }
     }
+
+    if ($resolved.cudaIsInstalled -and $resolved.selectedCudaVersion) {
+        if ($resolved.gsplatMinCuda -and -not (Test-Bimba3DVersionAtLeast -Actual $resolved.selectedCudaVersion -Minimum $resolved.gsplatMinCuda)) {
+            $resolved.gsplatCudaSupported = $false
+            $resolved.gsplatUnsupportedReason = "CUDA $($resolved.selectedCudaVersion) is below gsplat minimum $($resolved.gsplatMinCuda)"
+        }
+
+        if ($resolved.gsplatCudaSupported -and $resolved.gsplatMaxCuda -and -not (Test-Bimba3DVersionInRange -Actual $resolved.selectedCudaVersion -Minimum $resolved.gsplatMinCuda -Maximum $resolved.gsplatMaxCuda)) {
+            $resolved.gsplatCudaSupported = $false
+            $resolved.gsplatUnsupportedReason = "CUDA $($resolved.selectedCudaVersion) is above gsplat maximum $($resolved.gsplatMaxCuda)"
+        }
+    }
+
+    if (-not $resolved.vsHasX64VcTools) {
+        $resolved.gsplatVsSupported = $false
+        $resolved.gsplatUnsupportedReason = 'Visual Studio C++ x64 tools component is missing.'
+    } elseif ($resolved.gsplatSupportedVsMajors.Count -gt 0) {
+        if (-not $resolved.detectedVsMajor) {
+            $resolved.gsplatVsSupported = $false
+            $resolved.gsplatUnsupportedReason = 'Visual Studio major version could not be detected for gsplat build.'
+        } elseif ($resolved.gsplatSupportedVsMajors -notcontains [int]$resolved.detectedVsMajor) {
+            $resolved.gsplatVsSupported = $false
+            $resolved.gsplatUnsupportedReason = "Visual Studio major $($resolved.detectedVsMajor) is outside gsplat-supported majors: $($resolved.gsplatSupportedVsMajors -join ', ')."
+        }
+    }
+
+    $resolved.gsplatBuildSupported = ([bool]$resolved.gsplatCudaSupported -and [bool]$resolved.gsplatVsSupported)
 
     [pscustomobject]$resolved
 }

@@ -22,8 +22,8 @@
       "name": "cuda-11.x",
       "minCuda": "11.0",
       "maxCuda": "11.9",
-      "vsMajor": 16,
-      "vsRecommendedInstallerUrl": "https://aka.ms/vs/16/release/vs_buildtools.exe"
+      "vsMajor": 17,
+      "vsRecommendedInstallerUrl": "https://aka.ms/vs/17/release/vs_BuildTools.exe"
     },
     {
       "name": "cuda-12.0+",
@@ -55,6 +55,11 @@
   ],
   "gsplat": {
     "version": "1.5.3",
+    "minCuda": "11.8",
+    "maxCuda": "12.9",
+    "supportedVsMajors": [
+      17
+    ],
     "supportedTorchTracks": [
       "cu121",
       "cu118"

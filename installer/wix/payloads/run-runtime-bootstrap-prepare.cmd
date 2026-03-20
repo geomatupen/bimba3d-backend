@@ -16,6 +16,9 @@ if not exist "%INSTALL_DIR%\bimba3d_backend\requirements.windows.txt" (
 )
 
 >>"%WRAPPER_LOG%" echo [%date% %time%] START install="%INSTALL_DIR%" phase="prepare"
+>>"%WRAPPER_LOG%" echo [%date% %time%] INFO phase_log="%PHASE_LOG%"
+>>"%PHASE_LOG%" echo.
+>>"%PHASE_LOG%" echo ===== [%date% %time%] RUN START phase=prepare install="%INSTALL_DIR%" =====
 copy /Y "%~dp0runtime-bootstrap.ps1" "%BOOTSTRAP_ROOT%\runtime-bootstrap.ps1" >nul
 if errorlevel 1 (
 	>>"%WRAPPER_LOG%" echo [%date% %time%] ERROR copy runtime-bootstrap.ps1 failed
@@ -57,4 +60,5 @@ if errorlevel 1 (
 powershell -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_ROOT%\runtime-bootstrap.ps1" -InstallDir "%INSTALL_DIR%" -Phase "prepare" >>"%PHASE_LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 >>"%WRAPPER_LOG%" echo [%date% %time%] EXIT code=%RC% phase="prepare"
+>>"%PHASE_LOG%" echo ===== [%date% %time%] RUN END phase=prepare exit=%RC% =====
 exit /b %RC%

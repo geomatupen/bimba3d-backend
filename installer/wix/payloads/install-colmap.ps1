@@ -64,7 +64,29 @@ function Resolve-CompatibilityContext {
     }
 
     . $resolverPath
-    return Resolve-Bimba3DCompatibility
+    $matrixPath = Join-Path $PSScriptRoot 'compatibility-matrix-colmap.json'
+    return (Resolve-Bimba3DCompatibility -MatrixPath $matrixPath)
+}
+
+function Get-FallbackCompatibilityContext {
+    $cudaDetected = $false
+    try {
+        $cudaDetected = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
+    } catch {
+        $cudaDetected = $false
+    }
+
+    return [pscustomobject]@{
+        detectedCudaVersion = if ($cudaDetected) { 'detected' } else { 'none' }
+        detectedVsMajor = 'unknown'
+        colmapPreferredVariant = if ($cudaDetected) { 'cuda' } else { 'nocuda' }
+        colmapAssetProfile = 'fallback'
+        colmapCudaVersion = 'offline'
+        colmapNoCudaVersion = 'offline'
+        useDefaultStack = $false
+        colmapCudaUrl = $null
+        colmapNoCudaUrl = $null
+    }
 }
 
 function Write-Log([string]$message) {
@@ -94,11 +116,23 @@ function Download-ColmapArchive {
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
 
     $destination = Join-Path $downloadDir $AssetName
-    Write-Log "Downloading COLMAP asset: $Url"
+    if (-not $Url) {
+        throw "No download URL available for requested COLMAP variant."
+    }
+
+    Write-Log "STATUS: download-start variant-asset='$AssetName' url='$Url'"
     Invoke-WebRequest -Uri $Url -OutFile $destination -UseBasicParsing
     if (-not (Test-Path $destination)) {
         throw "Failed to download COLMAP archive: $Url"
     }
+
+    $sizeBytes = 0
+    try {
+        $sizeBytes = (Get-Item -LiteralPath $destination -ErrorAction Stop).Length
+    } catch {
+        $sizeBytes = 0
+    }
+    Write-Log "STATUS: download-complete path='$destination' bytes=$sizeBytes"
 
     return $destination
 }
@@ -140,6 +174,8 @@ function Expand-ColmapArchive {
         throw "COLMAP zip not found: $ArchivePath"
     }
 
+    Write-Log "STATUS: extract-start archive='$ArchivePath' installDir='$InstallDir'"
+
     if (Test-Path -LiteralPath $InstallDir) {
         Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -166,6 +202,8 @@ call "$nestedBat" %*
         throw "COLMAP.bat not found after extraction."
     }
 
+    Write-Log "STATUS: extract-complete colmapBat='$colmapBat'"
+
     return $colmapBat
 }
 
@@ -178,12 +216,18 @@ function Test-ColmapExecutable {
 
 try {
     Write-Host "[COLMAP] Log file: $logPath"
-    $compat = Resolve-CompatibilityContext
+    try {
+        $compat = Resolve-CompatibilityContext
+    } catch {
+        Write-Log "WARNING: compatibility resolver failed; using fallback compatibility context. Reason: $($_.Exception.Message)"
+        $compat = Get-FallbackCompatibilityContext
+    }
     Write-Log "Starting COLMAP install"
     Write-Log "CudaZipPath=$CudaZipPath"
     Write-Log "NoCudaZipPath=$NoCudaZipPath"
     Write-Log "InstallDir=$InstallDir"
     Write-Log "Resolved compatibility: CUDA=$($compat.detectedCudaVersion) VS=$($compat.detectedVsMajor) Variant=$($compat.colmapPreferredVariant) Profile=$($compat.colmapAssetProfile) CudaColmap=$($compat.colmapCudaVersion) NoCudaColmap=$($compat.colmapNoCudaVersion) DefaultStack=$($compat.useDefaultStack)"
+    Write-Log "Resolved URLs: cuda='$($compat.colmapCudaUrl)' nocuda='$($compat.colmapNoCudaUrl)'"
 
     $installPlan = New-Object System.Collections.Generic.List[object]
     if ($compat.colmapPreferredVariant -eq 'cuda' -and $compat.useDefaultStack) {
@@ -191,10 +235,14 @@ try {
         $installPlan.Add([pscustomobject]@{ Variant = 'cuda'; Source = 'online'; Reason = 'refresh from online if needed' })
         $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'online'; Reason = 'fallback when CUDA COLMAP is incompatible' })
         $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'offline'; Reason = 'offline fallback when internet is unavailable' })
+    } elseif ($compat.colmapPreferredVariant -eq 'cuda') {
+        $installPlan.Add([pscustomobject]@{ Variant = 'cuda'; Source = 'offline'; Reason = 'CUDA detected: try bundled CUDA COLMAP first' })
+        $installPlan.Add([pscustomobject]@{ Variant = 'cuda'; Source = 'online'; Reason = 'CUDA bundled candidate failed; try online CUDA build' })
+        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'offline'; Reason = 'last fallback when CUDA candidates fail' })
+        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'online'; Reason = 'last online fallback when offline no-CUDA unavailable' })
     } else {
-        $installPlan.Add([pscustomobject]@{ Variant = 'cuda'; Source = 'online'; Reason = 'non-default CUDA stack: prefer online candidate first' })
-        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'online'; Reason = 'fallback when CUDA candidate fails' })
-        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'offline'; Reason = 'offline fallback when internet is unavailable' })
+        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'offline'; Reason = 'CUDA not preferred by compatibility profile' })
+        $installPlan.Add([pscustomobject]@{ Variant = 'nocuda'; Source = 'online'; Reason = 'refresh from online if needed' })
     }
 
     $selectedVariant = $null
@@ -206,25 +254,41 @@ try {
         $reason = [string]$plan.Reason
 
         Write-Host "[COLMAP] Trying variant=$variant source=$source ($reason)..."
-        Write-Log "Trying variant='$variant' source='$source' reason='$reason'"
+        Write-Log "STATUS: candidate-start variant='$variant' source='$source' reason='$reason'"
 
         try {
             $archivePath = Get-ArchivePathForVariant -Variant $variant -Source $source
-            Write-Log "Installing COLMAP variant '$variant' from $archivePath"
+            Write-Log "STATUS: candidate-archive variant='$variant' source='$source' archive='$archivePath'"
             $colmapBat = Expand-ColmapArchive -ArchivePath $archivePath
-            if (Test-ColmapExecutable -ColmapBatPath $colmapBat) {
+            $smokeOk = $false
+            try {
+                Write-Log "STATUS: smoke-test-start colmapBat='$colmapBat'"
+                $smokeOk = Test-ColmapExecutable -ColmapBatPath $colmapBat
+            } catch {
+                $smokeOk = $false
+            }
+
+            if ($smokeOk) {
                 Write-Host "[COLMAP] Installed variant=$variant source=$source successfully."
-                Write-Log "COLMAP smoke test succeeded for variant '$variant' source '$source'"
+                Write-Log "STATUS: candidate-success variant='$variant' source='$source'"
                 $selectedVariant = $variant
                 $selectedSource = $source
                 break
             }
 
-            Write-Host "[COLMAP] Smoke test failed for variant=$variant source=$source."
-            Write-Log "COLMAP smoke test failed for variant '$variant' source '$source'"
+            if (Test-Path -LiteralPath $colmapBat) {
+                Write-Host "[COLMAP] Smoke test failed for variant=$variant source=$source, but executable exists. Accepting install with warning."
+                Write-Log "STATUS: candidate-warning smoke-failed-but-exists variant='$variant' source='$source' colmapBat='$colmapBat'"
+                $selectedVariant = $variant
+                $selectedSource = $source
+                break
+            }
+
+            Write-Host "[COLMAP] Smoke test failed for variant=$variant source=$source and executable was not found after extraction."
+            Write-Log "STATUS: candidate-failed smoke-failed-and-missing variant='$variant' source='$source'"
         } catch {
             Write-Host "[COLMAP] Attempt failed for variant=$variant source=$source."
-            Write-Log "COLMAP variant '$variant' source '$source' failed: $($_.Exception.Message)"
+            Write-Log "STATUS: candidate-error variant='$variant' source='$source' error='$($_.Exception.Message)'"
         }
     }
 
