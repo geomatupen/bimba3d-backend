@@ -51,15 +51,20 @@ tmp/
 
 # Installer artifacts
 installer/wix/Bimba3D-Setup.exe
+installer/wix/Bimba3D-Setup-*.exe
+installer/wix/Bimba3D-Setup-*.zip
 installer/wix/*.wixpdb
 installer/wix/*.log
 installer/wix/logs/
 installer/wix/staging/
 installer/wix/installer/
+installer/wix/bundle-probe*.log
+installer/wix/msi-install-*.log
 installer/wix/payloads/*.exe
 installer/wix/payloads/*.msi
 installer/wix/payloads/*.zip
 installer/wix/payloads/*.wixpdb
+installer/wix/payloads/*.log
 installer/wix/payloads/*.7z
 installer/wix/payloads/*.nupkg
 installer/wix/payloads/*.tmp
@@ -69,4 +74,5 @@ installer/wix/payloads/*.part
 /40.8.0
 /No
 windows_log_train.txt
+windows_log_train copy.txt
 .local_programdata/
