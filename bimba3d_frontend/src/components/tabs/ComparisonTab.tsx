@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 
 interface ComparisonTabProps {
@@ -18,24 +18,48 @@ interface SummaryPayload {
   mode?: string;
   engine?: string | null;
   metrics?: Record<string, number | null | undefined>;
+  major_params?: Record<string, number | null | undefined>;
   tuning?: {
     initial?: Record<string, number | null | undefined>;
     final?: Record<string, number | null | undefined>;
-    end_params?: Record<string, number | null | undefined>;
+    end_params?: Record<string, unknown>;
     end_step?: number | null;
+    tune_interval?: number | null;
+    log_interval?: number | null;
     runs?: number | null;
     history_count?: number;
+    runtime_series?: Array<{
+      step?: number;
+      params?: Record<string, unknown>;
+    }>;
     history?: Array<{
       step?: number;
       adjustments?: string[];
       convergence?: Record<string, unknown>;
       instability?: Record<string, unknown>;
-      params?: Record<string, number | null | undefined>;
+      params?: Record<string, unknown>;
     }>;
   };
   loss_milestones?: Record<string, number | null | undefined>;
+  eval_series?: Array<{ step?: number; loss?: number }>;
   preview_url?: string | null;
   eval_points?: number;
+}
+
+interface FilesPayload {
+  files?: {
+    engines?: Record<
+      string,
+      {
+        previews?: {
+          items?: Array<{
+            name?: string;
+            url?: string;
+          }>;
+        };
+      }
+    >;
+  };
 }
 
 const metricRows: Array<{ key: string; label: string; lowerIsBetter?: boolean }> = [
@@ -46,13 +70,34 @@ const metricRows: Array<{ key: string; label: string; lowerIsBetter?: boolean }>
   { key: "num_gaussians", label: "Gaussian Count" },
 ];
 
-const tuningRows: Array<{ key: string; label: string }> = [
-  { key: "lr_mult", label: "Learning Rate Mult" },
-  { key: "opacity_lr_mult", label: "Opacity LR Mult" },
-  { key: "sh_lr_mult", label: "SH LR Mult" },
-  { key: "densify_threshold", label: "Densify Threshold" },
-  { key: "position_lr_mult", label: "Position LR Mult" },
+const graphMetricRows: Array<{ key: string; label: string; type: "loss" | "tuning" | "major"; path?: string[] }> = [
+  { key: "loss_milestone", label: "Step vs Loss", type: "loss" },
+  { key: "means_lr", label: "Step vs Means LR (tuning)", type: "tuning", path: ["learning_rates", "means"] },
+  { key: "opacities_lr", label: "Step vs Opacities LR (tuning)", type: "tuning", path: ["learning_rates", "opacities"] },
+  { key: "sh0_lr", label: "Step vs SH0 LR (tuning)", type: "tuning", path: ["learning_rates", "sh0"] },
+  { key: "grow_grad2d", label: "Step vs Grow Grad2D (tuning)", type: "tuning", path: ["strategy", "grow_grad2d"] },
+  { key: "refine_every", label: "Step vs Refine Every (tuning)", type: "tuning", path: ["strategy", "refine_every"] },
+  { key: "max_steps", label: "Configured Max Steps", type: "major" },
+  { key: "densify_from_iter", label: "Start Densification", type: "major" },
+  { key: "densify_until_iter", label: "End Densification", type: "major" },
+  { key: "densification_interval", label: "Densification Interval", type: "major" },
+  { key: "eval_interval", label: "Eval Interval", type: "major" },
+  { key: "batch_size", label: "Batch Size", type: "major" },
 ];
+
+type GraphPoint = { x: number; y: number };
+
+function getNestedNumber(source: unknown, path?: string[]): number | undefined {
+  if (!path || !path.length) {
+    return typeof source === "number" ? source : undefined;
+  }
+  let cur: unknown = source;
+  for (const seg of path) {
+    if (!cur || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return typeof cur === "number" ? cur : undefined;
+}
 
 function fmt(v: unknown): string {
   if (typeof v !== "number" || Number.isNaN(v)) return "-";
@@ -71,11 +116,139 @@ function deltaText(left?: number | null, right?: number | null, lowerIsBetter?: 
   return `${fmt(delta)} (${pct.toFixed(2)}%, ${arrow})`;
 }
 
-function fmtMaybe(v: unknown): string {
-  if (typeof v === "boolean") return v ? "true" : "false";
-  if (typeof v === "number") return fmt(v);
-  if (v === null || typeof v === "undefined") return "-";
-  return String(v);
+function extractStepFromPreviewName(name: string): number | null {
+  const primary = name.match(/^preview_(\d+)\.png$/i);
+  const match = primary ?? name.match(/(\d+)(?!.*\d)/);
+  if (!match) return null;
+  const step = Number.parseInt(match[1], 10);
+  return Number.isFinite(step) ? step : null;
+}
+
+function getLossSeriesPoints(summary?: SummaryPayload | null): GraphPoint[] {
+  const fromEvalSeries = (summary?.eval_series ?? [])
+    .map((item) => {
+      if (!item || typeof item.step !== "number" || typeof item.loss !== "number") return null;
+      if (!Number.isFinite(item.step) || !Number.isFinite(item.loss)) return null;
+      return { x: item.step, y: item.loss };
+    })
+    .filter((item): item is GraphPoint => item !== null)
+    .sort((a, b) => a.x - b.x);
+
+  if (fromEvalSeries.length > 0) return fromEvalSeries;
+
+  if (!summary?.loss_milestones) return [];
+  return Object.entries(summary.loss_milestones)
+    .map(([k, v]) => {
+      const step = parseInt(k.replace("loss_at_", ""), 10);
+      if (!Number.isFinite(step) || typeof v !== "number" || !Number.isFinite(v)) return null;
+      return { x: step, y: v };
+    })
+    .filter((item): item is GraphPoint => item !== null)
+    .sort((a, b) => a.x - b.x);
+}
+
+function getTuningSeriesPoints(summary: SummaryPayload | null | undefined, path?: string[]): GraphPoint[] {
+  const runtimeSeries = summary?.tuning?.runtime_series ?? [];
+  const historySeries = summary?.tuning?.history?.map((h) => ({ step: h.step, params: h.params })) ?? [];
+  const sourceSeries = runtimeSeries.length ? runtimeSeries : historySeries;
+  if (!sourceSeries.length || !path) return [];
+  return sourceSeries
+    .map((item) => {
+      if (typeof item.step !== "number") return null;
+      const y = getNestedNumber(item.params, path);
+      if (typeof y !== "number" || !Number.isFinite(y)) return null;
+      return { x: item.step, y };
+    })
+    .filter((item): item is GraphPoint => item !== null)
+    .sort((a, b) => a.x - b.x);
+}
+
+function getTuningChangeMarkers(summary: SummaryPayload | null | undefined, path?: string[]): GraphPoint[] {
+  if (!summary?.tuning?.history?.length || !path) return [];
+  const sorted = [...summary.tuning.history]
+    .filter((item) => typeof item.step === "number")
+    .sort((a, b) => (a.step as number) - (b.step as number));
+
+  const markers: GraphPoint[] = [];
+  let prevValue: number | undefined;
+  for (const item of sorted) {
+    const cur = getNestedNumber(item.params, path);
+    if (typeof cur !== "number" || !Number.isFinite(cur)) continue;
+    if (typeof prevValue !== "number" || Math.abs(cur - prevValue) > 1e-12) {
+      markers.push({ x: item.step as number, y: cur });
+    }
+    prevValue = cur;
+  }
+  return markers;
+}
+
+function getTuningChangeSteps(summary: SummaryPayload | null | undefined): number[] {
+  if (!summary?.tuning?.history?.length) return [];
+  const steps = summary.tuning.history
+    .map((item) => {
+      if (typeof item.step !== "number" || !Number.isFinite(item.step)) return null;
+      const hasAdjustments = Array.isArray(item.adjustments) && item.adjustments.length > 0;
+      const hasParams = !!item.params && typeof item.params === "object";
+      return hasAdjustments || hasParams ? item.step : null;
+    })
+    .filter((step): step is number => step !== null);
+
+  return Array.from(new Set(steps)).sort((a, b) => a - b);
+}
+
+function getMajorParamSeriesPoints(summary: SummaryPayload | null | undefined, key: string, xMax: number): GraphPoint[] {
+  const y = summary?.major_params?.[key];
+  if (typeof y !== "number" || !Number.isFinite(y)) return [];
+  return [
+    { x: 0, y },
+    { x: xMax > 0 ? xMax : 1, y },
+  ];
+}
+
+function toPath(points: GraphPoint[], xMin: number, xMax: number, yMin: number, yMax: number, width: number, height: number, pad: number): string {
+  if (!points.length) return "";
+  const innerW = width - pad * 2;
+  const innerH = height - pad * 2;
+  const xSpan = xMax - xMin || 1;
+  const ySpan = yMax - yMin || 1;
+
+  const coords = points.map((p) => {
+    const x = pad + ((p.x - xMin) / xSpan) * innerW;
+    const y = height - pad - ((p.y - yMin) / ySpan) * innerH;
+    return `${x},${y}`;
+  });
+  return `M ${coords.join(" L ")}`;
+}
+
+function stepToSvgX(step: number, xMin: number, xMax: number, width: number, pad: number): number {
+  const innerW = width - pad * 2;
+  const xSpan = xMax - xMin || 1;
+  return pad + ((step - xMin) / xSpan) * innerW;
+}
+
+function valueToSvgY(value: number, yMin: number, yMax: number, height: number, pad: number): number {
+  const innerH = height - pad * 2;
+  const ySpan = yMax - yMin || 1;
+  return height - pad - ((value - yMin) / ySpan) * innerH;
+}
+
+function nearestPointValue(points: GraphPoint[], step: number): number | null {
+  if (!points.length) return null;
+  const exact = points.find((p) => p.x === step);
+  if (exact) return exact.y;
+  if (points.length === 1) return points[0].y;
+
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    const a = sorted[i];
+    const b = sorted[i + 1];
+    if (step >= a.x && step <= b.x) {
+      const t = (step - a.x) / (b.x - a.x || 1);
+      return a.y + (b.y - a.y) * t;
+    }
+  }
+
+  return step < sorted[0].x ? sorted[0].y : sorted[sorted.length - 1].y;
 }
 
 export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) {
@@ -86,6 +259,44 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const [rightSummary, setRightSummary] = useState<SummaryPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedGraphMetric, setSelectedGraphMetric] = useState<string>("loss_milestone");
+  const [leftPreviewByStep, setLeftPreviewByStep] = useState<Record<number, string>>({});
+  const [rightPreviewByStep, setRightPreviewByStep] = useState<Record<number, string>>({});
+  const [selectedEvalStep, setSelectedEvalStep] = useState<number | null>(null);
+  const [swipePercent, setSwipePercent] = useState<number>(50);
+  const [isSwipeDragging, setIsSwipeDragging] = useState<boolean>(false);
+  const [showLeftSeries, setShowLeftSeries] = useState<boolean>(true);
+  const [showRightSeries, setShowRightSeries] = useState<boolean>(true);
+  const [showTunerChangedMarkers, setShowTunerChangedMarkers] = useState<boolean>(true);
+  const [showTuneEndMarkers, setShowTuneEndMarkers] = useState<boolean>(true);
+  const [hoverStep, setHoverStep] = useState<number | null>(null);
+  const [isViewSwitching, setIsViewSwitching] = useState(false);
+  const [contentHoldHeight, setContentHoldHeight] = useState<number>(0);
+  const comparisonContentRef = useRef<HTMLDivElement | null>(null);
+  const swipeAreaRef = useRef<HTMLDivElement | null>(null);
+
+  const friendlyErrorMessage = (err: unknown, fallback: string): string => {
+    const maybeObj = err as { response?: { data?: { detail?: unknown } }; message?: string };
+    const detail = maybeObj?.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (maybeObj?.message) return maybeObj.message;
+    return fallback;
+  };
+
+  const beginRefreshWithStableLayout = () => {
+    const measured = comparisonContentRef.current?.getBoundingClientRect().height ?? 0;
+    if (measured > 0) {
+      setContentHoldHeight(Math.ceil(measured));
+    }
+    setIsViewSwitching(true);
+    setLeftSummary(null);
+    setRightSummary(null);
+    setLeftPreviewByStep({});
+    setRightPreviewByStep({});
+    setSelectedEvalStep(null);
+    setSwipePercent(50);
+    setHoverStep(null);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -112,21 +323,71 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
 
   useEffect(() => {
     if (!leftId || !rightId) return;
+    setLeftSummary(null);
+    setRightSummary(null);
+    setLeftPreviewByStep({});
+    setRightPreviewByStep({});
+    setSelectedEvalStep(null);
+    setSwipePercent(50);
+    setHoverStep(null);
     let mounted = true;
     const loadSummaries = async () => {
+      const leftProject = projects.find((p) => p.project_id === leftId);
+      const rightProject = projects.find((p) => p.project_id === rightId);
+      const notReady = [leftProject, rightProject].find((p) => p && p.status !== "completed");
+      if (notReady) {
+        if (!mounted) return;
+        setError(`Project ${notReady.name || notReady.project_id.slice(0, 8)} is ${notReady.status}. Comparison data will appear after completion.`);
+        setLoading(false);
+        return;
+      }
+
       try {
         setLoading(true);
         setError(null);
+
+        const loadPreviewSteps = async (projectId: string, engine?: string | null): Promise<Record<number, string>> => {
+          try {
+            const filesRes = await api.get(`/projects/${projectId}/files`);
+            const payload = (filesRes.data || {}) as FilesPayload;
+            const engines = payload.files?.engines || {};
+            const chosenEngine = engine && engines[engine] ? engine : Object.keys(engines)[0];
+            if (!chosenEngine) return {};
+            const items = engines[chosenEngine]?.previews?.items || [];
+            const mapped: Record<number, string> = {};
+            for (const item of items) {
+              if (!item?.name || !item?.url) continue;
+              const step = extractStepFromPreviewName(item.name);
+              if (step === null) continue;
+              mapped[step] = `${api.defaults.baseURL}${item.url}`;
+            }
+            return mapped;
+          } catch {
+            return {};
+          }
+        };
+
         const [leftRes, rightRes] = await Promise.all([
           api.get(`/projects/${leftId}/experiment-summary`),
           api.get(`/projects/${rightId}/experiment-summary`),
         ]);
+        const leftData = leftRes.data as SummaryPayload;
+        const rightData = rightRes.data as SummaryPayload;
+        const [leftSteps, rightSteps] = await Promise.all([
+          loadPreviewSteps(leftId, leftData.engine),
+          loadPreviewSteps(rightId, rightData.engine),
+        ]);
         if (!mounted) return;
-        setLeftSummary(leftRes.data as SummaryPayload);
-        setRightSummary(rightRes.data as SummaryPayload);
+        setLeftSummary(leftData);
+        setRightSummary(rightData);
+        setLeftPreviewByStep(leftSteps);
+        setRightPreviewByStep(rightSteps);
+        setContentHoldHeight(0);
       } catch (err) {
         if (!mounted) return;
-        setError(err instanceof Error ? err.message : "Failed to load comparison summary");
+        setLeftSummary(null);
+        setRightSummary(null);
+        setError(friendlyErrorMessage(err, "Failed to load comparison summary"));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -135,17 +396,47 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
     return () => {
       mounted = false;
     };
-  }, [leftId, rightId]);
+  }, [leftId, rightId, projects]);
 
-  const previewLeft = useMemo(() => {
-    if (!leftSummary?.preview_url) return null;
-    return `${api.defaults.baseURL}${leftSummary.preview_url}`;
-  }, [leftSummary]);
+  useEffect(() => {
+    setHoverStep(null);
+  }, [selectedGraphMetric]);
 
-  const previewRight = useMemo(() => {
-    if (!rightSummary?.preview_url) return null;
-    return `${api.defaults.baseURL}${rightSummary.preview_url}`;
-  }, [rightSummary]);
+  useEffect(() => {
+    if (!isViewSwitching) return;
+    const timer = window.setTimeout(() => setIsViewSwitching(false), 0);
+    return () => window.clearTimeout(timer);
+  }, [isViewSwitching, selectedGraphMetric, leftId, rightId]);
+
+  const commonEvalSteps = useMemo(() => {
+    const leftSteps = new Set(Object.keys(leftPreviewByStep).map((k) => Number.parseInt(k, 10)));
+    const rightSteps = new Set(Object.keys(rightPreviewByStep).map((k) => Number.parseInt(k, 10)));
+    return Array.from(leftSteps)
+      .filter((step) => rightSteps.has(step))
+      .sort((a, b) => a - b);
+  }, [leftPreviewByStep, rightPreviewByStep]);
+
+  useEffect(() => {
+    if (!commonEvalSteps.length) {
+      setSelectedEvalStep(null);
+      return;
+    }
+    setSelectedEvalStep((prev) => {
+      if (typeof prev === "number" && commonEvalSteps.includes(prev)) return prev;
+      return commonEvalSteps[commonEvalSteps.length - 1];
+    });
+  }, [commonEvalSteps]);
+
+  const leftSelectedPreview = selectedEvalStep === null ? null : leftPreviewByStep[selectedEvalStep] || null;
+  const rightSelectedPreview = selectedEvalStep === null ? null : rightPreviewByStep[selectedEvalStep] || null;
+
+  const updateSwipeFromClientX = (clientX: number) => {
+    const rect = swipeAreaRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const raw = ((clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(0, Math.min(100, raw));
+    setSwipePercent(clamped);
+  };
 
   const options = projects.map((project) => ({
     value: project.project_id,
@@ -167,6 +458,100 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
 
   const leftHistory = leftSummary?.tuning?.history ?? [];
   const rightHistory = rightSummary?.tuning?.history ?? [];
+  const leftHasSummaryData = (leftSummary?.eval_points ?? 0) > 0;
+  const rightHasSummaryData = (rightSummary?.eval_points ?? 0) > 0;
+  const selectedGraphRow = graphMetricRows.find((row) => row.key === selectedGraphMetric) ?? graphMetricRows[0];
+  const graphXMax = useMemo(() => {
+    const points = [
+      ...getLossSeriesPoints(leftSummary),
+      ...getLossSeriesPoints(rightSummary),
+      ...leftHistory
+        .map((h) => (typeof h.step === "number" ? h.step : null))
+        .filter((v): v is number => v !== null),
+      ...rightHistory
+        .map((h) => (typeof h.step === "number" ? h.step : null))
+        .filter((v): v is number => v !== null),
+      leftSummary?.major_params?.max_steps,
+      rightSummary?.major_params?.max_steps,
+      leftSummary?.tuning?.end_step,
+      rightSummary?.tuning?.end_step,
+    ].filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    return points.length ? Math.max(...points) : 1;
+  }, [leftSummary, rightSummary, leftHistory, rightHistory]);
+
+  const leftGraphPoints = useMemo(() => {
+    if (selectedGraphRow.type === "loss") return getLossSeriesPoints(leftSummary);
+    if (selectedGraphRow.type === "tuning") return getTuningSeriesPoints(leftSummary, selectedGraphRow.path);
+    return getMajorParamSeriesPoints(leftSummary, selectedGraphRow.key, graphXMax);
+  }, [leftSummary, selectedGraphRow, graphXMax]);
+
+  const rightGraphPoints = useMemo(() => {
+    if (selectedGraphRow.type === "loss") return getLossSeriesPoints(rightSummary);
+    if (selectedGraphRow.type === "tuning") return getTuningSeriesPoints(rightSummary, selectedGraphRow.path);
+    return getMajorParamSeriesPoints(rightSummary, selectedGraphRow.key, graphXMax);
+  }, [rightSummary, selectedGraphRow, graphXMax]);
+
+  const allGraphPoints = [...leftGraphPoints, ...rightGraphPoints];
+  const graphHasData = allGraphPoints.length > 0;
+  const graphXMin = graphHasData ? Math.min(...allGraphPoints.map((p) => p.x)) : 0;
+  const graphXMaxUsed = graphHasData ? Math.max(...allGraphPoints.map((p) => p.x)) : 1;
+  const graphYMinRaw = graphHasData ? Math.min(...allGraphPoints.map((p) => p.y)) : 0;
+  const graphYMaxRaw = graphHasData ? Math.max(...allGraphPoints.map((p) => p.y)) : 1;
+  const graphYPad = graphYMaxRaw === graphYMinRaw ? Math.max(1, Math.abs(graphYMaxRaw) * 0.1 || 1) : (graphYMaxRaw - graphYMinRaw) * 0.08;
+  const graphYMin = graphYMinRaw - graphYPad;
+  const graphYMax = graphYMaxRaw + graphYPad;
+  const graphWidth = 1200;
+  const graphHeight = 340;
+  const graphPad = 44;
+  const leftPath = toPath(leftGraphPoints, graphXMin, graphXMaxUsed, graphYMin, graphYMax, graphWidth, graphHeight, graphPad);
+  const rightPath = toPath(rightGraphPoints, graphXMin, graphXMaxUsed, graphYMin, graphYMax, graphWidth, graphHeight, graphPad);
+  const leftMainChangeMarkers = useMemo(() => {
+    if (selectedGraphRow.type === "tuning") return getTuningChangeMarkers(leftSummary, selectedGraphRow.path);
+    const steps = getTuningChangeSteps(leftSummary);
+    return steps
+      .map((step) => {
+        const y = nearestPointValue(leftGraphPoints, step);
+        if (y === null) return null;
+        return { x: step, y };
+      })
+      .filter((p): p is GraphPoint => p !== null);
+  }, [leftSummary, selectedGraphRow, leftGraphPoints]);
+  const rightMainChangeMarkers = useMemo(() => {
+    if (selectedGraphRow.type === "tuning") return getTuningChangeMarkers(rightSummary, selectedGraphRow.path);
+    const steps = getTuningChangeSteps(rightSummary);
+    return steps
+      .map((step) => {
+        const y = nearestPointValue(rightGraphPoints, step);
+        if (y === null) return null;
+        return { x: step, y };
+      })
+      .filter((p): p is GraphPoint => p !== null);
+  }, [rightSummary, selectedGraphRow, rightGraphPoints]);
+  const graphSeriesIdentical = leftGraphPoints.length === rightGraphPoints.length
+    && leftGraphPoints.length > 0
+    && leftGraphPoints.every((p, idx) => {
+      const r = rightGraphPoints[idx];
+      return !!r && p.x === r.x && Math.abs(p.y - r.y) < 1e-12;
+    });
+  const graphXTicks = useMemo(() => {
+    const tickCount = 6;
+    return Array.from({ length: tickCount + 1 }, (_, i) => {
+      const ratio = i / tickCount;
+      return graphXMin + (graphXMaxUsed - graphXMin) * ratio;
+    });
+  }, [graphXMin, graphXMaxUsed]);
+  const graphXValues = useMemo(() => {
+    const vals = new Set<number>();
+    allGraphPoints.forEach((p) => vals.add(p.x));
+    return Array.from(vals).sort((a, b) => a - b);
+  }, [allGraphPoints]);
+  const hoverLeftValue = hoverStep === null || !showLeftSeries ? null : nearestPointValue(leftGraphPoints, hoverStep);
+  const hoverRightValue = hoverStep === null || !showRightSeries ? null : nearestPointValue(rightGraphPoints, hoverStep);
+  const hoverX = hoverStep === null ? null : stepToSvgX(hoverStep, graphXMin, graphXMaxUsed, graphWidth, graphPad);
+  const leftTuneEndStep = typeof leftSummary?.tuning?.end_step === "number" ? leftSummary.tuning.end_step : null;
+  const rightTuneEndStep = typeof rightSummary?.tuning?.end_step === "number" ? rightSummary.tuning.end_step : null;
+  const leftTuneEndValue = leftTuneEndStep === null ? null : nearestPointValue(leftGraphPoints, leftTuneEndStep);
+  const rightTuneEndValue = rightTuneEndStep === null ? null : nearestPointValue(rightGraphPoints, rightTuneEndStep);
 
   return (
     <div className="space-y-4">
@@ -176,7 +561,14 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1">Left project</label>
-            <select value={leftId} onChange={(e) => setLeftId(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+            <select
+              value={leftId}
+              onChange={(e) => {
+                beginRefreshWithStableLayout();
+                setLeftId(e.target.value);
+              }}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+            >
               {options.map((option) => (
                 <option key={`left-${option.value}`} value={option.value}>{option.label}</option>
               ))}
@@ -184,7 +576,14 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
           </div>
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1">Right project</label>
-            <select value={rightId} onChange={(e) => setRightId(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+            <select
+              value={rightId}
+              onChange={(e) => {
+                beginRefreshWithStableLayout();
+                setRightId(e.target.value);
+              }}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+            >
               <option value="">Select project</option>
               {options.map((option) => (
                 <option key={`right-${option.value}`} value={option.value}>{option.label}</option>
@@ -197,22 +596,62 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
       {error && <div className="bg-rose-50 border border-rose-200 text-rose-700 px-4 py-3 rounded-lg text-sm">{error}</div>}
 
       {loading && <div className="text-sm text-slate-500">Loading comparison data...</div>}
+      {isViewSwitching && !loading && <div className="text-sm text-slate-500">Updating comparison view...</div>}
 
-      {!loading && leftSummary && rightSummary && (
-        <>
+      {!leftSummary && !rightSummary && (loading || isViewSwitching) && contentHoldHeight > 0 && (
+        <div className="bg-white rounded-lg border border-slate-200" style={{ minHeight: `${contentHoldHeight}px` }} />
+      )}
+
+      {!loading && !isViewSwitching && leftSummary && rightSummary && (
+        <div ref={comparisonContentRef}>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="bg-white rounded-lg border border-slate-200 p-4">
               <p className="text-sm font-semibold text-slate-800">{leftSummary.name || leftSummary.project_id}</p>
               <p className="text-xs text-slate-500">mode: {leftSummary.mode || "-"} | engine: {leftSummary.engine || "-"}</p>
-              <p className="text-xs text-slate-500">eval points: {leftSummary.eval_points ?? 0}</p>
+              <p className="text-xs text-slate-500">eval points: {leftSummary.eval_points ?? 0} (number of evaluation records)</p>
               <p className="text-xs text-slate-500">tune end step: {leftSummary.tuning?.end_step ?? "-"}</p>
+              {!leftHasSummaryData && (
+                <p className="text-xs text-amber-700 mt-1">No completed summary yet for this project.</p>
+              )}
             </div>
             <div className="bg-white rounded-lg border border-slate-200 p-4">
               <p className="text-sm font-semibold text-slate-800">{rightSummary.name || rightSummary.project_id}</p>
               <p className="text-xs text-slate-500">mode: {rightSummary.mode || "-"} | engine: {rightSummary.engine || "-"}</p>
-              <p className="text-xs text-slate-500">eval points: {rightSummary.eval_points ?? 0}</p>
+              <p className="text-xs text-slate-500">eval points: {rightSummary.eval_points ?? 0} (number of evaluation records)</p>
               <p className="text-xs text-slate-500">tune end step: {rightSummary.tuning?.end_step ?? "-"}</p>
+              {!rightHasSummaryData && (
+                <p className="text-xs text-amber-700 mt-1">No completed summary yet for this project.</p>
+              )}
             </div>
+          </div>
+
+          <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-700">
+                <tr>
+                  <th className="text-left px-4 py-3">Major Param</th>
+                  <th className="text-left px-4 py-3">Left</th>
+                  <th className="text-left px-4 py-3">Right</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ["max_steps", "Configured max steps"],
+                  ["total_steps_completed", "Total steps completed"],
+                  ["densify_from_iter", "Start densification"],
+                  ["densify_until_iter", "End densification"],
+                  ["densification_interval", "Densification interval"],
+                  ["eval_interval", "Eval interval"],
+                  ["batch_size", "Batch size"],
+                ].map(([key, label]) => (
+                  <tr key={key} className="border-t border-slate-100">
+                    <td className="px-4 py-2 text-slate-700">{label}</td>
+                    <td className="px-4 py-2 text-slate-900">{fmt(leftSummary.major_params?.[key] as number | undefined)}</td>
+                    <td className="px-4 py-2 text-slate-900">{fmt(rightSummary.major_params?.[key] as number | undefined)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
@@ -272,99 +711,356 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
             </div>
           )}
 
-          <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-700">
-                <tr>
-                  <th className="text-left px-4 py-3">Tuning Param (tune-end)</th>
-                  <th className="text-left px-4 py-3">Left</th>
-                  <th className="text-left px-4 py-3">Right</th>
-                  <th className="text-left px-4 py-3">Delta</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tuningRows.map((row) => {
-                  const leftVal = (leftSummary.tuning?.end_params?.[row.key] ?? leftSummary.tuning?.final?.[row.key]) as number | undefined;
-                  const rightVal = (rightSummary.tuning?.end_params?.[row.key] ?? rightSummary.tuning?.final?.[row.key]) as number | undefined;
-                  return (
-                    <tr key={row.key} className="border-t border-slate-100">
-                      <td className="px-4 py-2 text-slate-700">{row.label}</td>
-                      <td className="px-4 py-2 text-slate-900">{fmt(leftVal)}</td>
-                      <td className="px-4 py-2 text-slate-900">{fmt(rightVal)}</td>
-                      <td className="px-4 py-2 text-slate-600">{deltaText(leftVal, rightVal, false)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="bg-white rounded-lg border border-slate-200 p-4">
+            <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-800">Comparison Line Graph</p>
+                <p className="text-xs text-slate-500">Select loss, tuning, or major params from dropdown. (X: Step, Y: Value). For tuning params, outlined points mark exact tuner-change steps.</p>
+              </div>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="min-w-[220px]">
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Graph parameter</label>
+                  <select
+                    value={selectedGraphMetric}
+                    onChange={(e) => {
+                      setHoverStep(null);
+                      setSelectedGraphMetric(e.target.value);
+                    }}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                  >
+                    {graphMetricRows.map((row) => (
+                      <option key={row.key} value={row.key}>{row.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2.5 text-[10px] leading-tight pb-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeftSeries((prev) => !prev)}
+                    aria-pressed={showLeftSeries}
+                    className={`flex items-center gap-1 ${showLeftSeries ? "text-slate-700" : "text-slate-400"}`}
+                    title="Toggle left series"
+                  >
+                    <span className={`inline-block w-2 h-2 rounded-full ${showLeftSeries ? "bg-sky-500" : "bg-slate-300"}`} />
+                    <span>{leftSummary.name || "Left"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowRightSeries((prev) => !prev)}
+                    aria-pressed={showRightSeries}
+                    className={`flex items-center gap-1 ${showRightSeries ? "text-slate-700" : "text-slate-400"}`}
+                    title="Toggle right series"
+                  >
+                    <span className={`inline-block w-2 h-2 rounded-full ${showRightSeries ? "bg-rose-500" : "bg-slate-300"}`} />
+                    <span>{rightSummary.name || "Right"}</span>
+                  </button>
+                  {(leftMainChangeMarkers.length > 0 || rightMainChangeMarkers.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTunerChangedMarkers((prev) => !prev)}
+                      aria-pressed={showTunerChangedMarkers}
+                      className={`flex items-center gap-1 ${showTunerChangedMarkers ? "text-slate-700" : "text-slate-400"}`}
+                      title="Toggle tuner-changed markers"
+                    >
+                      <span className={`inline-block w-2 h-2 rounded-full border ${showTunerChangedMarkers ? "border-slate-500 bg-white" : "border-slate-300 bg-slate-100"}`} />
+                      <span>tuner changed value at this step</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowTuneEndMarkers((prev) => !prev)}
+                    aria-pressed={showTuneEndMarkers}
+                    className={`flex items-center gap-1 ${showTuneEndMarkers ? "text-slate-700" : "text-slate-400"}`}
+                    title="Toggle tune-end markers"
+                  >
+                    <span className={`inline-block w-[1.5px] h-2 rounded-sm ${showTuneEndMarkers ? "bg-violet-500" : "bg-slate-300"}`} />
+                    <span>tune-end step</span>
+                  </button>
+                  {graphSeriesIdentical && (
+                    <span className="text-amber-700">Both series overlap exactly for this parameter.</span>
+                  )}
+                </div>
+              </div>
+            </div>
+            {graphHasData ? (
+              <div className="w-full overflow-x-auto">
+                <svg
+                  className="w-full min-w-[900px] h-[340px]"
+                  viewBox={`0 0 ${graphWidth} ${graphHeight}`}
+                  role="img"
+                  aria-label="Unified comparison graph"
+                  onMouseMove={(e) => {
+                    if (!graphXValues.length) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const px = ((e.clientX - rect.left) / rect.width) * graphWidth;
+                    const clamped = Math.max(graphPad, Math.min(graphWidth - graphPad, px));
+                    const ratio = (clamped - graphPad) / (graphWidth - graphPad * 2 || 1);
+                    const stepGuess = graphXMin + ratio * (graphXMaxUsed - graphXMin);
+                    let nearest = graphXValues[0];
+                    let bestDist = Math.abs(stepGuess - nearest);
+                    for (let i = 1; i < graphXValues.length; i += 1) {
+                      const d = Math.abs(stepGuess - graphXValues[i]);
+                      if (d < bestDist) {
+                        bestDist = d;
+                        nearest = graphXValues[i];
+                      }
+                    }
+                    setHoverStep(nearest);
+                  }}
+                  onMouseLeave={() => setHoverStep(null)}
+                >
+                  {[0, 1, 2, 3, 4].map((i) => {
+                    const ratio = i / 4;
+                    const y = graphPad + (graphHeight - graphPad * 2) * ratio;
+                    const value = graphYMax - (graphYMax - graphYMin) * ratio;
+                    return (
+                      <g key={`grid-${i}`}>
+                        <line x1={graphPad} y1={y} x2={graphWidth - graphPad} y2={y} stroke="#e2e8f0" strokeWidth="1" />
+                        <text x={8} y={y + 4} fill="#64748b" fontSize="11">{fmt(value)}</text>
+                      </g>
+                    );
+                  })}
+                  <line x1={graphPad} y1={graphHeight - graphPad} x2={graphWidth - graphPad} y2={graphHeight - graphPad} stroke="#94a3b8" strokeWidth="1.2" />
+                  <line x1={graphPad} y1={graphPad} x2={graphPad} y2={graphHeight - graphPad} stroke="#94a3b8" strokeWidth="1.2" />
+
+                  {graphXTicks.map((tick, idx) => {
+                    const x = stepToSvgX(tick, graphXMin, graphXMaxUsed, graphWidth, graphPad);
+                    return (
+                      <g key={`xtick-${idx}`}>
+                        <line x1={x} y1={graphHeight - graphPad} x2={x} y2={graphHeight - graphPad + 6} stroke="#94a3b8" strokeWidth="1" />
+                        <text x={x - 18} y={graphHeight - graphPad + 18} fill="#64748b" fontSize="11">{fmt(Math.round(tick))}</text>
+                      </g>
+                    );
+                  })}
+
+                  {showLeftSeries && leftPath && <path d={leftPath} fill="none" stroke="#0ea5e9" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />}
+                  {showRightSeries && rightPath && (
+                    <path
+                      d={rightPath}
+                      fill="none"
+                      stroke="#f43f5e"
+                      strokeWidth="1.7"
+                      strokeDasharray={graphSeriesIdentical ? "6 5" : undefined}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  )}
+
+                  {showTunerChangedMarkers && showLeftSeries && leftMainChangeMarkers.map((p, idx) => (
+                    <circle
+                      key={`lmc-${idx}`}
+                      cx={stepToSvgX(p.x, graphXMin, graphXMaxUsed, graphWidth, graphPad)}
+                      cy={valueToSvgY(p.y, graphYMin, graphYMax, graphHeight, graphPad)}
+                      r="4.8"
+                      fill="#ffffff"
+                      stroke="#0ea5e9"
+                      strokeWidth="2"
+                    />
+                  ))}
+                  {showTunerChangedMarkers && showRightSeries && rightMainChangeMarkers.map((p, idx) => (
+                    <circle
+                      key={`rmc-${idx}`}
+                      cx={stepToSvgX(p.x, graphXMin, graphXMaxUsed, graphWidth, graphPad)}
+                      cy={valueToSvgY(p.y, graphYMin, graphYMax, graphHeight, graphPad)}
+                      r="4.8"
+                      fill="#ffffff"
+                      stroke="#f43f5e"
+                      strokeWidth="2"
+                    />
+                  ))}
+
+                  {showTuneEndMarkers && showLeftSeries && leftTuneEndStep !== null && leftTuneEndValue !== null && (
+                    <line
+                      x1={stepToSvgX(leftTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) - 1}
+                      y1={valueToSvgY(leftTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) - 7}
+                      x2={stepToSvgX(leftTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) - 1}
+                      y2={valueToSvgY(leftTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) + 7}
+                      stroke="#8b5cf6"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                    />
+                  )}
+                  {showTuneEndMarkers && showRightSeries && rightTuneEndStep !== null && rightTuneEndValue !== null && (
+                    <line
+                      x1={stepToSvgX(rightTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) + 1}
+                      y1={valueToSvgY(rightTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) - 7}
+                      x2={stepToSvgX(rightTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) + 1}
+                      y2={valueToSvgY(rightTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) + 7}
+                      stroke="#8b5cf6"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                    />
+                  )}
+
+                  {showLeftSeries && leftGraphPoints.map((p, idx) => (
+                    <circle key={`lp-${idx}`} cx={stepToSvgX(p.x, graphXMin, graphXMaxUsed, graphWidth, graphPad)} cy={valueToSvgY(p.y, graphYMin, graphYMax, graphHeight, graphPad)} r="2.6" fill="#0ea5e9" />
+                  ))}
+                  {showRightSeries && rightGraphPoints.map((p, idx) => (
+                    <circle key={`rp-${idx}`} cx={stepToSvgX(p.x, graphXMin, graphXMaxUsed, graphWidth, graphPad)} cy={valueToSvgY(p.y, graphYMin, graphYMax, graphHeight, graphPad)} r="2.6" fill="#f43f5e" />
+                  ))}
+
+                  {hoverX !== null && (
+                    <line x1={hoverX} y1={graphPad} x2={hoverX} y2={graphHeight - graphPad} stroke="#64748b" strokeDasharray="4 4" strokeWidth="1" />
+                  )}
+
+                  {hoverStep !== null && hoverX !== null && (
+                    <g>
+                      <rect
+                        x={Math.max(graphPad + 8, Math.min(graphWidth - graphPad - 240, hoverX + 10))}
+                        y={graphPad + 8}
+                        width="232"
+                        height="56"
+                        rx="6"
+                        fill="#ffffff"
+                        stroke="#cbd5e1"
+                      />
+                      <text
+                        x={Math.max(graphPad + 18, Math.min(graphWidth - graphPad - 230, hoverX + 20))}
+                        y={graphPad + 27}
+                        fill="#0f172a"
+                        fontSize="12"
+                        fontWeight="600"
+                      >
+                        Step {fmt(hoverStep)}
+                      </text>
+                      <text
+                        x={Math.max(graphPad + 18, Math.min(graphWidth - graphPad - 230, hoverX + 20))}
+                        y={graphPad + 43}
+                        fill="#0369a1"
+                        fontSize="11"
+                      >
+                        Left: {fmt(hoverLeftValue)}
+                      </text>
+                      <text
+                        x={Math.max(graphPad + 120, Math.min(graphWidth - graphPad - 120, hoverX + 122))}
+                        y={graphPad + 43}
+                        fill="#be123c"
+                        fontSize="11"
+                      >
+                        Right: {fmt(hoverRightValue)}
+                      </text>
+                    </g>
+                  )}
+
+                  <text x={graphPad} y={graphHeight - 8} fill="#64748b" fontSize="11">Step {fmt(graphXMin)}</text>
+                  <text x={graphWidth - graphPad - 78} y={graphHeight - 8} fill="#64748b" fontSize="11">Step {fmt(graphXMaxUsed)}</text>
+                </svg>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">No graph data available for this parameter in the selected projects.</p>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
-              <p className="text-sm font-semibold text-slate-800 mb-2">Left tuning history</p>
-              {leftHistory.length === 0 ? (
-                <p className="text-xs text-slate-500">No tuning history (likely baseline).</p>
-              ) : (
-                <div className="space-y-2 max-h-64 overflow-auto text-xs">
-                  {leftHistory.map((item, idx) => (
-                    <div key={`left-h-${idx}`} className="border border-slate-200 rounded p-2">
-                      <div className="font-semibold text-slate-700">Step {item.step ?? "-"}</div>
-                      <div className="text-slate-600">Adjustments: {(item.adjustments || []).join(", ") || "none"}</div>
-                      <div className="text-slate-500">Reason: {item.instability?.has_issues ? "instability" : item.convergence?.has_issues ? "convergence" : "none"}</div>
-                      <div className="text-slate-500">convergence_speed proxy (loss_trend): {fmtMaybe(item.convergence?.loss_trend)}</div>
-                      <div className="text-slate-500">loss_variance: {fmtMaybe(item.convergence?.loss_variance)} | loss_plateau: {fmtMaybe(item.convergence?.loss_plateau)} | slow_convergence: {fmtMaybe(item.convergence?.slow_convergence)}</div>
-                      <div className="text-slate-500">max_grad: {fmtMaybe(item.instability?.max_grad)} | loss_spikes: {fmtMaybe(item.instability?.loss_spikes)} | gradient_explosion: {fmtMaybe(item.instability?.gradient_explosion)}</div>
-                      {item.params && (
-                        <div className="text-slate-500">params: lr={fmtMaybe(item.params.lr_mult)}, opacity_lr={fmtMaybe(item.params.opacity_lr_mult)}, sh_lr={fmtMaybe(item.params.sh_lr_mult)}, pos_lr={fmtMaybe(item.params.position_lr_mult)}, densify_th={fmtMaybe(item.params.densify_threshold)}</div>
-                      )}
-                    </div>
+          <div className="bg-white rounded-lg border border-slate-200 p-4 space-y-4">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-800">Eval Step Image Comparison</p>
+                <p className="text-xs text-slate-500">Choose one eval step; both projects show that same step. Left side is Ground truth, right side is the compared output.</p>
+              </div>
+              <div className="min-w-[220px]">
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Eval step</label>
+                <select
+                  value={selectedEvalStep === null ? "" : String(selectedEvalStep)}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (!raw) {
+                      setSelectedEvalStep(null);
+                      return;
+                    }
+                    setSelectedEvalStep(Number.parseInt(raw, 10));
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                  disabled={!commonEvalSteps.length}
+                >
+                  {!commonEvalSteps.length && <option value="">No common eval steps</option>}
+                  {commonEvalSteps.map((step) => (
+                    <option key={`eval-step-${step}`} value={step}>Step {fmt(step)}</option>
                   ))}
-                </div>
-              )}
+                </select>
+              </div>
             </div>
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
-              <p className="text-sm font-semibold text-slate-800 mb-2">Right tuning history</p>
-              {rightHistory.length === 0 ? (
-                <p className="text-xs text-slate-500">No tuning history (likely baseline).</p>
-              ) : (
-                <div className="space-y-2 max-h-64 overflow-auto text-xs">
-                  {rightHistory.map((item, idx) => (
-                    <div key={`right-h-${idx}`} className="border border-slate-200 rounded p-2">
-                      <div className="font-semibold text-slate-700">Step {item.step ?? "-"}</div>
-                      <div className="text-slate-600">Adjustments: {(item.adjustments || []).join(", ") || "none"}</div>
-                      <div className="text-slate-500">Reason: {item.instability?.has_issues ? "instability" : item.convergence?.has_issues ? "convergence" : "none"}</div>
-                      <div className="text-slate-500">convergence_speed proxy (loss_trend): {fmtMaybe(item.convergence?.loss_trend)}</div>
-                      <div className="text-slate-500">loss_variance: {fmtMaybe(item.convergence?.loss_variance)} | loss_plateau: {fmtMaybe(item.convergence?.loss_plateau)} | slow_convergence: {fmtMaybe(item.convergence?.slow_convergence)}</div>
-                      <div className="text-slate-500">max_grad: {fmtMaybe(item.instability?.max_grad)} | loss_spikes: {fmtMaybe(item.instability?.loss_spikes)} | gradient_explosion: {fmtMaybe(item.instability?.gradient_explosion)}</div>
-                      {item.params && (
-                        <div className="text-slate-500">params: lr={fmtMaybe(item.params.lr_mult)}, opacity_lr={fmtMaybe(item.params.opacity_lr_mult)}, sh_lr={fmtMaybe(item.params.sh_lr_mult)}, pos_lr={fmtMaybe(item.params.position_lr_mult)}, densify_th={fmtMaybe(item.params.densify_threshold)}</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-white rounded-lg border border-slate-200 p-3">
-              <p className="text-xs font-semibold text-slate-600 mb-2">Left Preview</p>
-              {previewLeft ? (
-                <img src={previewLeft} alt="Left preview" className="w-full rounded border border-slate-200" />
-              ) : (
-                <p className="text-xs text-slate-500">No preview available.</p>
-              )}
-            </div>
-            <div className="bg-white rounded-lg border border-slate-200 p-3">
-              <p className="text-xs font-semibold text-slate-600 mb-2">Right Preview</p>
-              {previewRight ? (
-                <img src={previewRight} alt="Right preview" className="w-full rounded border border-slate-200" />
-              ) : (
-                <p className="text-xs text-slate-500">No preview available.</p>
-              )}
-            </div>
+            {leftSelectedPreview && rightSelectedPreview ? (
+              <div className="space-y-3">
+                <div
+                  ref={swipeAreaRef}
+                  className="relative w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-50 touch-none select-none"
+                >
+                  <img src={leftSelectedPreview} alt={`Left project at step ${selectedEvalStep ?? ""}`} className="block w-full h-auto" draggable={false} />
+                  <div
+                    className="absolute inset-0 overflow-hidden pointer-events-none"
+                    style={{ clipPath: `inset(0 ${100 - swipePercent}% 0 0)` }}
+                  >
+                    <div className="absolute bottom-2 left-2 px-2 py-1 rounded bg-slate-900/75 text-white text-[11px] font-semibold whitespace-nowrap">
+                      Top: {leftSummary.name || "Left"}
+                    </div>
+                  </div>
+                  <div
+                    className={`absolute inset-0 overflow-hidden ${isSwipeDragging ? "cursor-ew-resize" : "cursor-col-resize"}`}
+                    style={{ clipPath: `inset(0 0 0 ${swipePercent}%)` }}
+                    onPointerDown={(e) => {
+                      setIsSwipeDragging(true);
+                      updateSwipeFromClientX(e.clientX);
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerMove={(e) => {
+                      if (!isSwipeDragging) return;
+                      updateSwipeFromClientX(e.clientX);
+                    }}
+                    onPointerUp={(e) => {
+                      setIsSwipeDragging(false);
+                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                      }
+                    }}
+                    onPointerCancel={(e) => {
+                      setIsSwipeDragging(false);
+                      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                        e.currentTarget.releasePointerCapture(e.pointerId);
+                      }
+                    }}
+                  >
+                    <img src={rightSelectedPreview} alt={`Right project at step ${selectedEvalStep ?? ""}`} className="block w-full h-auto" draggable={false} />
+                    <div className="absolute bottom-2 right-2 px-2 py-1 rounded bg-sky-950/75 text-white text-[11px] font-semibold whitespace-nowrap">
+                      Bottom: {rightSummary.name || "Right"}
+                    </div>
+                  </div>
+
+                  <div
+                    className="absolute top-0 bottom-0 w-[2px] bg-white/90 shadow pointer-events-none"
+                    style={{ left: `${swipePercent}%`, transform: "translateX(-1px)" }}
+                  />
+                  <div
+                    className="absolute top-1/2 w-4 h-4 rounded-full border border-white bg-sky-500 shadow pointer-events-none"
+                    style={{ left: `${swipePercent}%`, transform: "translate(-50%, -50%)" }}
+                  />
+
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-slate-600">
+                    <span>Swipe to compare</span>
+                    <span>{Math.round(swipePercent)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={swipePercent}
+                    onChange={(e) => setSwipePercent(Number.parseFloat(e.target.value))}
+                    onMouseDown={() => setIsSwipeDragging(true)}
+                    onMouseUp={() => setIsSwipeDragging(false)}
+                    onTouchStart={() => setIsSwipeDragging(true)}
+                    onTouchEnd={() => setIsSwipeDragging(false)}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">Matching preview images at the same eval step are not available for both projects yet.</p>
+            )}
           </div>
-        </>
+        </div>
       )}
     </div>
   );

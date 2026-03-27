@@ -6,6 +6,7 @@ import time
 import re
 import os
 import struct
+import ast
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -2002,10 +2003,12 @@ def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
         metadata_path, resolved_engine, _, _ = _find_existing_path(project_id, "metadata.json", selected_engine)
         eval_history_path, _, _, _ = _find_existing_path(project_id, "eval_history.json", selected_engine)
         tuning_results_path, _, _, _ = _find_existing_path(project_id, "adaptive_tuning_results.json", selected_engine)
+        run_config_path = project_dir / "run_config.json"
 
         metadata = _read_json_if_exists(metadata_path)
         eval_history = _read_json_if_exists(eval_history_path) or []
         tuning_results = _read_json_if_exists(tuning_results_path)
+        run_config = _read_json_if_exists(run_config_path)
 
         latest_eval = eval_history[-1] if isinstance(eval_history, list) and eval_history else {}
         first_eval = eval_history[0] if isinstance(eval_history, list) and eval_history else {}
@@ -2023,6 +2026,81 @@ def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
             for k, v in latest_eval.items():
                 if isinstance(k, str) and k.startswith("loss_at_"):
                     loss_milestones[k] = v
+
+        eval_series = []
+        runtime_tuning_series = []
+        if isinstance(eval_history, list):
+            for point in eval_history:
+                if not isinstance(point, dict):
+                    continue
+                step_value = point.get("step")
+                loss_value = point.get("final_loss")
+                if isinstance(step_value, (int, float)) and isinstance(loss_value, (int, float)):
+                    eval_series.append({"step": int(step_value), "loss": float(loss_value)})
+
+        # Fallback for older runs where eval_history contains step but null final_loss.
+        if not eval_series:
+            processing_log = project_dir / "processing.log"
+            if processing_log.exists():
+                try:
+                    step_loss_map = {}
+                    step_param_map = {}
+                    pattern = re.compile(r"step=(\d+)/(?:\d+).*?loss=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+                    pattern_params = re.compile(r"step=(\d+)/(?:\d+).*?strategy=(\{[^\n]*?\})\s+lrs=(\{[^\n]*?\})")
+                    with open(processing_log, encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+
+                    # Parse only the latest run segment for this project to avoid mixed lines
+                    # if a log file accidentally contains entries from another project.
+                    run_markers = [
+                        idx for idx, line in enumerate(lines)
+                        if "Running local worker:" in line and f" {project_id} " in line
+                    ]
+                    start_idx = run_markers[-1] if run_markers else 0
+                    end_idx = len(lines)
+                    for idx in range(start_idx + 1, len(lines)):
+                        line = lines[idx]
+                        if "Running local worker:" in line and f" {project_id} " not in line:
+                            end_idx = idx
+                            break
+
+                    for line in lines[start_idx:end_idx]:
+                            match = pattern.search(line)
+                            if not match:
+                                pass
+                            else:
+                                step_value = int(match.group(1))
+                                loss_value = float(match.group(2))
+                                step_loss_map[step_value] = loss_value
+
+                            match_params = pattern_params.search(line)
+                            if match_params:
+                                step_value = int(match_params.group(1))
+                                try:
+                                    strategy = ast.literal_eval(match_params.group(2))
+                                    lrs = ast.literal_eval(match_params.group(3))
+                                    if isinstance(strategy, dict) and isinstance(lrs, dict):
+                                        step_param_map[step_value] = {
+                                            "strategy": strategy,
+                                            "learning_rates": lrs,
+                                        }
+                                except Exception:
+                                    pass
+                    if step_loss_map:
+                        eval_series = [
+                            {"step": s, "loss": step_loss_map[s]}
+                            for s in sorted(step_loss_map.keys())
+                        ]
+                    if step_param_map:
+                        runtime_tuning_series = [
+                            {"step": s, "params": step_param_map[s]}
+                            for s in sorted(step_param_map.keys())
+                        ]
+                except Exception as exc:
+                    logger.warning("Failed to parse processing log for eval series %s: %s", processing_log, exc)
+
+        if metrics.get("final_loss") is None and eval_series:
+            metrics["final_loss"] = eval_series[-1].get("loss")
 
         if metadata and isinstance(metadata, dict):
             final_metrics = metadata.get("final_metrics") if isinstance(metadata.get("final_metrics"), dict) else {}
@@ -2052,6 +2130,13 @@ def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
         tuning_history = []
         tune_end_step = None
         tune_end_params = {}
+        configured_tune_end_step = None
+        if isinstance(run_config, dict):
+            resolved_cfg = run_config.get("resolved_params")
+            if isinstance(resolved_cfg, dict):
+                configured_tune_end_step = resolved_cfg.get("tune_end_step")
+        mode_value = status_info.get("mode") or (metadata.get("mode") if isinstance(metadata, dict) else None)
+
         if isinstance(tuning_results, dict):
             maybe_tuning_history = tuning_results.get("tuning_history")
             if isinstance(maybe_tuning_history, list):
@@ -2061,6 +2146,32 @@ def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
             maybe_final = tuning_results.get("final_params")
             if isinstance(maybe_final, dict):
                 tune_end_params = maybe_final
+
+        if mode_value != "modified":
+            tune_end_step = None
+            tune_end_params = {}
+
+        if not runtime_tuning_series and isinstance(tuning_history, list):
+            runtime_tuning_series = [
+                {"step": item.get("step"), "params": item.get("params")}
+                for item in tuning_history
+                if isinstance(item, dict) and isinstance(item.get("step"), (int, float)) and isinstance(item.get("params"), dict)
+            ]
+
+        resolved_cfg = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
+        tune_interval = resolved_cfg.get("tune_interval")
+        log_interval = resolved_cfg.get("log_interval")
+        major_params = {
+            "max_steps": resolved_cfg.get("max_steps"),
+            "total_steps_completed": status_info.get("currentStep") if status_info.get("currentStep") is not None else latest_eval.get("step"),
+            "densify_from_iter": resolved_cfg.get("densify_from_iter"),
+            "densify_until_iter": resolved_cfg.get("densify_until_iter"),
+            "densification_interval": resolved_cfg.get("densification_interval"),
+            "eval_interval": resolved_cfg.get("eval_interval"),
+            "save_interval": resolved_cfg.get("save_interval"),
+            "splat_export_interval": resolved_cfg.get("splat_export_interval"),
+            "batch_size": resolved_cfg.get("batch_size"),
+        }
 
         outputs = files.get_output_files(project_id)
         preview_url = None
@@ -2073,19 +2184,30 @@ def get_experiment_summary(project_id: str, engine: str | None = Query(None)):
             "project_id": project_id,
             "name": status_info.get("name"),
             "status": status_info.get("status"),
-            "mode": status_info.get("mode") or (metadata.get("mode") if isinstance(metadata, dict) else None),
+            "mode": mode_value,
             "engine": resolved_engine or inferred_engine,
             "metrics": metrics,
             "tuning": {
                 "initial": initial_tuning_params,
                 "final": final_tuning_params,
                 "end_params": tune_end_params,
-                "end_step": tune_end_step if tune_end_step is not None else (metadata.get("tune_end_step") if isinstance(metadata, dict) else None),
+                "end_step": (
+                    configured_tune_end_step
+                    if configured_tune_end_step is not None
+                    else tune_end_step
+                    if tune_end_step is not None
+                    else (metadata.get("tune_end_step") if isinstance(metadata, dict) else None)
+                ),
                 "runs": metadata.get("tuning_runs") if isinstance(metadata, dict) else None,
                 "history_count": tuning_history_count,
                 "history": tuning_history,
+                "tune_interval": tune_interval,
+                "log_interval": log_interval,
+                "runtime_series": runtime_tuning_series,
             },
+            "major_params": major_params,
             "loss_milestones": loss_milestones,
+            "eval_series": eval_series,
             "preview_url": preview_url,
             "eval_points": len(eval_history) if isinstance(eval_history, list) else 0,
         }
