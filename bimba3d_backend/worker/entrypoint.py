@@ -1396,9 +1396,9 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
         "--ImageReader.camera_model", "OPENCV",
     ]
     if p.get("max_image_size"):
-        feat_cmd += ["--SiftExtraction.max_image_size", str(p.get("max_image_size"))]
+        feat_cmd += ["--FeatureExtraction.max_image_size", str(p.get("max_image_size"))]
     else:
-        feat_cmd += ["--SiftExtraction.max_image_size", "1600"]
+        feat_cmd += ["--FeatureExtraction.max_image_size", "1600"]
     if p.get("peak_threshold") is not None:
         feat_cmd += ["--SiftExtraction.peak_threshold", str(p.get("peak_threshold"))]
     if p.get("max_num_features") is not None:
@@ -1439,7 +1439,7 @@ def run_colmap(image_dir: Path, output_dir: Path, params: dict | None = None) ->
     else:
         match_cmd = [colmap_exec, "exhaustive_matcher", "--database_path", str(database_path)]
     if guided is not None:
-        match_cmd += ["--SiftMatching.guided_matching", "1" if guided else "0"]
+        match_cmd += ["--FeatureMatching.guided_matching", "1" if guided else "0"]
     if p.get("sift_matching_min_num_inliers") is not None:
         # Compatibility: many COLMAP builds expose this under TwoViewGeometry, not SiftMatching.
         match_cmd += ["--TwoViewGeometry.min_num_inliers", str(p.get("sift_matching_min_num_inliers"))]
