@@ -64,6 +64,7 @@ class StatusResponse(BaseModel):
     last_completed_step: Optional[int] = None
     engine: Optional[str] = None
     worker_mode: Optional[str] = None
+    current_run_id: Optional[str] = None
     base_session_id: Optional[str] = None
 
 

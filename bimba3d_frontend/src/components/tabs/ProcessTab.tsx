@@ -804,23 +804,30 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         
         // Update processing status
         const status = statusRes.data;
+        const selectedRunIsActive = Boolean(
+          selectedRunId &&
+          status?.current_run_id === selectedRunId &&
+          ["processing", "stopping", "stopped", "failed"].includes(String(status?.status || "")),
+        );
         
-        // Store current step and max steps for progress bar
-        setTrainingCurrentStep(status.currentStep);
-        setTrainingMaxSteps(status.maxSteps);
-        setStageProgress(status.stage_progress);
+        // Store current step and max steps only for the actively running session.
+        setTrainingCurrentStep(selectedRunIsActive ? status.currentStep : undefined);
+        setTrainingMaxSteps(selectedRunIsActive ? status.maxSteps : undefined);
+        setStageProgress(selectedRunIsActive ? status.stage_progress : undefined);
 
         // Use stopped_percentage when stopped, else 'percentage' or 'progress'
         let percent = undefined as number | undefined;
-        if (status.status === 'stopped' && typeof status.stopped_percentage === 'number') {
-          percent = status.stopped_percentage;
-        }
-        if (percent === undefined) {
-          percent = typeof status.percentage === 'number' ? status.percentage : undefined;
-        }
-        if (percent === undefined) {
-          const p = typeof status.progress === 'number' ? status.progress : parseInt(status.progress || '0');
-          percent = Number.isFinite(p) ? p : undefined;
+        if (selectedRunIsActive) {
+          if (status.status === 'stopped' && typeof status.stopped_percentage === 'number') {
+            percent = status.stopped_percentage;
+          }
+          if (percent === undefined) {
+            percent = typeof status.percentage === 'number' ? status.percentage : undefined;
+          }
+          if (percent === undefined) {
+            const p = typeof status.progress === 'number' ? status.progress : parseInt(status.progress || '0');
+            percent = Number.isFinite(p) ? p : undefined;
+          }
         }
         const pctNum = typeof percent === 'number' ? percent : 0;
         setOverallProgress(Math.max(0, Math.min(100, isNaN(pctNum) ? 0 : pctNum)));
@@ -828,10 +835,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         // Current stage label
         let stageName = "" as string;
         let stageKey: "docker"|"colmap"|"training"|"export"|"" = "";
-        // If stopped, prefer worker-provided stopped_stage for accurate location
-        const effectiveStage = (status.status === 'stopped' && status.stopped_stage) ? status.stopped_stage : status.stage;
-        // workerStoppedStage: the stage where the worker actually stopped (null if not stopped)
-        const workerStoppedStage = status.status === 'stopped' ? (status.stopped_stage || status.stage) : null;
+        // If stopped, prefer worker-provided stopped_stage for accurate location.
+        const effectiveStage = selectedRunIsActive
+          ? ((status.status === 'stopped' && status.stopped_stage) ? status.stopped_stage : status.stage)
+          : null;
+        // workerStoppedStage: the stage where the worker actually stopped (null if not stopped).
+        const workerStoppedStage = selectedRunIsActive && status.status === 'stopped' ? (status.stopped_stage || status.stage) : null;
         if (effectiveStage === "docker" || effectiveStage === "queued") { stageName = "Docker Worker (Starting)"; stageKey = "docker"; }
         else if (effectiveStage === "colmap" || effectiveStage === "colmap_only") { stageName = "COLMAP (Structure from Motion)"; stageKey = "colmap"; }
         else if (effectiveStage === "training") { stageName = "Training (Gaussian Splatting)"; stageKey = "training"; }
@@ -845,13 +854,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setCurrentStage(stageName);
         
         // Check if resumable (has sparse or checkpoints)
-        const resumable = status.can_resume || sparse;
+        const resumable = selectedRunIsActive ? (status.can_resume || sparse) : sparse;
         setCanResume(resumable && status.status !== "processing" && status.status !== "stopping");
         // Track which stage the worker stopped at (prefer stopped_stage)
         setStoppedStage(workerStoppedStage);
         
         // Handle stopping state
-        if (status.status === "stopping") {
+        if (selectedRunIsActive && status.status === "stopping") {
           setIsStopping(true);
           setStoppingMessage(status.message || "Will stop after current step completes...");
         } else {
@@ -860,7 +869,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         }
         
         // Update processing flag based on status
-        if (status.status === "processing" || status.status === "stopping") {
+        if (selectedRunIsActive && (status.status === "processing" || status.status === "stopping")) {
           setProcessing(true);
         } else {
           setProcessing(false);
@@ -868,7 +877,18 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         
         // Build detailed status message
         let statusMsg: React.ReactNode = null;
-        if (status.status === "failed") {
+        if (!selectedRunIsActive) {
+          if (model) {
+            statusMsg = (
+              <span className="inline-flex items-center gap-1 text-green-700 font-semibold">
+                <Check className="inline w-4 h-4 text-green-600" />
+                Completed
+              </span>
+            );
+          } else {
+            statusMsg = "Session pending";
+          }
+        } else if (status.status === "failed") {
           statusMsg = (
             <span className="inline-flex items-center gap-1 text-red-700 font-semibold">
               <X className="inline w-4 h-4 text-red-600" />
@@ -910,7 +930,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setProcessingStatus(statusMsg);
         
         // Detect if pipeline was stopped (status is 'stopped' or message contains 'stopped by user')
-        const stopped = status.status === 'stopped' || (status.message && status.message.toLowerCase().includes('stopped by user'));
+        const stopped = selectedRunIsActive && (status.status === 'stopped' || (status.message && status.message.toLowerCase().includes('stopped by user')));
         setWasStopped(stopped);
 
         // Determine stage status based on actual pipeline state.
@@ -922,40 +942,41 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         // or if the worker stopped after COLMAP (stoppedStage later than colmap), or overall status indicates completed.
         // Consider COLMAP complete only when there's an explicit sparse reconstruction present
         // OR the pipeline reports full completion for that stage (stage_progress >= 100 and overall status is completed).
-        let colmapComplete = Boolean(sparse) || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed') || workerStoppedStage === 'training' || workerStoppedStage === 'export' || (status.status === 'completed' && (status.stage === 'colmap' || status.stage === 'training' || status.stage === 'export'));
+        const colmapReadyForSession = Boolean(sparse) || Boolean(canCreateSessionDraft);
+        let colmapComplete = colmapReadyForSession || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed') || workerStoppedStage === 'training' || workerStoppedStage === 'export' || (selectedRunIsActive && status.status === 'completed' && (status.stage === 'colmap' || status.stage === 'training' || status.stage === 'export'));
         // If the worker stopped at COLMAP but the COLMAP substep actually did NOT finish, do not treat as complete.
         if (workerStoppedStage === 'colmap' && !(Boolean(sparse) || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed'))) {
           colmapComplete = false;
         }
         if (colmapComplete) {
           newStatus.colmap = 'success';
-        } else if (status.stage === 'colmap' || status.stage === 'colmap_only') {
+        } else if (selectedRunIsActive && (status.stage === 'colmap' || status.stage === 'colmap_only')) {
           // Show running when actively in COLMAP
           newStatus.colmap = (status.status === 'processing' || status.status === 'stopping') ? 'running' : 'pending';
         }
 
         // TRAINING: consider it complete if model outputs exist, or training reached 100% stage_progress,
         // or the worker stopped after training (stoppedStage === export) or overall completed.
-        let trainingComplete = Boolean(model) || (status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100) || workerStoppedStage === 'export' || (status.status === 'completed' && (status.stage === 'training' || status.stage === 'export'));
+        let trainingComplete = Boolean(model) || (selectedRunIsActive && status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100) || workerStoppedStage === 'export' || (selectedRunIsActive && status.status === 'completed' && (status.stage === 'training' || status.stage === 'export'));
         // If the worker stopped at training but training hadn't finished, do not mark as complete
         if (workerStoppedStage === 'training' && !(Boolean(model) || (status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100))) {
           trainingComplete = false;
         }
         if (trainingComplete) {
           newStatus.training = 'success';
-        } else if (status.stage === 'training') {
+        } else if (selectedRunIsActive && status.stage === 'training') {
           newStatus.training = (status.status === 'processing' || status.status === 'stopping') ? 'running' : 'pending';
         }
 
         // EXPORT: consider it complete if model outputs exist or overall status is completed
-        let exportComplete = Boolean(model) || (status.status === 'completed' && status.stage === 'export');
+        let exportComplete = Boolean(model) || (selectedRunIsActive && status.status === 'completed' && status.stage === 'export');
         // If worker stopped during export and export did not finish, do not mark as complete
         if (workerStoppedStage === 'export' && !(Boolean(model) || (status.status === 'completed' && status.stage === 'export'))) {
           exportComplete = false;
         }
         if (exportComplete) {
           newStatus.export = 'success';
-        } else if (status.stage === 'export' && status.status === 'processing') {
+        } else if (selectedRunIsActive && status.stage === 'export' && status.status === 'processing') {
           newStatus.export = 'running';
         }
 

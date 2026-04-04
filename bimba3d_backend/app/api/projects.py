@@ -850,7 +850,13 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         else:
             run_name_requested = _rewrite_auto_run_name_prefix(raw_run_name_requested, project_id, project_label)
         requested_existing_run = runs_root / run_name_requested if run_name_requested else None
-        if restart_fresh_requested and requested_existing_run and requested_existing_run.exists() and requested_existing_run.is_dir():
+        if (
+            requested_existing_run
+            and requested_existing_run.exists()
+            and requested_existing_run.is_dir()
+        ):
+            # If the client explicitly targets an existing session, keep using it.
+            # This avoids accidental auto-cloning like "session3_01" when processing "session3".
             run_id = run_name_requested
         else:
             run_id = _resolve_unique_run_id(runs_root, run_name_requested or default_run_name)
