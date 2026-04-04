@@ -1,6 +1,6 @@
 import { useParams, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { ArrowLeft, Images, Play, FileText, Columns2, Boxes } from "lucide-react";
+import { ArrowLeft, Images, Play, FileText, Columns2, Boxes, Clock, Check } from "lucide-react";
 import { api } from "../api/client";
 
 // Tab components
@@ -101,7 +101,13 @@ export default function ProjectDetail() {
                     : projectStatus.status === "failed"
                     ? "bg-rose-50/90 text-rose-700 border-rose-200"
                     : "bg-white/90 text-slate-700 border-slate-200"
-                }`}>
+                } inline-flex items-center gap-1.5`}>
+                  {(projectStatus.status === "processing" || projectStatus.status === "stopping") && (
+                    <Clock className="w-3.5 h-3.5 text-blue-600 animate-pulse" />
+                  )}
+                  {(projectStatus.status === "completed" || projectStatus.status === "done") && (
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  )}
                   {projectStatus.status}
                 </span>
               )}
@@ -136,6 +142,9 @@ export default function ProjectDetail() {
                 >
                   <Icon className="w-5 h-5" />
                   {tab.label}
+                  {tab.id === "process" && (projectStatus?.status === "processing" || projectStatus?.status === "stopping") && (
+                    <Clock className="w-4 h-4 text-blue-600 animate-pulse" />
+                  )}
                 </button>
               );
             })}

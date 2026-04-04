@@ -387,6 +387,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [stageProgress, setStageProgress] = useState<number | undefined>(undefined);
   const [pipelineDone, setPipelineDone] = useState(false);
   const [projectRuns, setProjectRuns] = useState<ProjectRunInfo[]>([]);
+  const [processingRunId, setProcessingRunId] = useState<string>("");
+  const [startRequestAtMs, setStartRequestAtMs] = useState<number>(0);
   const [selectedRunId, setSelectedRunId] = useState<string>("");
   const [baseSessionId, setBaseSessionId] = useState<string>("");
   const [projectDisplayName, setProjectDisplayName] = useState<string>(projectId);
@@ -407,6 +409,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     () => projectRuns.find((r) => r.run_id === selectedRunId) || null,
     [projectRuns, selectedRunId],
   );
+  const selectedRunIsProcessing = Boolean(processingRunId) && selectedRunId === processingRunId;
   const canManageColmapImages = !selectedRunId || selectedRunMeta?.is_base === true;
 
   const applyTrainingDefaults = (defaults: ReturnType<typeof getDefaultProcessConfig>) => {
@@ -804,10 +807,23 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         
         // Update processing status
         const status = statusRes.data;
+        const activeRunIdFromStatus =
+          (status.status === "processing" || status.status === "stopping") && typeof status.current_run_id === "string"
+            ? status.current_run_id
+            : "";
+        setProcessingRunId(activeRunIdFromStatus);
+        if (activeRunIdFromStatus && selectedRunId && activeRunIdFromStatus === selectedRunId) {
+          setStartRequestAtMs(0);
+        }
+        const suppressStoppedAtStart =
+          startRequestAtMs > 0 &&
+          Date.now() - startRequestAtMs < 15000 &&
+          status?.current_run_id === selectedRunId;
         const selectedRunIsActive = Boolean(
           selectedRunId &&
           status?.current_run_id === selectedRunId &&
-          ["processing", "stopping", "stopped", "failed"].includes(String(status?.status || "")),
+          (["processing", "stopping"].includes(String(status?.status || "")) ||
+            (!suppressStoppedAtStart && ["stopped", "failed"].includes(String(status?.status || "")))),
         );
         
         // Store current step and max steps only for the actively running session.
@@ -835,7 +851,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         // Current stage label
         let stageName = "" as string;
         let stageKey: "docker"|"colmap"|"training"|"export"|"" = "";
-        const rawStopped = selectedRunIsActive && status.status === 'stopped';
+        const rawStopped = selectedRunIsActive && status.status === 'stopped' && !suppressStoppedAtStart;
         if (rawStopped) {
           stoppedPollCountRef.current += 1;
         } else {
@@ -1014,7 +1030,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     // Poll every 3 seconds to update status
     const interval = setInterval(checkOutputs, 3000);
     return () => clearInterval(interval);
-  }, [projectId, show3DModel, selectedRunId, selectedRunMeta?.session_status]);
+  }, [projectId, show3DModel, selectedRunId, selectedRunMeta?.session_status, startRequestAtMs]);
 
   // Compute map center and bounds for auto-fit
   const mapCenter = useMemo(() => {
@@ -1673,6 +1689,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
     setProcessing(true);
     setError(null);
+    setWasStopped(false);
+    setStoppedStage(null);
+    setStartRequestAtMs(Date.now());
+    stoppedPollCountRef.current = 0;
 
     if (sparsePreference === "merge_selected" && sparseMergeSelection.length < 2) {
       setError("Select at least two sparse folders when using merge mode.");
@@ -1748,6 +1768,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const handleResumeProcess = async () => {
     setProcessing(true);
     setError(null);
+    setWasStopped(false);
+    setStoppedStage(null);
+    setStartRequestAtMs(Date.now());
+    stoppedPollCountRef.current = 0;
     if (sparsePreference === "merge_selected" && sparseMergeSelection.length < 2) {
       setError("Select at least two sparse folders when using merge mode.");
       setProcessing(false);
@@ -2129,24 +2153,59 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-2">
               <label className="block text-[11px] font-semibold text-slate-600 mb-1">Active Session Output</label>
-              <select
-                value={selectedRunId}
-                onChange={(e) => setSelectedRunId(e.target.value)}
-                className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
-              >
-                {projectRuns.length === 0 ? (
-                  <option value="">Latest (no named sessions yet)</option>
-                ) : (
-                  projectRuns.map((run) => {
-                    const isBase = run.run_id === baseSessionId || run.is_base;
-                    const statusSuffix = run.session_status === "completed" ? "\u00A0\u00A0\u2713" : "\u00A0\u00A0\u00A0";
-                    const label = `${run.run_name || run.run_id}${isBase ? ' [BASE]' : ''}${statusSuffix}`;
-                    return (
-                      <option key={run.run_id} value={run.run_id}>{label}</option>
-                    );
-                  })
-                )}
-              </select>
+              {projectRuns.length === 0 ? (
+                <div className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md bg-white text-slate-500">
+                  Latest (no named sessions yet)
+                </div>
+              ) : (
+                <details className="group relative">
+                  <summary className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md bg-white list-none cursor-pointer flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      {selectedRunId
+                        ? (projectRuns.find((r) => r.run_id === selectedRunId)?.run_name || selectedRunId)
+                        : "Select session"}
+                    </span>
+                    <span className="inline-flex items-center gap-1 shrink-0">
+                      {selectedRunIsProcessing ? (
+                        <Clock className="w-3.5 h-3.5 text-blue-600 animate-pulse" />
+                      ) : selectedRunMeta?.session_status === "completed" ? (
+                        <Check className="w-3.5 h-3.5 text-green-600" />
+                      ) : null}
+                    </span>
+                  </summary>
+                  <div className="absolute z-20 mt-1 w-full max-h-64 overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
+                    {projectRuns.map((run) => {
+                      const isBase = run.run_id === baseSessionId || run.is_base;
+                      const isSelected = run.run_id === selectedRunId;
+                      const isProcessingRun = Boolean(processingRunId) && run.run_id === processingRunId;
+                      return (
+                        <button
+                          key={run.run_id}
+                          type="button"
+                          onClick={(event) => {
+                            setSelectedRunId(run.run_id);
+                            const detailsEl = event.currentTarget.closest("details") as HTMLDetailsElement | null;
+                            if (detailsEl) detailsEl.open = false;
+                          }}
+                          className={`w-full px-2 py-2 text-left text-xs flex items-center justify-between gap-2 hover:bg-slate-50 ${isSelected ? "bg-blue-50" : ""}`}
+                        >
+                          <span className="truncate">
+                            {run.run_name || run.run_id}
+                            {isBase ? " [BASE]" : ""}
+                          </span>
+                          <span className="inline-flex items-center shrink-0">
+                            {isProcessingRun ? (
+                              <Clock className="w-3.5 h-3.5 text-blue-600 animate-pulse" />
+                            ) : run.session_status === "completed" ? (
+                              <Check className="w-3.5 h-3.5 text-green-600" />
+                            ) : null}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
               <div className="mt-2 flex items-center justify-between gap-2">
                 <span className="text-[11px] text-slate-500 truncate">
                   {selectedRunId
