@@ -261,7 +261,54 @@
                 <code>means</code>, <code>opacities</code>, <code>scales</code>, <code>quats</code>, <code>sh0</code>, <code>shN</code>.
               </p>
 
-              <h3>2.1a What each LR group does</h3>
+              <h3>2.1b LR names you will see (quick mapping)</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Common Name</th>
+                    <th>Internal Group(s)</th>
+                    <th>What It Controls</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>position_lr</code></td>
+                    <td><code>means</code></td>
+                    <td>3D point/center movement in space.</td>
+                  </tr>
+                  <tr>
+                    <td><code>opacity_lr</code></td>
+                    <td><code>opacities</code></td>
+                    <td>Transparency and visibility evolution.</td>
+                  </tr>
+                  <tr>
+                    <td><code>scaling_lr</code></td>
+                    <td><code>scales</code></td>
+                    <td>Gaussian size changes.</td>
+                  </tr>
+                  <tr>
+                    <td><code>rotation_lr</code></td>
+                    <td><code>quats</code></td>
+                    <td>Gaussian orientation updates.</td>
+                  </tr>
+                  <tr>
+                    <td><code>sh_lr</code></td>
+                    <td><code>sh0</code> and <code>shN</code></td>
+                    <td>Appearance/color fitting (base and high-frequency SH terms).</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p>
+                In logs and summaries, <code>sh_lr</code> is often represented by separate
+                <code>sh0</code> and <code>shN</code> channels, while <code>position_lr</code>
+                maps to <code>means</code>.
+              </p>
+
+              <h3>2.1a Effect of changing each LR group</h3>
+              <p>
+                This section explains the training effect when these learning rates are increased or decreased.
+                It is different from Section 2.1b, which only maps names to internal groups.
+              </p>
               <table>
                 <thead>
                   <tr>
