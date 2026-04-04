@@ -38,6 +38,107 @@ from bimba3d_backend.worker import pipeline
 COLMAP_TO_OPENGL = (1.0, -1.0, -1.0)
 BEST_SPARSE_META = ".best_sparse_selection.json"
 SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
+SHARED_CONFIG_FILE = "shared_config.json"
+
+
+def _get_project_shared_config_path(project_dir: Path) -> Path:
+    return project_dir / SHARED_CONFIG_FILE
+
+
+def _extract_shared_config_from_params(params: dict | None) -> dict:
+    data = params if isinstance(params, dict) else {}
+    shared: dict = {}
+
+    if "images_resize_enabled" in data:
+        shared["images_resize_enabled"] = bool(data.get("images_resize_enabled"))
+
+    image_size = data.get("images_max_size")
+    if isinstance(image_size, (int, float)):
+        shared["images_max_size"] = int(image_size)
+
+    colmap_in = data.get("colmap")
+    if isinstance(colmap_in, dict):
+        # Store full COLMAP object so base-owned shared behavior remains explicit.
+        shared["colmap"] = json.loads(json.dumps(colmap_in))
+
+    return shared
+
+
+def _merge_shared_config_into_params(params: dict, shared: dict | None) -> dict:
+    merged = dict(params)
+    if not isinstance(shared, dict):
+        return merged
+
+    if "images_resize_enabled" in shared:
+        merged["images_resize_enabled"] = bool(shared.get("images_resize_enabled"))
+
+    if "images_max_size" in shared:
+        merged["images_max_size"] = shared.get("images_max_size")
+
+    shared_colmap = shared.get("colmap")
+    if isinstance(shared_colmap, dict):
+        current_colmap = merged.get("colmap") if isinstance(merged.get("colmap"), dict) else {}
+        merged["colmap"] = {
+            **current_colmap,
+            **json.loads(json.dumps(shared_colmap)),
+        }
+
+    return merged
+
+
+def _normalize_shared_doc(raw: dict | None, base_run_id: str | None = None) -> dict:
+    doc = raw if isinstance(raw, dict) else {}
+    shared = doc.get("shared") if isinstance(doc.get("shared"), dict) else {}
+    version = doc.get("version")
+    if not isinstance(version, int) or version < 1:
+        version = 1
+
+    active_shared = doc.get("active_shared") if isinstance(doc.get("active_shared"), dict) else None
+
+    normalized = {
+        "version": version,
+        "base_run_id": doc.get("base_run_id") if isinstance(doc.get("base_run_id"), str) else base_run_id,
+        "updated_at": doc.get("updated_at") if isinstance(doc.get("updated_at"), str) else None,
+        "active_sparse_version": doc.get("active_sparse_version") if isinstance(doc.get("active_sparse_version"), int) else None,
+        "active_sparse_updated_at": doc.get("active_sparse_updated_at") if isinstance(doc.get("active_sparse_updated_at"), str) else None,
+        "active_shared": active_shared,
+        "shared": shared,
+    }
+    if not normalized["base_run_id"] and base_run_id:
+        normalized["base_run_id"] = base_run_id
+    return normalized
+
+
+def _read_project_shared_config(project_dir: Path, base_run_id: str | None = None) -> dict:
+    path = _get_project_shared_config_path(project_dir)
+    raw = _read_json_if_exists(path)
+    normalized = _normalize_shared_doc(raw, base_run_id=base_run_id)
+
+    if isinstance(normalized.get("shared"), dict) and normalized.get("shared"):
+        return normalized
+
+    if base_run_id:
+        base_run_cfg = _read_json_if_exists(project_dir / "runs" / base_run_id / "run_config.json")
+        if isinstance(base_run_cfg, dict):
+            resolved = base_run_cfg.get("resolved_params") if isinstance(base_run_cfg.get("resolved_params"), dict) else {}
+            inferred_shared = _extract_shared_config_from_params(resolved)
+            if inferred_shared:
+                normalized["shared"] = inferred_shared
+                if not isinstance(normalized.get("active_shared"), dict):
+                    normalized["active_shared"] = json.loads(json.dumps(inferred_shared))
+                if not isinstance(normalized.get("active_sparse_version"), int):
+                    normalized["active_sparse_version"] = int(normalized.get("version") or 1)
+
+    return normalized
+
+
+def _write_project_shared_config(project_dir: Path, doc: dict) -> None:
+    path = _get_project_shared_config_path(project_dir)
+    normalized = _normalize_shared_doc(doc)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(normalized, handle, indent=2)
+    tmp_path.replace(path)
 
 
 def _read_json_if_exists(path: Path | None):
@@ -897,6 +998,52 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             except Exception as exc:
                 logger.warning("Failed to set base session for %s: %s", project_id, exc)
 
+        project_status = status.get_status(project_id)
+        base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        is_base_run = bool(base_session_id) and run_id == str(base_session_id)
+
+        # Canonical shared config is project-level and base-owned.
+        # Non-base runs always inherit shared values from this source.
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else run_id)
+        shared_doc["base_run_id"] = str(base_session_id) if base_session_id else run_id
+        active_shared = shared_doc.get("active_shared") if isinstance(shared_doc.get("active_shared"), dict) else None
+        inherited_shared = active_shared if active_shared else (shared_doc.get("shared") if isinstance(shared_doc.get("shared"), dict) else {})
+
+        incoming_shared = _extract_shared_config_from_params(params_payload)
+        requested_stage = str(params_payload.get("stage") or "train_only")
+        stage_includes_colmap = requested_stage in {"full", "colmap_only"}
+        if is_base_run:
+            if stage_includes_colmap and incoming_shared and incoming_shared != shared_doc.get("shared"):
+                shared_doc["shared"] = incoming_shared
+                shared_doc["version"] = int(shared_doc.get("version") or 1) + 1
+                shared_doc["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                try:
+                    _write_project_shared_config(project_dir, shared_doc)
+                except Exception as exc:
+                    logger.warning("Failed to persist shared config for %s: %s", project_id, exc)
+            elif not _get_project_shared_config_path(project_dir).exists():
+                # Persist initial shared doc even if unchanged so non-base runs can inherit reliably.
+                shared_doc["updated_at"] = datetime.utcnow().isoformat() + "Z"
+                try:
+                    _write_project_shared_config(project_dir, shared_doc)
+                except Exception as exc:
+                    logger.warning("Failed to persist initial shared config for %s: %s", project_id, exc)
+            # When base run does not include COLMAP this launch, keep using active shared values.
+            if not stage_includes_colmap:
+                params_payload = _merge_shared_config_into_params(params_payload, inherited_shared)
+        else:
+            # Ignore shared overrides coming from non-base runs.
+            params_payload = _merge_shared_config_into_params(params_payload, inherited_shared)
+
+        effective_shared_for_run = _extract_shared_config_from_params(params_payload)
+        effective_shared_version = (
+            int(shared_doc.get("version") or 1)
+            if is_base_run and stage_includes_colmap
+            else int(shared_doc.get("active_sparse_version") or shared_doc.get("version") or 1)
+        )
+        params_payload["shared_config_version"] = effective_shared_version
+        params_payload["shared_base_run_id"] = shared_doc.get("base_run_id")
+
         # Persist run configuration for reproducibility (requested + resolved params).
         try:
             run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -907,6 +1054,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 "saved_at": datetime.utcnow().isoformat() + "Z",
                 "requested_params": requested_params,
                 "resolved_params": params_payload,
+                "shared_config_version": effective_shared_version,
+                "shared_base_run_id": shared_doc.get("base_run_id"),
+                "shared_config_snapshot": effective_shared_for_run,
             }
 
             run_config_latest = project_dir / "run_config.json"
@@ -1082,6 +1232,10 @@ def list_project_runs(project_id: str):
                 project_dir / "outputs" / "engines" / "litegs" / "metadata.json",
             )
         )
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else None)
+        current_shared_version = int(shared_doc.get("version") or 1)
+        active_sparse_version = shared_doc.get("active_sparse_version") if isinstance(shared_doc.get("active_sparse_version"), int) else None
+        active_sparse_version = shared_doc.get("active_sparse_version") if isinstance(shared_doc.get("active_sparse_version"), int) else None
 
         runs: list[dict] = []
         for run_dir in sorted((p for p in runs_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
@@ -1104,6 +1258,14 @@ def list_project_runs(project_id: str):
             )
             is_base_run = run_id == base_session_id
             is_completed = has_completed_outputs or (is_base_run and project_has_completed_outputs)
+            run_shared_version = run_config.get("shared_config_version") if isinstance(run_config, dict) else None
+            if not isinstance(run_shared_version, int):
+                run_shared_version = None
+            shared_outdated = bool(
+                active_sparse_version is not None
+                and run_shared_version is not None
+                and run_shared_version < active_sparse_version
+            )
 
             adaptive_runs_dir = run_dir / "adaptive_ai" / "runs"
             adaptive_logs = sorted(adaptive_runs_dir.glob("*.jsonl")) if adaptive_runs_dir.exists() else []
@@ -1135,6 +1297,9 @@ def list_project_runs(project_id: str):
                     "has_run_log": (run_dir / "processing.log").exists(),
                     "session_status": "completed" if is_completed else "pending",
                     "is_base": is_base_run,
+                    "shared_config_version": run_shared_version,
+                    "active_sparse_shared_version": active_sparse_version,
+                    "shared_outdated": shared_outdated,
                 }
             )
 
@@ -1144,6 +1309,9 @@ def list_project_runs(project_id: str):
             try:
                 status.update_base_session_id(project_id, fallback_base)
                 base_session_id = fallback_base
+                shared_doc = _read_project_shared_config(project_dir, fallback_base)
+                shared_doc["base_run_id"] = fallback_base
+                _write_project_shared_config(project_dir, shared_doc)
                 for item in runs:
                     item["is_base"] = item["run_id"] == base_session_id
             except Exception as exc:
@@ -1180,10 +1348,38 @@ def get_project_run_config(project_id: str, run_id: str):
         if not isinstance(run_config, dict):
             raise HTTPException(status_code=404, detail="Run config not found")
 
+        project_status = status.get_status(project_id)
+        base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else None)
+        current_shared_version = int(shared_doc.get("version") or 1)
+        active_sparse_version = shared_doc.get("active_sparse_version") if isinstance(shared_doc.get("active_sparse_version"), int) else None
+
+        run_shared_version = run_config.get("shared_config_version")
+        if not isinstance(run_shared_version, int):
+            run_shared_version = None
+
+        run_shared_snapshot = run_config.get("shared_config_snapshot")
+        if not isinstance(run_shared_snapshot, dict):
+            run_shared_snapshot = {}
+
+        effective_shared = shared_doc.get("shared") if isinstance(shared_doc.get("shared"), dict) else run_shared_snapshot
+        is_base_run = bool(base_session_id) and run_id == str(base_session_id)
+        shared_outdated = bool(
+            active_sparse_version is not None
+            and run_shared_version is not None
+            and run_shared_version < active_sparse_version
+        )
+
         return {
             "project_id": project_id,
             "run_id": run_id,
             "run_config": run_config,
+            "effective_shared_config": effective_shared,
+            "shared_config_version": current_shared_version,
+            "active_sparse_shared_version": active_sparse_version,
+            "run_shared_config_version": run_shared_version,
+            "shared_outdated": shared_outdated,
+            "base_session_id": base_session_id,
         }
     except HTTPException:
         raise
@@ -1252,6 +1448,15 @@ def create_project_run(project_id: str, payload: CreateRunRequest = Body(...)):
         resolved_params["run_name"] = run_id
         resolved_params["run_id"] = run_id
 
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else None)
+        active_shared = shared_doc.get("active_shared") if isinstance(shared_doc.get("active_shared"), dict) else None
+        inherited_shared = active_shared if active_shared else (shared_doc.get("shared") if isinstance(shared_doc.get("shared"), dict) else {})
+        include_common_in_session_config = bool(source_run_id)
+        if include_common_in_session_config:
+            resolved_params = _merge_shared_config_into_params(resolved_params, inherited_shared)
+            requested_params = _merge_shared_config_into_params(requested_params, inherited_shared)
+        inherited_shared_version = int(shared_doc.get("active_sparse_version") or shared_doc.get("version") or 1)
+
         run_config_payload = {
             "project_id": project_id,
             "run_id": run_id,
@@ -1259,6 +1464,9 @@ def create_project_run(project_id: str, payload: CreateRunRequest = Body(...)):
             "saved_at": datetime.utcnow().isoformat() + "Z",
             "requested_params": requested_params,
             "resolved_params": resolved_params,
+            "shared_config_version": inherited_shared_version,
+            "shared_base_run_id": shared_doc.get("base_run_id") if isinstance(shared_doc.get("base_run_id"), str) else base_session_id,
+            "shared_config_snapshot": _extract_shared_config_from_params(resolved_params) if include_common_in_session_config else {},
         }
 
         run_cfg_path = run_dir / "run_config.json"
@@ -1359,6 +1567,12 @@ def rename_project_run(project_id: str, run_id: str, payload: RenameRunRequest =
 
         if isinstance(current_status, dict) and current_status.get("base_session_id") == run_id:
             status.update_base_session_id(project_id, desired)
+            try:
+                shared_doc = _read_project_shared_config(project_dir, desired)
+                shared_doc["base_run_id"] = desired
+                _write_project_shared_config(project_dir, shared_doc)
+            except Exception as exc:
+                logger.warning("Failed to update shared config base run after rename for %s: %s", project_id, exc)
 
         return {"status": "renamed", "run_id": desired, "run_name": desired}
     except HTTPException:
@@ -1381,6 +1595,12 @@ def set_base_project_run(project_id: str, run_id: str):
             raise HTTPException(status_code=404, detail="Run not found")
 
         status.update_base_session_id(project_id, run_id)
+        try:
+            shared_doc = _read_project_shared_config(project_dir, run_id)
+            shared_doc["base_run_id"] = run_id
+            _write_project_shared_config(project_dir, shared_doc)
+        except Exception as exc:
+            logger.warning("Failed to update shared config base run for %s: %s", project_id, exc)
         return {"status": "ok", "base_session_id": run_id}
     except HTTPException:
         raise
@@ -1419,6 +1639,12 @@ def delete_project_run(project_id: str, run_id: str):
         if deleted_was_base:
             new_base_session_id = remaining[0].name if remaining else None
             status.update_base_session_id(project_id, new_base_session_id)
+            try:
+                shared_doc = _read_project_shared_config(project_dir, new_base_session_id)
+                shared_doc["base_run_id"] = new_base_session_id
+                _write_project_shared_config(project_dir, shared_doc)
+            except Exception as exc:
+                logger.warning("Failed to update shared config base run after delete for %s: %s", project_id, exc)
 
         # Keep shared COLMAP/images artifacts on session deletion.
         # Shared data should only be refreshed via explicit restart stage selections.
@@ -1432,6 +1658,35 @@ def delete_project_run(project_id: str, run_id: str):
     except Exception as exc:
         logger.error("Error deleting run %s/%s: %s", project_id, run_id, exc)
         raise HTTPException(status_code=500, detail="Failed to delete run")
+
+
+@router.get("/{project_id}/shared-config")
+def get_project_shared_config(project_id: str):
+    """Return project-level shared config anchored to the base session."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_status = status.get_status(project_id)
+        base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else None)
+
+        return {
+            "project_id": project_id,
+            "base_session_id": base_session_id,
+            "version": int(shared_doc.get("version") or 1),
+            "updated_at": shared_doc.get("updated_at"),
+            "active_sparse_version": shared_doc.get("active_sparse_version") if isinstance(shared_doc.get("active_sparse_version"), int) else None,
+            "active_sparse_updated_at": shared_doc.get("active_sparse_updated_at"),
+            "active_shared": shared_doc.get("active_shared") if isinstance(shared_doc.get("active_shared"), dict) else {},
+            "shared": shared_doc.get("shared") if isinstance(shared_doc.get("shared"), dict) else {},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error reading shared config for %s: %s", project_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to read shared config")
 
 
 @router.get("/{project_id}/files")

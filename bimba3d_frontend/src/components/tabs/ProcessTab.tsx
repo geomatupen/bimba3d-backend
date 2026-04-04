@@ -75,6 +75,9 @@ interface ProjectRunInfo {
   has_run_config?: boolean;
   has_run_log?: boolean;
   is_base?: boolean;
+  shared_config_version?: number | null;
+  active_sparse_shared_version?: number | null;
+  shared_outdated?: boolean;
 }
 
 type NewSessionConfigSource = "current" | "defaults" | "selected";
@@ -179,25 +182,33 @@ const getDefaultProcessConfig = () => ({
 });
 
 export default function ProcessTab({ projectId }: ProcessTabProps) {
+  const getSharedConfigStorageKey = useCallback(() => `processSharedConfig_${projectId}`, [projectId]);
+  const getTrainingConfigStorageKey = useCallback(
+    (runId?: string) => `processTrainingConfig_${projectId}_${(runId || "__default").trim() || "__default"}`,
+    [projectId],
+  );
+
   // Load config from localStorage or use defaults
   const loadConfig = () => {
     const defaults = getDefaultProcessConfig();
     try {
-      const saved = localStorage.getItem(`processConfig_${projectId}`);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (typeof parsed.images_resize_enabled === "undefined" && typeof parsed.training_image_resize_enabled !== "undefined") {
-          parsed.images_resize_enabled = parsed.training_image_resize_enabled;
-        }
-        if (typeof parsed.images_max_size === "undefined" && typeof parsed.training_image_max_size === "number") {
-          parsed.images_max_size = parsed.training_image_max_size;
-        }
-        return {
-          ...defaults,
-          ...parsed,
-          colmap: { ...defaults.colmap, ...(parsed?.colmap || {}) },
-        };
-      }
+      const sharedSaved = localStorage.getItem(getSharedConfigStorageKey());
+      const trainingSaved = localStorage.getItem(getTrainingConfigStorageKey());
+
+      const sharedParsed = sharedSaved ? JSON.parse(sharedSaved) : {};
+      const trainingParsed = trainingSaved ? JSON.parse(trainingSaved) : {};
+
+      const merged = {
+        ...defaults,
+        ...sharedParsed,
+        ...trainingParsed,
+        colmap: {
+          ...defaults.colmap,
+          ...(sharedParsed?.colmap || {}),
+        },
+      } as any;
+
+      return merged;
     } catch (e) {
       console.error('Failed to load config:', e);
     }
@@ -404,6 +415,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [isCreatingSessionDraft, setIsCreatingSessionDraft] = useState<boolean>(false);
   const [canCreateSessionDraft, setCanCreateSessionDraft] = useState<boolean>(false);
   const [createSessionDisabledReason, setCreateSessionDisabledReason] = useState<string>("Complete COLMAP on the base session before creating new sessions.");
+  const [baseColmapProfile, setBaseColmapProfile] = useState<{
+    runId: string;
+    runName: string;
+    imageSize: number | null;
+    resizeEnabled: boolean;
+  } | null>(null);
 
   const selectedRunMeta = useMemo(
     () => projectRuns.find((r) => r.run_id === selectedRunId) || null,
@@ -411,6 +428,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   );
   const selectedRunIsProcessing = Boolean(processingRunId) && selectedRunId === processingRunId;
   const canManageColmapImages = !selectedRunId || selectedRunMeta?.is_base === true;
+  const selectedRunSharedOutdated = Boolean(!canManageColmapImages && selectedRunMeta?.shared_outdated);
 
   const applyTrainingDefaults = (defaults: ReturnType<typeof getDefaultProcessConfig>) => {
     setMode(defaults.mode ?? "baseline");
@@ -459,36 +477,52 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setImagesMaxSize(defaults.images_max_size);
   };
 
-  const applyResolvedParamsToForm = (resolved: Record<string, any>) => {
-    if (resolved.mode === "baseline" || resolved.mode === "modified") setMode(resolved.mode);
-    if (typeof resolved.tune_start_step === "number") setTuneStartStep(resolved.tune_start_step);
-    if (typeof resolved.tune_min_improvement === "number") setTuneMinImprovement(resolved.tune_min_improvement);
-    if (typeof resolved.tune_end_step === "number") setTuneEndStep(resolved.tune_end_step);
-    if (typeof resolved.tune_interval === "number") setTuneInterval(resolved.tune_interval);
-    if (resolved.tune_scope) setTuneScope(resolved.tune_scope as TuneScope);
-    if (resolved.engine === "gsplat" || resolved.engine === "litegs") setEngine(resolved.engine);
-    if (typeof resolved.max_steps === "number") setMaxSteps(resolved.max_steps);
-    if (typeof resolved.log_interval === "number") setLogInterval(resolved.log_interval);
-    if (typeof resolved.splat_export_interval === "number") setSplatInterval(resolved.splat_export_interval);
-    if (typeof resolved.eval_interval === "number") setEvalInterval(resolved.eval_interval);
-    if (typeof resolved.save_interval === "number") setSaveInterval(resolved.save_interval);
-    if (typeof resolved.densify_from_iter === "number") setDensifyFromIter(resolved.densify_from_iter);
-    if (typeof resolved.densify_until_iter === "number") setDensifyUntilIter(resolved.densify_until_iter);
-    if (typeof resolved.densification_interval === "number") setDensificationInterval(resolved.densification_interval);
-    if (typeof resolved.densify_grad_threshold === "number") setDensifyGradThreshold(resolved.densify_grad_threshold);
-    if (typeof resolved.opacity_threshold === "number") setOpacityThreshold(resolved.opacity_threshold);
-    if (typeof resolved.lambda_dssim === "number") setLambdaDssim(resolved.lambda_dssim);
-    if (typeof resolved.images_max_size === "number") {
-      setImagesResizeEnabled(true);
-      setImagesMaxSize(resolved.images_max_size);
+  const applyResolvedParamsToForm = (
+    resolved: Record<string, any>,
+    options: { includeTraining?: boolean; includeShared?: boolean } = {},
+  ) => {
+    const includeTraining = options.includeTraining !== false;
+    const includeShared = options.includeShared !== false;
+
+    if (includeTraining) {
+      if (resolved.mode === "baseline" || resolved.mode === "modified") setMode(resolved.mode);
+      if (typeof resolved.tune_start_step === "number") setTuneStartStep(resolved.tune_start_step);
+      if (typeof resolved.tune_min_improvement === "number") setTuneMinImprovement(resolved.tune_min_improvement);
+      if (typeof resolved.tune_end_step === "number") setTuneEndStep(resolved.tune_end_step);
+      if (typeof resolved.tune_interval === "number") setTuneInterval(resolved.tune_interval);
+      if (resolved.tune_scope) setTuneScope(resolved.tune_scope as TuneScope);
+      if (resolved.engine === "gsplat" || resolved.engine === "litegs") setEngine(resolved.engine);
+      if (typeof resolved.max_steps === "number") setMaxSteps(resolved.max_steps);
+      if (typeof resolved.log_interval === "number") setLogInterval(resolved.log_interval);
+      if (typeof resolved.splat_export_interval === "number") setSplatInterval(resolved.splat_export_interval);
+      if (typeof resolved.eval_interval === "number") setEvalInterval(resolved.eval_interval);
+      if (typeof resolved.save_interval === "number") setSaveInterval(resolved.save_interval);
+      if (typeof resolved.densify_from_iter === "number") setDensifyFromIter(resolved.densify_from_iter);
+      if (typeof resolved.densify_until_iter === "number") setDensifyUntilIter(resolved.densify_until_iter);
+      if (typeof resolved.densification_interval === "number") setDensificationInterval(resolved.densification_interval);
+      if (typeof resolved.densify_grad_threshold === "number") setDensifyGradThreshold(resolved.densify_grad_threshold);
+      if (typeof resolved.opacity_threshold === "number") setOpacityThreshold(resolved.opacity_threshold);
+      if (typeof resolved.lambda_dssim === "number") setLambdaDssim(resolved.lambda_dssim);
+      if (typeof resolved.litegs_target_primitives === "number") setLitegsTargetPrimitives(resolved.litegs_target_primitives);
+      if (typeof resolved.litegs_alpha_shrink === "number") setLitegsAlphaShrink(resolved.litegs_alpha_shrink);
+      if (typeof resolved.sparse_preference === "string") setSparsePreference(resolved.sparse_preference);
+      if (Array.isArray(resolved.sparse_merge_selection)) setSparseMergeSelection(resolved.sparse_merge_selection);
     }
-    if (typeof resolved.litegs_target_primitives === "number") setLitegsTargetPrimitives(resolved.litegs_target_primitives);
-    if (typeof resolved.litegs_alpha_shrink === "number") setLitegsAlphaShrink(resolved.litegs_alpha_shrink);
-    if (typeof resolved.sparse_preference === "string") setSparsePreference(resolved.sparse_preference);
-    if (Array.isArray(resolved.sparse_merge_selection)) setSparseMergeSelection(resolved.sparse_merge_selection);
+
+    if (includeShared) {
+      if (typeof resolved.images_resize_enabled === "boolean") {
+        setImagesResizeEnabled(resolved.images_resize_enabled);
+      }
+      if (typeof resolved.images_max_size === "number") {
+        if (typeof resolved.images_resize_enabled !== "boolean") {
+          setImagesResizeEnabled(true);
+        }
+        setImagesMaxSize(resolved.images_max_size);
+      }
+    }
 
     const colmap = resolved.colmap;
-    if (colmap && typeof colmap === "object") {
+    if (includeShared && colmap && typeof colmap === "object") {
       if (typeof colmap.max_image_size === "number") setColmapMaxImageSize(colmap.max_image_size);
       if (typeof colmap.peak_threshold === "number") setColmapPeakThreshold(colmap.peak_threshold);
       if (typeof colmap.guided_matching === "boolean") setColmapGuidedMatching(colmap.guided_matching);
@@ -507,17 +541,22 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   const resetConfigToDefaults = () => {
     const defaults = getDefaultProcessConfig();
-    // Reset should restore the full configuration, not only the active tab.
-    applyTrainingDefaults(defaults);
-    applyColmapDefaults(defaults);
+    if (configTab === "training") {
+      applyTrainingDefaults(defaults);
+      localStorage.removeItem(getTrainingConfigStorageKey(selectedRunId));
+      return;
+    }
+    if (configTab === "colmap") {
+      applyColmapDefaults(defaults);
+      return;
+    }
     applyImageDefaults(defaults);
-    localStorage.removeItem(`processConfig_${projectId}`);
   };
 
   // Auto-switch to viewer when 3D model layer is enabled
   
 
-  // Save config to localStorage whenever it changes
+  // Persist training config per session.
   useEffect(() => {
     const config = {
       mode,
@@ -535,8 +574,6 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       saveInterval,
       sparse_preference: sparsePreference,
       sparse_merge_selection: sparseMergeSelection,
-      images_resize_enabled: imagesResizeEnabled,
-      images_max_size: imagesMaxSize,
       densifyFromIter,
       densifyUntilIter,
       densificationInterval,
@@ -545,6 +582,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       lambdaDssim,
       litegs_target_primitives: litegsTargetPrimitives,
       litegs_alpha_shrink: litegsAlphaShrink,
+    };
+    localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, engine, maxSteps, logInterval, splatInterval, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+
+  // Persist shared image/COLMAP config once per project.
+  useEffect(() => {
+    const sharedConfig = {
+      images_resize_enabled: imagesResizeEnabled,
+      images_max_size: imagesMaxSize,
       colmap: {
         max_image_size: colmapMaxImageSize,
         peak_threshold: colmapPeakThreshold,
@@ -559,10 +605,104 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         mapper_init_min_num_inliers: colmapMapperInitMinNumInliers,
         sift_matching_min_num_inliers: colmapSiftMatchingMinNumInliers,
         run_image_registrator: colmapRunImageRegistrator,
+      },
+    };
+    localStorage.setItem(getSharedConfigStorageKey(), JSON.stringify(sharedConfig));
+  }, [imagesResizeEnabled, imagesMaxSize, colmapMaxImageSize, colmapPeakThreshold, colmapGuidedMatching, colmapCameraModel, colmapSingleCamera, colmapCameraParams, colmapMatchingType, colmapMapperThreads, colmapMapperMinNumMatches, colmapMapperAbsPoseMinNumInliers, colmapMapperInitMinNumInliers, colmapSiftMatchingMinNumInliers, colmapRunImageRegistrator, getSharedConfigStorageKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSelectedRunTraining = async () => {
+      if (!selectedRunId) return;
+      try {
+        const saved = localStorage.getItem(getTrainingConfigStorageKey(selectedRunId));
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (!cancelled && parsed && typeof parsed === "object") {
+            applyResolvedParamsToForm(parsed, { includeTraining: true, includeShared: false });
+          }
+          return;
+        }
+      } catch (err) {
+        console.warn("Failed to load saved training config for run", selectedRunId, err);
+      }
+
+      try {
+        const res = await api.get(`/projects/${projectId}/runs/${selectedRunId}/config`);
+        const resolved = res.data?.run_config?.resolved_params;
+        if (!cancelled && resolved && typeof resolved === "object") {
+          applyResolvedParamsToForm(resolved as Record<string, any>, { includeTraining: true, includeShared: false });
+          return;
+        }
+      } catch {
+        // Run might be a new draft without persisted config yet.
+      }
+
+      if (!cancelled) {
+        applyTrainingDefaults(getDefaultProcessConfig());
       }
     };
-    localStorage.setItem(`processConfig_${projectId}`, JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, engine, maxSteps, logInterval, splatInterval, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, imagesResizeEnabled, imagesMaxSize, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, projectId, colmapMaxImageSize, colmapPeakThreshold, colmapGuidedMatching, colmapCameraModel, colmapSingleCamera, colmapCameraParams, colmapMatchingType, colmapMapperThreads, colmapMapperMinNumMatches, colmapMapperAbsPoseMinNumInliers, colmapMapperInitMinNumInliers, colmapSiftMatchingMinNumInliers, colmapRunImageRegistrator, litegsTargetPrimitives, litegsAlphaShrink]);
+
+    loadSelectedRunTraining();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, selectedRunId, getTrainingConfigStorageKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSharedConfigAndBaseProfile = async () => {
+      try {
+        const res = await api.get(`/projects/${projectId}/shared-config`);
+        const shared = res.data?.shared;
+        if (shared && typeof shared === "object" && !cancelled) {
+          const sharedPayload = {
+            images_resize_enabled: typeof shared.images_resize_enabled === "boolean" ? shared.images_resize_enabled : undefined,
+            images_max_size: typeof shared.images_max_size === "number" ? shared.images_max_size : undefined,
+            colmap: typeof shared.colmap === "object" && shared.colmap ? shared.colmap : undefined,
+          };
+          applyResolvedParamsToForm(sharedPayload as Record<string, any>, { includeTraining: false, includeShared: true });
+        }
+
+        const activeSparseVersion = typeof res.data?.active_sparse_version === "number" ? res.data.active_sparse_version : null;
+        const resolvedBaseRunId = typeof res.data?.base_session_id === "string" && res.data.base_session_id
+          ? res.data.base_session_id
+          : baseSessionId;
+        if (!resolvedBaseRunId || !activeSparseVersion) {
+          if (!cancelled) setBaseColmapProfile(null);
+          return;
+        }
+        const size = typeof shared?.images_max_size === "number"
+          ? shared.images_max_size
+          : typeof shared?.colmap?.max_image_size === "number"
+            ? shared.colmap.max_image_size
+            : null;
+        const runName = projectRuns.find((r) => r.run_id === resolvedBaseRunId)?.run_name || resolvedBaseRunId;
+        if (!cancelled) {
+          setBaseColmapProfile({
+            runId: resolvedBaseRunId,
+            runName,
+            imageSize: size,
+            resizeEnabled: typeof size === "number",
+          });
+        }
+      } catch {
+        if (!cancelled) setBaseColmapProfile(null);
+      }
+    };
+
+    loadSharedConfigAndBaseProfile();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, baseSessionId, projectRuns]);
+
+  const sharedImageSizeMismatch = useMemo(() => {
+    if (!baseColmapProfile || !canCreateSessionDraft || !selectedRunSharedOutdated) return false;
+    const currentSize = imagesResizeEnabled ? imagesMaxSize ?? null : null;
+    const baseSize = baseColmapProfile.resizeEnabled ? baseColmapProfile.imageSize : null;
+    return currentSize !== baseSize;
+  }, [baseColmapProfile, canCreateSessionDraft, imagesResizeEnabled, imagesMaxSize, selectedRunSharedOutdated]);
 
   useEffect(() => {
     const checkGpu = async () => {
@@ -1900,18 +2040,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setShowNewSessionModal(true);
   };
 
-  const buildCurrentSessionResolvedParams = (): Record<string, any> => {
-    let stage: "full" | "colmap_only" | "train_only";
-    if (runColmap && runTraining && runExport) {
-      stage = "full";
-    } else if (runColmap && !runTraining && !runExport) {
-      stage = "colmap_only";
-    } else if (!runColmap && runTraining) {
-      stage = "train_only";
-    } else {
-      stage = "full";
-    }
-
+  const buildCurrentSessionTrainingParams = (): Record<string, any> => {
     const effectiveMode = engine === "gsplat" ? mode : "baseline";
     return {
       mode: effectiveMode,
@@ -1920,7 +2049,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_end_step: effectiveMode === "modified" ? tuneEndStep : undefined,
       tune_interval: effectiveMode === "modified" ? tuneInterval : undefined,
       tune_scope: effectiveMode === "modified" ? tuneScope : undefined,
-      stage,
+      stage: "train_only",
       engine,
       max_steps: maxSteps,
       log_interval: logInterval,
@@ -1934,26 +2063,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       densify_grad_threshold: densifyGradThreshold,
       opacity_threshold: opacityThreshold,
       lambda_dssim: lambdaDssim,
-      images_max_size: imagesResizeEnabled ? imagesMaxSize : undefined,
       sparse_preference: sparsePreference,
       sparse_merge_selection: sparsePreference === "merge_selected" ? sparseMergeSelection : undefined,
       litegs_target_primitives: litegsTargetPrimitives,
       litegs_alpha_shrink: litegsAlphaShrink,
-      colmap: {
-        ...(imagesResizeEnabled && imagesMaxSize ? { max_image_size: imagesMaxSize } : {}),
-        peak_threshold: colmapPeakThreshold,
-        guided_matching: colmapGuidedMatching,
-        camera_model: colmapCameraModel,
-        single_camera: colmapSingleCamera,
-        camera_params: colmapCameraParams?.trim() ? colmapCameraParams.trim() : undefined,
-        matching_type: colmapMatchingType,
-        mapper_num_threads: colmapMapperThreads,
-        mapper_min_num_matches: colmapMapperMinNumMatches,
-        mapper_abs_pose_min_num_inliers: colmapMapperAbsPoseMinNumInliers,
-        mapper_init_min_num_inliers: colmapMapperInitMinNumInliers,
-        sift_matching_min_num_inliers: colmapSiftMatchingMinNumInliers,
-        run_image_registrator: colmapRunImageRegistrator,
-      },
     };
   };
 
@@ -1967,12 +2080,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setError(null);
     try {
       let sourceRunIdForCreate: string | undefined;
-      let resolvedParamsForCreate: Record<string, any> | undefined = buildCurrentSessionResolvedParams();
+      let resolvedParamsForCreate: Record<string, any> | undefined = buildCurrentSessionTrainingParams();
       if (newSessionConfigSource === "defaults") {
         const defaults = getDefaultProcessConfig();
         applyTrainingDefaults(defaults);
-        applyColmapDefaults(defaults);
-        applyImageDefaults(defaults);
         resolvedParamsForCreate = {
           mode: defaults.engine === "gsplat" ? defaults.mode : "baseline",
           tune_start_step: defaults.tune_start_step,
@@ -1993,26 +2104,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           densify_grad_threshold: defaults.densifyGradThreshold,
           opacity_threshold: defaults.opacityThreshold,
           lambda_dssim: defaults.lambdaDssim,
-          images_max_size: defaults.images_resize_enabled ? defaults.images_max_size : undefined,
           sparse_preference: defaults.sparse_preference,
           sparse_merge_selection: defaults.sparse_preference === "merge_selected" ? defaults.sparse_merge_selection : undefined,
           litegs_target_primitives: defaults.litegs_target_primitives,
           litegs_alpha_shrink: defaults.litegs_alpha_shrink,
-          colmap: {
-            ...(defaults.images_resize_enabled && defaults.images_max_size ? { max_image_size: defaults.images_max_size } : {}),
-            peak_threshold: defaults.colmap.peak_threshold,
-            guided_matching: defaults.colmap.guided_matching,
-            camera_model: defaults.colmap.camera_model,
-            single_camera: defaults.colmap.single_camera,
-            camera_params: defaults.colmap.camera_params?.trim() ? defaults.colmap.camera_params.trim() : undefined,
-            matching_type: defaults.colmap.matching_type,
-            mapper_num_threads: defaults.colmap.mapper_num_threads,
-            mapper_min_num_matches: defaults.colmap.mapper_min_num_matches,
-            mapper_abs_pose_min_num_inliers: defaults.colmap.mapper_abs_pose_min_num_inliers,
-            mapper_init_min_num_inliers: defaults.colmap.mapper_init_min_num_inliers,
-            sift_matching_min_num_inliers: defaults.colmap.sift_matching_min_num_inliers,
-            run_image_registrator: defaults.colmap.run_image_registrator,
-          },
         };
       } else if (newSessionConfigSource === "selected") {
         const sourceRunId = (newSessionSourceRunId || "").trim();
@@ -2023,8 +2118,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         const runConfig = res.data?.run_config;
         const resolved = runConfig?.resolved_params;
         if (resolved && typeof resolved === "object") {
-          applyResolvedParamsToForm(resolved);
-          resolvedParamsForCreate = resolved as Record<string, any>;
+          applyResolvedParamsToForm(resolved, { includeTraining: true, includeShared: false });
+          resolvedParamsForCreate = {
+            ...(resolved as Record<string, any>),
+          };
         }
         sourceRunIdForCreate = sourceRunId;
       }
@@ -2222,6 +2319,22 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 </button>
               </div>
             </div>
+
+            {!canManageColmapImages && sharedImageSizeMismatch && baseColmapProfile && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                Shared image size changed from base session <strong>{baseColmapProfile.runName}</strong>
+                {baseColmapProfile.resizeEnabled && typeof baseColmapProfile.imageSize === "number"
+                  ? ` (${baseColmapProfile.imageSize}px)`
+                  : " (original size)"}
+                . Current shared value is {imagesResizeEnabled && typeof imagesMaxSize === "number" ? `${imagesMaxSize}px` : "original size"}.
+                Re-run COLMAP on the base session before trusting training outputs in this session.
+              </div>
+            )}
+            {selectedRunSharedOutdated && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                This session was created with an older base shared configuration. Re-run from the base session or create a fresh session to use the latest shared image/COLMAP settings.
+              </div>
+            )}
 
             <div className="space-y-2">
               {/* --- STAGE LABELS --- */}
@@ -2757,6 +2870,18 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 {!canManageColmapImages && (
                   <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                     Non-base session: Image and COLMAP settings are hidden. This session is training-only by default.
+                  </div>
+                )}
+                {!canManageColmapImages && sharedImageSizeMismatch && baseColmapProfile && (
+                  <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    Base COLMAP for {baseColmapProfile.runName} used {baseColmapProfile.resizeEnabled && typeof baseColmapProfile.imageSize === "number" ? `${baseColmapProfile.imageSize}px` : "original size"},
+                    but shared image size is now {imagesResizeEnabled && typeof imagesMaxSize === "number" ? `${imagesMaxSize}px` : "original size"}.
+                    Re-run base-session COLMAP to refresh shared sparse before continuing with this session.
+                  </div>
+                )}
+                {selectedRunSharedOutdated && (
+                  <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    This session references an older shared-config version from the base session. Create a new session (or re-run from base) to pick up latest shared image/COLMAP settings.
                   </div>
                 )}
                 <div className="grid grid-cols-12 gap-0">
@@ -3641,9 +3766,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                     }}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg"
                   >
-                    <option value="current">Copy current config</option>
-                    <option value="defaults">Start from defaults</option>
-                    <option value="selected" disabled={projectRuns.length === 0}>Copy from selected session</option>
+                    <option value="current">Copy current training config</option>
+                    <option value="defaults">Training defaults only</option>
+                    <option value="selected" disabled={projectRuns.length === 0}>Copy full selected session config</option>
                   </select>
                 </div>
 

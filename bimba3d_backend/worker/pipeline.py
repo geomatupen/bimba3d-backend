@@ -1,6 +1,8 @@
 import logging
 import os
 import threading
+import json
+from datetime import datetime
 from pathlib import Path
 from bimba3d_backend.app.services import colmap, storage, status
 from bimba3d_backend.app.services.worker_mode import resolve_worker_mode
@@ -9,6 +11,52 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_LOCAL_PROJECTS: set[str] = set()
 _ACTIVE_LOCAL_LOCK = threading.Lock()
+
+
+def _mark_active_sparse_shared_version_if_ready(project_id: str, params: dict, final_status: dict) -> None:
+    """Advance active sparse shared version only after successful base COLMAP runs."""
+    try:
+        if not isinstance(final_status, dict):
+            return
+        if str(final_status.get("status")) not in {"completed", "done"}:
+            return
+
+        stage = str(params.get("stage") or "full")
+        if stage not in {"full", "colmap_only"}:
+            return
+
+        run_id = str(params.get("run_id") or "").strip()
+        status_info = status.get_status(project_id)
+        base_session_id = str(status_info.get("base_session_id") or "").strip()
+        if not run_id or not base_session_id or run_id != base_session_id:
+            return
+
+        project_dir = storage.get_project_dir(project_id)
+        shared_path = project_dir / "shared_config.json"
+        if not shared_path.exists():
+            return
+
+        with open(shared_path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+        if not isinstance(doc, dict):
+            return
+
+        current_version = doc.get("version")
+        if not isinstance(current_version, int) or current_version < 1:
+            current_version = 1
+
+        shared_payload = doc.get("shared") if isinstance(doc.get("shared"), dict) else {}
+
+        doc["active_sparse_version"] = current_version
+        doc["active_sparse_updated_at"] = datetime.utcnow().isoformat() + "Z"
+        doc["active_shared"] = json.loads(json.dumps(shared_payload))
+
+        tmp_path = shared_path.with_suffix(shared_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, indent=2)
+        tmp_path.replace(shared_path)
+    except Exception as exc:
+        logger.warning("Failed to mark active sparse shared version for %s: %s", project_id, exc)
 
 
 def is_local_project_active(project_id: str) -> bool:
@@ -169,6 +217,8 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
             else:
                 status.update_status(project_id, "completed", progress=100, stop_requested=False, stage="export", message="Finished")
                 logger.info(f"✓ Pipeline completed for project {project_id}")
+
+            _mark_active_sparse_shared_version_if_ready(project_id, params, status.get_status(project_id))
         except Exception as e:
             logger.error(f"Docker worker failed: {e}", exc_info=True)
             status.update_status(project_id, "failed", error=str(e))
@@ -214,6 +264,8 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
         else:
             status.update_status(project_id, "completed", progress=100, stop_requested=False, stage="export", message="Finished")
             logger.info(f"✓ Local worker completed for project {project_id}")
+
+        _mark_active_sparse_shared_version_if_ready(project_id, params, status.get_status(project_id))
 
         return None
 
