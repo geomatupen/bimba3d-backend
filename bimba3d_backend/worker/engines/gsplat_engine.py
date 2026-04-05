@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -12,6 +13,35 @@ from ..modified_rule_scopes import (
     select_rule_profile,
 )
 from ..ai_adaptive_light import ACTION_KEEP, CoreAIAdaptiveController
+
+
+def _extract_final_loss_from_processing_log(project_dir: Path) -> float | None:
+    """Parse the latest loss value from processing.log for persistence in metadata.
+
+    Upstream eval stats files do not currently expose a loss field, so we capture
+    the last logged training loss once at export time and store it in JSON outputs.
+    """
+    processing_log = project_dir / "processing.log"
+    if not processing_log.exists():
+        return None
+
+    pattern = re.compile(r"loss=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+    latest: float | None = None
+
+    try:
+        with open(processing_log, "r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                match = pattern.search(line)
+                if not match:
+                    continue
+                try:
+                    latest = float(match.group(1))
+                except Exception:
+                    continue
+    except Exception:
+        return None
+
+    return latest
 
 
 def _find_vswhere_exe() -> Path | None:
@@ -809,6 +839,39 @@ def run_training(
         raise RuntimeError(msg)
 
     runner = Runner(local_rank=0, world_rank=0, world_size=1, cfg=cfg)
+
+    start_model_mode = str(p.get("start_model_mode") or "scratch").strip().lower()
+    source_model_id = str(p.get("source_model_id") or "").strip()
+    source_model_checkpoint = str(p.get("source_model_checkpoint") or "").strip()
+    if start_model_mode == "reuse" and source_model_checkpoint:
+        try:
+            ckpt = torch.load(source_model_checkpoint, map_location=runner.device)
+            splats_state = ckpt.get("splats") if isinstance(ckpt, dict) else None
+            if not isinstance(splats_state, dict):
+                raise ValueError("Checkpoint missing 'splats' state")
+            for key in runner.splats.keys():
+                if key not in splats_state:
+                    raise ValueError(f"Checkpoint missing splat tensor '{key}'")
+                runner.splats[key].data = splats_state[key].to(runner.device).clone()
+
+            update_status(
+                project_dir,
+                "processing",
+                progress=55,
+                stage="training",
+                stage_progress=2,
+                message=f"Loaded reusable model '{source_model_id or 'selected-model'}' for warm-start.",
+            )
+            logger.info(
+                "Warm-started gsplat from reusable model checkpoint %s (model_id=%s)",
+                source_model_checkpoint,
+                source_model_id or "<unknown>",
+            )
+        except Exception as exc:
+            msg = f"Failed to load reusable model checkpoint: {exc}"
+            update_status(project_dir, "failed", progress=55, stage="training", message=msg, error=msg)
+            raise RuntimeError(msg) from exc
+
     runner_ref["runner"] = runner
     stop_reason = runner.train()
     gsplat_end = time.time()
@@ -894,8 +957,13 @@ def run_training(
                 if tuning_state.get("last_event"):
                     tuning_params["modified_last_rule_step"] = tuning_state["last_event"].get("step")
     if eval_history:
-        write_json_atomic(engine_output_dir / "eval_history.json", eval_history)
         final_eval = eval_history[-1]
+        if final_eval.get("final_loss") is None:
+            persisted_loss = _extract_final_loss_from_processing_log(project_dir)
+            if isinstance(persisted_loss, float):
+                final_eval["final_loss"] = persisted_loss
+                eval_history[-1]["final_loss"] = persisted_loss
+        write_json_atomic(engine_output_dir / "eval_history.json", eval_history)
         final_metrics = {
             "lpips_score": final_eval.get("lpips_mean"),
             "sharpness": final_eval.get("sharpness_mean"),

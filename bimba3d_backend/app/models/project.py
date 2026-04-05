@@ -89,6 +89,9 @@ class ProcessParams(BaseModel):
     run_name_prefix: Optional[str] = None
     run_jitter_factor: Optional[float] = None
     continue_on_failure: Optional[bool] = None
+    # Core AI model reuse controls
+    start_model_mode: Optional[str] = None  # "scratch" | "reuse"
+    source_model_id: Optional[str] = None
     # --- ORIGINAL KERBL PARAMETERS ---
     max_steps: Optional[int] = None  # [original]
     log_interval: Optional[int] = None  # [custom]
@@ -168,3 +171,11 @@ class RenameRunRequest(BaseModel):
 class CreateRunRequest(BaseModel):
     run_name: Optional[str] = None
     resolved_params: Optional[dict] = None
+
+
+class ElevateModelRequest(BaseModel):
+    model_name: Optional[str] = None
+
+
+class RenameModelRequest(BaseModel):
+    model_name: str

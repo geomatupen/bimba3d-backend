@@ -84,6 +84,15 @@ type NewSessionConfigSource = "current" | "defaults";
 
 type TrainingEngine = "gsplat" | "litegs";
 type TuneScope = "core_individual" | "core_only" | "core_ai_optimization" | "core_individual_plus_strategy";
+type StartModelMode = "scratch" | "reuse";
+
+interface ReusableModelEntry {
+  model_id: string;
+  model_name?: string | null;
+  source_project_id?: string | null;
+  source_run_id?: string | null;
+  created_at?: string | null;
+}
 
 const extractSnapshotStep = (name?: string): number | null => {
   if (!name) return null;
@@ -104,6 +113,25 @@ const sanitizeRunToken = (value: string): string =>
     .replace(/-+/g, "-")
     .replace(/^[-_]+|[-_]+$/g, "")
     .slice(0, 80);
+
+const sanitizeModelToken = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 80);
+
+const buildDefaultModelName = (
+  projectLabel: string | null | undefined,
+  projectId: string,
+  runLabel: string | null | undefined,
+): string => {
+  const projectToken = sanitizeModelToken(projectLabel || projectId || "project") || "project";
+  const runToken = sanitizeModelToken(runLabel || "session") || "session";
+  return `model_${projectToken}_${runToken}`;
+};
 
 const buildDefaultRunName = (
   projectLabel: string | null | undefined,
@@ -149,6 +177,8 @@ const getDefaultProcessConfig = () => ({
   run_jitter_factor: 1,
   run_name_prefix: "",
   continue_on_failure: true,
+  start_model_mode: "scratch" as StartModelMode,
+  source_model_id: "",
   engine: "gsplat" as TrainingEngine,
   maxSteps: 15000,
   logInterval: 100,
@@ -234,6 +264,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [runJitterFactor, setRunJitterFactor] = useState<number>(cfg.run_jitter_factor ?? 1);
   const [runNamePrefix, setRunNamePrefix] = useState<string>(cfg.run_name_prefix ?? "");
   const [continueOnFailure, setContinueOnFailure] = useState<boolean>(cfg.continue_on_failure ?? true);
+  const [startModelMode, setStartModelMode] = useState<StartModelMode>(cfg.start_model_mode === "reuse" ? "reuse" : "scratch");
+  const [sourceModelId, setSourceModelId] = useState<string>(cfg.source_model_id ?? "");
+  const [reusableModels, setReusableModels] = useState<ReusableModelEntry[]>([]);
+  const [reusableModelsLoading, setReusableModelsLoading] = useState<boolean>(false);
+  const [reusableModelsError, setReusableModelsError] = useState<string | null>(null);
   const [engine, setEngine] = useState<TrainingEngine>(cfg.engine ?? "gsplat");
   const [maxSteps, setMaxSteps] = useState<number>(cfg.maxSteps ?? 15000);
   const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
@@ -315,6 +350,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     run_jitter_factor: 'Per-run multiplier for LR-related params. 1 means no jitter across runs.',
     run_name_prefix: 'Optional prefix used for auto-created batch session names.',
     continue_on_failure: 'If enabled, remaining runs continue even when one run fails/stops.',
+    start_model_mode: 'Choose training initialization mode. Scratch starts a fresh run; Reuse warm-starts from a selected elevated model.',
+    source_model_id: 'Reusable model used for warm-start. Available models come from elevated gsplat sessions.',
     // --- ORIGINAL KERBL PARAMETERS ---
     maxSteps: 'Total training iterations. This value is sent from frontend in both baseline and modified modes. [original]',
     logInterval: 'How often (in steps) to print consolidated training snapshots in worker logs. Lower values are more verbose. [custom]',
@@ -405,6 +442,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [showRestartConfirmModal, setShowRestartConfirmModal] = useState<boolean>(false);
   const [showRenameSessionModal, setShowRenameSessionModal] = useState<boolean>(false);
   const [renameSessionDraft, setRenameSessionDraft] = useState<string>("");
+  const [showElevateModelModal, setShowElevateModelModal] = useState<boolean>(false);
+  const [elevateModelNameDraft, setElevateModelNameDraft] = useState<string>("");
+  const [isElevatingModel, setIsElevatingModel] = useState<boolean>(false);
   const [showNewSessionModal, setShowNewSessionModal] = useState<boolean>(false);
   const [newSessionNameDraft, setNewSessionNameDraft] = useState<string>("");
   const [newSessionConfigSource, setNewSessionConfigSource] = useState<NewSessionConfigSource>("current");
@@ -437,6 +477,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setRunJitterFactor(defaults.run_jitter_factor ?? 1);
     setRunNamePrefix(defaults.run_name_prefix ?? "");
     setContinueOnFailure(defaults.continue_on_failure ?? true);
+    setStartModelMode(defaults.start_model_mode ?? "scratch");
+    setSourceModelId(defaults.source_model_id ?? "");
     setEngine(defaults.engine ?? "gsplat");
     setMaxSteps(defaults.maxSteps);
     setLogInterval(defaults.logInterval ?? 100);
@@ -495,6 +537,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (typeof resolved.run_jitter_factor === "number") setRunJitterFactor(Math.max(0.1, resolved.run_jitter_factor));
       if (typeof resolved.run_name_prefix === "string") setRunNamePrefix(resolved.run_name_prefix);
       if (typeof resolved.continue_on_failure === "boolean") setContinueOnFailure(resolved.continue_on_failure);
+      if (resolved.start_model_mode === "scratch" || resolved.start_model_mode === "reuse") setStartModelMode(resolved.start_model_mode);
+      if (typeof resolved.source_model_id === "string") setSourceModelId(resolved.source_model_id);
       if (resolved.engine === "gsplat" || resolved.engine === "litegs") setEngine(resolved.engine);
       if (typeof resolved.max_steps === "number") setMaxSteps(resolved.max_steps);
       if (typeof resolved.log_interval === "number") setLogInterval(resolved.log_interval);
@@ -573,6 +617,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       run_jitter_factor: runJitterFactor,
       run_name_prefix: runNamePrefix,
       continue_on_failure: continueOnFailure,
+      start_model_mode: startModelMode,
+      source_model_id: sourceModelId,
       engine,
       maxSteps,
       logInterval,
@@ -592,7 +638,43 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, runNamePrefix, continueOnFailure, engine, maxSteps, logInterval, splatInterval, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, runNamePrefix, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadReusableModels = async () => {
+      setReusableModelsLoading(true);
+      setReusableModelsError(null);
+      try {
+        const res = await api.get("/projects/models");
+        const items = Array.isArray(res.data?.models) ? (res.data.models as ReusableModelEntry[]) : [];
+        if (!cancelled) {
+          setReusableModels(items);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setReusableModels([]);
+          setReusableModelsError(err instanceof Error ? err.message : "Failed to load reusable models");
+          setSourceModelId("");
+        }
+      } finally {
+        if (!cancelled) {
+          setReusableModelsLoading(false);
+        }
+      }
+    };
+
+    loadReusableModels();
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    if (sourceModelId && !reusableModels.some((item) => item.model_id === sourceModelId)) {
+      setSourceModelId("");
+    }
+  }, [reusableModels, sourceModelId]);
 
   // Persist shared image/COLMAP config once per project.
   useEffect(() => {
@@ -1845,6 +1927,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       return;
     }
 
+    if (showCoreAiSessionControls && startModelMode === "reuse" && !sourceModelId) {
+      setError("Select a reusable model or switch start mode to scratch.");
+      setProcessing(false);
+      return;
+    }
+
     // Determine stage based on checkboxes
     let stage: "full" | "colmap_only" | "train_only";
     if (runColmap && runTraining && runExport) {
@@ -1874,6 +1962,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
         run_name_prefix: includeSessionControls ? (runNamePrefix?.trim() || undefined) : undefined,
         continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
+        start_model_mode: includeSessionControls ? startModelMode : undefined,
+        source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
         stage,
         engine,
         max_steps: maxSteps,
@@ -1928,6 +2018,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       setProcessing(false);
       return;
     }
+    if (showCoreAiSessionControls && startModelMode === "reuse" && !sourceModelId) {
+      setError("Select a reusable model or switch start mode to scratch.");
+      setProcessing(false);
+      return;
+    }
     try {
       // Decide which stage to request for resume based on where the worker stopped
       let resumeStage: "full" | "colmap_only" | "train_only" = "train_only";
@@ -1955,6 +2050,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
         run_name_prefix: includeSessionControls ? (runNamePrefix?.trim() || undefined) : undefined,
         continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
+        start_model_mode: includeSessionControls ? startModelMode : undefined,
+        source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
         stage: resumeStage,
         engine,
         max_steps: maxSteps,
@@ -2039,6 +2136,49 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setShowRenameSessionModal(true);
   };
 
+  const openElevateModelModal = () => {
+    if (!selectedRunId) {
+      setError("Select a session first.");
+      return;
+    }
+    const current = projectRuns.find((r) => r.run_id === selectedRunId);
+    const runLabel = (current?.run_name || current?.run_id || selectedRunId).trim();
+    const suggested = buildDefaultModelName(projectDisplayName, projectId, runLabel);
+    setElevateModelNameDraft(suggested);
+    setShowElevateModelModal(true);
+  };
+
+  const confirmElevateModel = async () => {
+    if (!selectedRunId) {
+      setError("Select a session first.");
+      return;
+    }
+    setIsElevatingModel(true);
+    setError(null);
+    try {
+      const payloadName = elevateModelNameDraft.trim();
+      const res = await api.post(`/projects/${projectId}/runs/${selectedRunId}/elevate-model`, {
+        model_name: payloadName || undefined,
+      });
+      const model = res.data?.model as ReusableModelEntry | undefined;
+      if (model?.model_id) {
+        setReusableModels((prev) => [model, ...prev.filter((item) => item.model_id !== model.model_id)]);
+        setStartModelMode("reuse");
+        setSourceModelId(model.model_id);
+      } else {
+        const modelsRes = await api.get("/projects/models");
+        const items = Array.isArray(modelsRes.data?.models) ? (modelsRes.data.models as ReusableModelEntry[]) : [];
+        setReusableModels(items);
+      }
+      setShowElevateModelModal(false);
+      setElevateModelNameDraft("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to elevate model");
+    } finally {
+      setIsElevatingModel(false);
+    }
+  };
+
   const confirmRenameCurrentSession = async () => {
     const ok = await handleRenameSelectedRun(renameSessionDraft);
     if (ok) {
@@ -2073,6 +2213,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
       run_name_prefix: includeSessionControls ? (runNamePrefix?.trim() || undefined) : undefined,
       continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
+      start_model_mode: includeSessionControls ? startModelMode : undefined,
+      source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
       stage: "train_only",
       engine,
       max_steps: maxSteps,
@@ -2122,6 +2264,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           run_jitter_factor: includeSessionControls ? defaults.run_jitter_factor : undefined,
           run_name_prefix: includeSessionControls ? defaults.run_name_prefix : undefined,
           continue_on_failure: includeSessionControls ? defaults.continue_on_failure : undefined,
+          start_model_mode: includeSessionControls ? defaults.start_model_mode : undefined,
+          source_model_id:
+            includeSessionControls && defaults.start_model_mode === "reuse"
+              ? defaults.source_model_id || undefined
+              : undefined,
           engine: defaults.engine,
           max_steps: defaults.maxSteps,
           log_interval: defaults.logInterval,
@@ -2324,14 +2471,25 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 {baseSessionId && selectedRunId === baseSessionId && (
                   <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-700">BASE</span>
                 )}
-                <button
-                  type="button"
-                  onClick={promptRenameCurrentSession}
-                  disabled={!selectedRunId || isRenamingRun}
-                  className="px-2 py-1 text-[11px] font-semibold rounded border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isRenamingRun ? "Renaming..." : "Rename"}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={openElevateModelModal}
+                    disabled={!selectedRunId || isElevatingModel || processing || isStopping}
+                    className="px-2 py-1 text-[11px] font-semibold rounded border border-violet-300 text-violet-700 hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Promote this session output to reusable model"
+                  >
+                    {isElevatingModel ? "Elevating..." : "Elevate"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={promptRenameCurrentSession}
+                    disabled={!selectedRunId || isRenamingRun}
+                    className="px-2 py-1 text-[11px] font-semibold rounded border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isRenamingRun ? "Renaming..." : "Rename"}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -3054,6 +3212,54 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                         <button type="button" onClick={() => setSelectedInfoKey("continue_on_failure")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
                                       </span>
                                     </label>
+                                  </div>
+                                  <div>
+                                    <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                      <span>Start mode</span>
+                                      <button onClick={() => setSelectedInfoKey("start_model_mode")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                    </label>
+                                    <select
+                                      value={startModelMode}
+                                      onChange={(e) => {
+                                        const next = (e.target.value as StartModelMode) || "scratch";
+                                        setStartModelMode(next);
+                                        if (next !== "reuse") {
+                                          setSourceModelId("");
+                                        }
+                                      }}
+                                      className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    >
+                                      <option value="scratch">Start from scratch</option>
+                                      <option value="reuse">Warm-start from reusable model</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                      <span>Reusable model</span>
+                                      <button onClick={() => setSelectedInfoKey("source_model_id")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                    </label>
+                                    <select
+                                      value={sourceModelId}
+                                      onChange={(e) => setSourceModelId(e.target.value)}
+                                      disabled={startModelMode !== "reuse" || reusableModelsLoading || reusableModels.length === 0}
+                                      className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100 disabled:text-slate-500"
+                                    >
+                                      <option value="">
+                                        {reusableModelsLoading
+                                          ? "Loading models..."
+                                          : reusableModels.length > 0
+                                            ? "Select reusable model"
+                                            : "No elevated models available"}
+                                      </option>
+                                      {reusableModels.map((item) => (
+                                        <option key={item.model_id} value={item.model_id}>
+                                          {item.model_name || item.model_id}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    {reusableModelsError && (
+                                      <p className="mt-1 text-[10px] text-red-600">{reusableModelsError}</p>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -3877,6 +4083,65 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                     className="px-3 py-2 rounded-lg bg-blue-600 text-white font-semibold disabled:bg-slate-300"
                   >
                     {isRenamingRun ? "Renaming..." : "Rename"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showElevateModelModal && (
+        <div className="fixed inset-0 z-50">
+          <div className="absolute inset-0 bg-black/50" onClick={() => !isElevatingModel && setShowElevateModelModal(false)} />
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div className="w-[520px] max-w-full bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+                <div>
+                  <p className="text-xs uppercase font-semibold text-slate-500">Model Registry</p>
+                  <h3 className="text-base font-bold text-slate-900">Elevate Session Model</h3>
+                </div>
+                <button
+                  className="text-sm text-slate-600 disabled:text-slate-300"
+                  onClick={() => setShowElevateModelModal(false)}
+                  disabled={isElevatingModel}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="p-4 space-y-3 text-sm">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Reusable Model Name</label>
+                  <input
+                    value={elevateModelNameDraft}
+                    onChange={(e) => setElevateModelNameDraft(e.target.value)}
+                    placeholder="Enter model name"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                    autoFocus
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    This copies the selected session checkpoint into the global models registry for warm-start reuse.
+                  </p>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    onClick={() => {
+                      setShowElevateModelModal(false);
+                      setElevateModelNameDraft("");
+                    }}
+                    disabled={isElevatingModel}
+                    className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 disabled:text-slate-300 disabled:border-slate-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmElevateModel}
+                    disabled={isElevatingModel}
+                    className="px-3 py-2 rounded-lg bg-violet-600 text-white font-semibold disabled:bg-slate-300"
+                  >
+                    {isElevatingModel ? "Elevating..." : "Elevate Model"}
                   </button>
                 </div>
               </div>

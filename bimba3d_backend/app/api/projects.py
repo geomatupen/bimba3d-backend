@@ -30,8 +30,11 @@ from bimba3d_backend.app.models.project import (
     SparseMergeRequest,
     RenameRunRequest,
     CreateRunRequest,
+    ElevateModelRequest,
+    RenameModelRequest,
 )
 from bimba3d_backend.app.services import status, storage, colmap, gsplat, files, sparse_edit, pointsbin
+from bimba3d_backend.app.services import model_registry
 from bimba3d_backend.app.services.worker_mode import normalize_worker_mode, resolve_worker_mode
 from bimba3d_backend.worker import pipeline
 
@@ -866,6 +869,241 @@ def get_storage_roots():
         raise HTTPException(status_code=500, detail="Failed to list storage roots")
 
 
+@router.get("/models")
+def list_reusable_models():
+    """List globally elevated reusable gsplat models."""
+    try:
+        items = model_registry.load_models_index()
+        items = sorted(items, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"models": items}
+    except Exception as exc:
+        logger.error("Error listing reusable models: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to list reusable models")
+
+
+@router.patch("/models/{model_id}")
+def rename_reusable_model(model_id: str, payload: RenameModelRequest):
+    """Rename one reusable model display name."""
+    model_name = str(payload.model_name or "").strip()
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Model name is required")
+
+    try:
+        updated = model_registry.rename_model(model_id, model_name)
+        if not isinstance(updated, dict):
+            raise HTTPException(status_code=404, detail="Reusable model not found")
+        return {"status": "renamed", "model": updated}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error renaming reusable model %s: %s", model_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to rename reusable model")
+
+
+@router.delete("/models/{model_id}")
+def delete_reusable_model(model_id: str):
+    """Delete one reusable model from global registry and remove its folder."""
+    try:
+        existing = model_registry.get_model_record(model_id)
+        if not isinstance(existing, dict):
+            raise HTTPException(status_code=404, detail="Reusable model not found")
+
+        paths = existing.get("paths") if isinstance(existing.get("paths"), dict) else {}
+        model_dir_raw = paths.get("model_dir") if isinstance(paths, dict) else None
+        model_dir = Path(str(model_dir_raw)).expanduser() if model_dir_raw else (model_registry.MODELS_DIR / model_id)
+
+        if model_dir.exists() or model_dir.is_symlink():
+            _delete_path_strict(model_dir)
+
+        removed = model_registry.remove_model(model_id)
+        if not isinstance(removed, dict):
+            raise HTTPException(status_code=404, detail="Reusable model not found")
+
+        return {"status": "deleted", "model_id": model_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error deleting reusable model %s: %s", model_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to delete reusable model")
+
+
+@router.get("/models/{model_id}/lineage")
+def get_reusable_model_lineage(model_id: str):
+    """Return lineage metadata and copied contributor config tree for one model."""
+    try:
+        detail = model_registry.get_model_lineage_summary(model_id)
+        if not isinstance(detail, dict):
+            raise HTTPException(status_code=404, detail="Reusable model not found")
+        return detail
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error loading reusable model lineage for %s: %s", model_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to load reusable model lineage")
+
+
+@router.get("/models/{model_id}/configs/{project_id}/{run_id}/{filename}")
+def get_reusable_model_config_snapshot(model_id: str, project_id: str, run_id: str, filename: str):
+    """Read copied config snapshot JSON for a model contributor."""
+    try:
+        target = model_registry.resolve_config_snapshot_file(model_id, project_id, run_id, filename)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Config snapshot file not found")
+
+        payload = model_registry.read_json_if_exists(target)
+        if not isinstance(payload, (dict, list)):
+            raise HTTPException(status_code=400, detail="Snapshot file is not valid JSON")
+
+        return {
+            "model_id": model_id,
+            "project_id": project_id,
+            "run_id": run_id,
+            "filename": filename,
+            "size": target.stat().st_size,
+            "content": payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Error loading config snapshot for model=%s project=%s run=%s file=%s: %s",
+            model_id,
+            project_id,
+            run_id,
+            filename,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail="Failed to load config snapshot")
+
+
+@router.get("/models/{model_id}/configs/{project_id}/{run_id}/{filename}/download")
+def download_reusable_model_config_snapshot(model_id: str, project_id: str, run_id: str, filename: str):
+    """Download copied config snapshot file for a model contributor."""
+    try:
+        target = model_registry.resolve_config_snapshot_file(model_id, project_id, run_id, filename)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Config snapshot file not found")
+        return FileResponse(path=target, filename=filename, media_type="application/json")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Error downloading config snapshot for model=%s project=%s run=%s file=%s: %s",
+            model_id,
+            project_id,
+            run_id,
+            filename,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail="Failed to download config snapshot")
+
+
+@router.post("/{project_id}/runs/{run_id}/elevate-model")
+def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateModelRequest | None = Body(None)):
+    """Promote a completed gsplat run checkpoint into global reusable model storage."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        run_dir = project_dir / "runs" / run_id
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        checkpoint_path = model_registry.find_latest_gsplat_checkpoint(run_dir)
+        if checkpoint_path is None or not checkpoint_path.exists():
+            raise HTTPException(status_code=400, detail="No gsplat checkpoint found for this run")
+
+        metadata_path = run_dir / "outputs" / "engines" / "gsplat" / "metadata.json"
+        run_config_path = run_dir / "run_config.json"
+        run_cfg = _read_json_if_exists(run_config_path)
+        project_status = status.get_status(project_id)
+        project_name = project_status.get("name") if isinstance(project_status, dict) else None
+
+        model_name = ""
+        if payload and payload.model_name:
+            model_name = str(payload.model_name).strip()
+        if not model_name:
+            model_name = run_id
+
+        model_id = model_registry.build_model_id(model_name)
+        model_dir = model_registry.MODELS_DIR / model_id
+        model_dir.mkdir(parents=True, exist_ok=False)
+        captured_at = model_registry.utc_now_iso()
+
+        target_ckpt = model_dir / "source_checkpoint.pt"
+        shutil.copy2(checkpoint_path, target_ckpt)
+
+        if metadata_path.exists():
+            try:
+                shutil.copy2(metadata_path, model_dir / "metadata.json")
+            except Exception as exc:
+                logger.warning("Failed to copy metadata for elevated model %s: %s", model_id, exc)
+
+        source_model_id = None
+        if isinstance(run_cfg, dict):
+            resolved = run_cfg.get("resolved_params") if isinstance(run_cfg.get("resolved_params"), dict) else {}
+            if str(resolved.get("start_model_mode") or "").strip().lower() == "reuse":
+                source_model_id = str(resolved.get("source_model_id") or "").strip() or None
+
+        parent_model_record = model_registry.resolve_reusable_model(source_model_id or "") if source_model_id else None
+        model_registry.import_parent_configs_into_model(parent_model_record, model_dir)
+        parent_contributors = model_registry.load_parent_lineage_contributors(parent_model_record)
+        current_contributor = model_registry.snapshot_contributor_configs(
+            model_dir=model_dir,
+            project_dir=project_dir,
+            run_dir=run_dir,
+            project_id=project_id,
+            project_name=str(project_name) if project_name else None,
+            run_id=run_id,
+            captured_at=captured_at,
+        )
+        lineage_doc = model_registry.write_lineage(
+            model_dir=model_dir,
+            model_id=model_id,
+            source_model_id=source_model_id,
+            contributors=[*parent_contributors, current_contributor],
+            captured_at=captured_at,
+        )
+        provenance_summary = model_registry.summarize_lineage(lineage_doc.get("contributors") or [])
+
+        model_record = {
+            "model_id": model_id,
+            "model_name": model_name,
+            "engine": "gsplat",
+            "created_at": captured_at,
+            "source": {
+                "project_id": project_id,
+                "project_name": project_name,
+                "run_id": run_id,
+            },
+            "paths": {
+                "checkpoint": str(target_ckpt),
+                "artifact": None,
+                "model_dir": str(model_dir),
+                "configs_dir": str(model_dir / "configs"),
+                "lineage": str(model_dir / "lineage.json"),
+            },
+            "artifact_format": None,
+            "provenance_summary": provenance_summary,
+        }
+
+        records = model_registry.load_models_index()
+        records.append(model_record)
+        model_registry.save_models_index(records)
+
+        model_registry.write_json_atomic(model_dir / "model.json", model_record)
+
+        return {"status": "model_elevated", "model": model_record}
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="Model id collision, retry elevation")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to elevate model from %s/%s: %s", project_id, run_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to elevate model")
+
+
 @router.post("/{project_id}/images")
 async def upload_images(project_id: str, images: list[UploadFile] = File(...)):
     """Upload images to a project."""
@@ -1030,6 +1268,40 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         if engine not in {"gsplat", "litegs"}:
             raise HTTPException(status_code=400, detail=f"Invalid training engine: {engine}")
         params_payload["engine"] = engine
+
+        # Optional warm-start from globally elevated model.
+        start_model_mode = str(requested_params.get("start_model_mode") or "scratch").strip().lower()
+        if start_model_mode not in {"scratch", "reuse"}:
+            raise HTTPException(status_code=400, detail="start_model_mode must be 'scratch' or 'reuse'")
+
+        if start_model_mode == "reuse":
+            source_model_id = str(requested_params.get("source_model_id") or "").strip()
+            if not source_model_id:
+                raise HTTPException(status_code=400, detail="source_model_id is required when start_model_mode='reuse'")
+
+            mode = str(params_payload.get("mode") or "baseline")
+            tune_scope = str(params_payload.get("tune_scope") or "")
+            if engine != "gsplat" or mode != "modified" or tune_scope != "core_ai_optimization":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Model reuse is supported only for gsplat + modified + core_ai_optimization.",
+                )
+
+            model_record = model_registry.resolve_reusable_model(source_model_id)
+            if not isinstance(model_record, dict):
+                raise HTTPException(status_code=404, detail="Reusable model not found")
+
+            checkpoint_path = Path(str((model_record.get("paths") or {}).get("checkpoint") or "")).expanduser()
+            if not checkpoint_path.exists():
+                raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
+
+            params_payload["start_model_mode"] = "reuse"
+            params_payload["source_model_id"] = source_model_id
+            params_payload["source_model_checkpoint"] = str(checkpoint_path)
+        else:
+            params_payload["start_model_mode"] = "scratch"
+            params_payload.pop("source_model_id", None)
+            params_payload.pop("source_model_checkpoint", None)
 
         # Optional sequential batch orchestration.
         try:
