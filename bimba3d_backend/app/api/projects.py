@@ -30,6 +30,8 @@ from bimba3d_backend.app.models.project import (
     SparseMergeRequest,
     RenameRunRequest,
     CreateRunRequest,
+    UpdateRunConfigRequest,
+    UpdateSharedConfigRequest,
     ElevateModelRequest,
     RenameModelRequest,
 )
@@ -322,8 +324,19 @@ def _run_batch_process(
 ) -> None:
     """Run multiple sessions sequentially using the same base config."""
     try:
+        completed_runs = 0
         prefix = _sanitize_run_token(run_name_prefix or "") if run_name_prefix else ""
         for idx in range(max(1, int(run_count))):
+            status.update_status(
+                project_id,
+                "processing",
+                batch_total=run_count,
+                batch_completed=completed_runs,
+                batch_current_index=idx + 1,
+                message=f"Batch session {idx + 1}/{run_count} starting...",
+                error=None,
+            )
+
             run_params = json.loads(json.dumps(base_params))
             run_params["run_count"] = 1
             run_params["resume"] = False
@@ -348,12 +361,33 @@ def _run_batch_process(
 
             final_status = _wait_for_run_completion(project_id, run_id)
             final_state = str(final_status.get("status") or "")
+            if final_state in {"completed", "done"}:
+                completed_runs += 1
+
+            status.update_status(
+                project_id,
+                final_state if final_state in {"processing", "stopping", "completed", "done", "failed", "stopped"} else "processing",
+                batch_total=run_count,
+                batch_completed=completed_runs,
+                batch_current_index=idx + 1,
+                message=f"Batch progress: {completed_runs}/{run_count} sessions completed.",
+            )
+
             if final_state in {"failed", "stopped"} and not continue_on_failure:
                 logger.warning("Batch halted for %s after run %s ended with %s", project_id, run_id, final_state)
                 break
+
+        status.update_status(
+            project_id,
+            str(status.get_status(project_id).get("status") or "pending"),
+            batch_total=run_count,
+            batch_completed=completed_runs,
+            batch_current_index=run_count,
+            message=f"Batch finished: {completed_runs}/{run_count} sessions completed.",
+        )
     except Exception as exc:
         logger.error("Batch process failed for %s: %s", project_id, exc, exc_info=True)
-        status.update_status(project_id, "failed", error=str(exc))
+        status.update_status(project_id, "failed", error=str(exc), message=f"Batch failed: {exc}")
 
 
 def _sanitize_run_token(value: str) -> str:
@@ -1349,6 +1383,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 stop_requested=False,
                 message=f"Batch queued: {run_count} runs (jitter={jitter_factor}).",
                 error=None,
+                batch_total=run_count,
+                batch_completed=0,
+                batch_current_index=0,
             )
 
             batch_seed_params = dict(requested_params)
@@ -1813,6 +1850,88 @@ def get_project_run_config(project_id: str, run_id: str):
         raise HTTPException(status_code=500, detail="Failed to read run config")
 
 
+@router.patch("/{project_id}/runs/{run_id}/config")
+def update_project_run_config(
+    project_id: str,
+    run_id: str,
+    payload: UpdateRunConfigRequest = Body(...),
+):
+    """Persist run-level training config for a specific session."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        run_dir = project_dir / "runs" / run_id
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        run_config_path = run_dir / "run_config.json"
+        existing = _read_json_if_exists(run_config_path)
+        run_config = existing if isinstance(existing, dict) else {}
+
+        existing_requested = run_config.get("requested_params") if isinstance(run_config.get("requested_params"), dict) else {}
+        existing_resolved = run_config.get("resolved_params") if isinstance(run_config.get("resolved_params"), dict) else {}
+
+        incoming_requested = payload.requested_params if isinstance(payload.requested_params, dict) else {}
+        incoming_resolved = payload.resolved_params if isinstance(payload.resolved_params, dict) else {}
+
+        requested_params = {**existing_requested, **json.loads(json.dumps(incoming_requested))}
+        resolved_params = {**existing_resolved, **json.loads(json.dumps(incoming_resolved))}
+
+        requested_params["run_id"] = run_id
+        requested_params["run_name"] = run_id
+        resolved_params["run_id"] = run_id
+        resolved_params["run_name"] = run_id
+
+        project_status = status.get_status(project_id)
+        base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        shared_doc = _read_project_shared_config(project_dir, str(base_session_id) if base_session_id else None)
+
+        saved_at = datetime.utcnow().isoformat() + "Z"
+        run_config_payload = {
+            "project_id": project_id,
+            "run_id": run_id,
+            "run_name": run_id,
+            "saved_at": saved_at,
+            "requested_params": requested_params,
+            "resolved_params": resolved_params,
+            "shared_config_version": run_config.get("shared_config_version")
+            if isinstance(run_config.get("shared_config_version"), int)
+            else int(shared_doc.get("active_sparse_version") or shared_doc.get("version") or 1),
+            "shared_base_run_id": run_config.get("shared_base_run_id")
+            if isinstance(run_config.get("shared_base_run_id"), str)
+            else (shared_doc.get("base_run_id") if isinstance(shared_doc.get("base_run_id"), str) else base_session_id),
+            "shared_config_snapshot": run_config.get("shared_config_snapshot")
+            if isinstance(run_config.get("shared_config_snapshot"), dict)
+            else {},
+        }
+
+        run_config_tmp = run_config_path.with_suffix(run_config_path.suffix + ".tmp")
+        with open(run_config_tmp, "w", encoding="utf-8") as handle:
+            json.dump(run_config_payload, handle, indent=2)
+        run_config_tmp.replace(run_config_path)
+
+        latest_path = project_dir / "run_config.json"
+        latest_tmp = latest_path.with_suffix(latest_path.suffix + ".tmp")
+        with open(latest_tmp, "w", encoding="utf-8") as handle:
+            json.dump(run_config_payload, handle, indent=2)
+        latest_tmp.replace(latest_path)
+
+        return {
+            "status": "saved",
+            "project_id": project_id,
+            "run_id": run_id,
+            "saved_at": saved_at,
+            "run_config": run_config_payload,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error saving run config for %s/%s: %s", project_id, run_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to save run config")
+
+
 @router.post("/{project_id}/runs")
 def create_project_run(project_id: str, payload: CreateRunRequest = Body(...)):
     """Create a new run/session directory and persist draft run config."""
@@ -2109,6 +2228,51 @@ def get_project_shared_config(project_id: str):
     except Exception as exc:
         logger.error("Error reading shared config for %s: %s", project_id, exc)
         raise HTTPException(status_code=500, detail="Failed to read shared config")
+
+
+@router.patch("/{project_id}/shared-config")
+def update_project_shared_config(project_id: str, payload: UpdateSharedConfigRequest = Body(...)):
+    """Persist base-owned shared config (images/COLMAP) for the project."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_status = status.get_status(project_id)
+        base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        if not isinstance(base_session_id, str) or not base_session_id:
+            raise HTTPException(status_code=409, detail="Base session not set")
+
+        if isinstance(payload.run_id, str) and payload.run_id and payload.run_id != base_session_id:
+            raise HTTPException(status_code=409, detail="Shared config can only be saved from the base session")
+
+        if not isinstance(payload.shared, dict):
+            raise HTTPException(status_code=400, detail="Invalid shared config payload")
+
+        shared_doc = _read_project_shared_config(project_dir, base_session_id)
+        current_shared = shared_doc.get("shared") if isinstance(shared_doc.get("shared"), dict) else {}
+        merged_shared = {**current_shared, **json.loads(json.dumps(payload.shared))}
+
+        shared_doc["base_run_id"] = base_session_id
+        shared_doc["shared"] = merged_shared
+        shared_doc["version"] = int(shared_doc.get("version") or 1) + 1
+        shared_doc["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+        _write_project_shared_config(project_dir, shared_doc)
+
+        return {
+            "status": "saved",
+            "project_id": project_id,
+            "base_session_id": base_session_id,
+            "version": shared_doc.get("version"),
+            "updated_at": shared_doc.get("updated_at"),
+            "shared": merged_shared,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error saving shared config for %s: %s", project_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to save shared config")
 
 
 @router.get("/{project_id}/files")

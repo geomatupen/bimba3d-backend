@@ -67,6 +67,9 @@ class StatusResponse(BaseModel):
     worker_mode: Optional[str] = None
     current_run_id: Optional[str] = None
     base_session_id: Optional[str] = None
+    batch_total: Optional[int] = None
+    batch_completed: Optional[int] = None
+    batch_current_index: Optional[int] = None
 
 
 class ProcessParams(BaseModel):
@@ -171,6 +174,16 @@ class RenameRunRequest(BaseModel):
 class CreateRunRequest(BaseModel):
     run_name: Optional[str] = None
     resolved_params: Optional[dict] = None
+
+
+class UpdateRunConfigRequest(BaseModel):
+    requested_params: Optional[dict] = None
+    resolved_params: Optional[dict] = None
+
+
+class UpdateSharedConfigRequest(BaseModel):
+    run_id: Optional[str] = None
+    shared: dict
 
 
 class ElevateModelRequest(BaseModel):

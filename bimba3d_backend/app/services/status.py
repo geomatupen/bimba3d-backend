@@ -28,6 +28,9 @@ def initialize_status(project_id: str, name: Optional[str] = None) -> None:
         "message": None,
         "engine": None,
         "worker_mode": None,
+        "batch_total": None,
+        "batch_completed": None,
+        "batch_current_index": None,
     }
     status_file.parent.mkdir(parents=True, exist_ok=True)
     
@@ -67,6 +70,9 @@ def get_status(project_id: str) -> dict:
     data.setdefault("stage_progress", None)
     data.setdefault("engine", None)
     data.setdefault("worker_mode", None)
+    data.setdefault("batch_total", None)
+    data.setdefault("batch_completed", None)
+    data.setdefault("batch_current_index", None)
     return data
 
 
@@ -104,6 +110,9 @@ def update_status(
     engine: Optional[str] = None,
     worker_mode: Optional[str] = None,
     current_run_id: Optional[str] = None,
+    batch_total: Optional[int] = None,
+    batch_completed: Optional[int] = None,
+    batch_current_index: Optional[int] = None,
 ) -> None:
     """Update project status while preserving metadata fields."""
     status_file = get_status_file(project_id)
@@ -143,6 +152,12 @@ def update_status(
         current["worker_mode"] = worker_mode
     if current_run_id is not None:
         current["current_run_id"] = current_run_id
+    if batch_total is not None:
+        current["batch_total"] = int(batch_total)
+    if batch_completed is not None:
+        current["batch_completed"] = int(batch_completed)
+    if batch_current_index is not None:
+        current["batch_current_index"] = int(batch_current_index)
     
     # Write atomically using a temporary file
     temp_file = status_file.with_suffix('.tmp')

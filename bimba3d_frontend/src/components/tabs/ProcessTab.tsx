@@ -217,6 +217,7 @@ const getDefaultProcessConfig = () => ({
 
 export default function ProcessTab({ projectId }: ProcessTabProps) {
   const getSharedConfigStorageKey = useCallback(() => `processSharedConfig_${projectId}`, [projectId]);
+  const getSelectedRunStorageKey = useCallback(() => `processSelectedRun_${projectId}`, [projectId]);
   const getTrainingConfigStorageKey = useCallback(
     (runId?: string) => `processTrainingConfig_${projectId}_${(runId || "__default").trim() || "__default"}`,
     [projectId],
@@ -342,10 +343,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const trainingInfo: Record<string, string> = {
     mode: 'Training profile. Baseline keeps default behavior; Modified applies rule-based or adaptive tuning during training depending on selected scope.',
     tune_start_step: 'For Modified mode, this is the first step where tuning checks are allowed. Before this step, no rule-based LR updates are applied.',
-    tune_min_improvement: 'For Core individual and Core AI optimization scopes, this is the baseline minimum improvement reference used to gate aggressive updates (example: 0.005 = 0.5%).',
+    tune_min_improvement: 'For Core individual and Core AI optimization scopes, this is the baseline minimum-improvement anchor (example: 0.005 = 0.5%). In Core AI optimization, the controller then adjusts effective thresholds by phase/progress and loss stability at runtime, so this value is a starting reference, not a fixed threshold on every step.',
     tune_end_step: 'For Modified mode, this is the last step where rule-based tuning updates are allowed. The worker keeps applying rule checks until this step, then continues normal training.',
     tune_interval: 'For Modified mode, worker evaluates and applies rule-based updates every N steps during the tuning window.',
-    tune_scope: 'Rule tuning scope: Core individual updates only LR groups. Core only updates LR groups + core strategy threshold. Core AI optimization runs a lightweight adaptive controller with gated actions and cross-run memory. Core individual + strategy updates LR groups and full strategy controls.',
+    tune_scope: 'Rule tuning scope: Core individual updates only LR groups. Core only updates LR groups + core strategy threshold. Core AI optimization runs a lightweight adaptive controller with gated actions and cross-run memory; it uses tune_min_improvement as the baseline anchor, then adapts thresholds over time. Core individual + strategy updates LR groups and full strategy controls.',
     run_count: 'Number of sessions to run automatically in sequence. Default 1 keeps manual behavior.',
     run_jitter_factor: 'Per-run multiplier for LR-related params. 1 means no jitter across runs.',
     run_name_prefix: 'Optional prefix used for auto-created batch session names.',
@@ -430,6 +431,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [currentStage, setCurrentStage] = useState<string>("");
   const [currentStageKey, setCurrentStageKey] = useState<"docker"|"colmap"|"training"|"export"|"">("");
   const [stageProgress, setStageProgress] = useState<number | undefined>(undefined);
+  const [batchTotal, setBatchTotal] = useState<number>(0);
+  const [batchCompleted, setBatchCompleted] = useState<number>(0);
+  const [batchCurrentIndex, setBatchCurrentIndex] = useState<number>(0);
   const [pipelineDone, setPipelineDone] = useState(false);
   const [projectRuns, setProjectRuns] = useState<ProjectRunInfo[]>([]);
   const [processingRunId, setProcessingRunId] = useState<string>("");
@@ -449,6 +453,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [newSessionNameDraft, setNewSessionNameDraft] = useState<string>("");
   const [newSessionConfigSource, setNewSessionConfigSource] = useState<NewSessionConfigSource>("current");
   const [isCreatingSessionDraft, setIsCreatingSessionDraft] = useState<boolean>(false);
+  const [isSavingConfig, setIsSavingConfig] = useState<boolean>(false);
+  const [configSavedToast, setConfigSavedToast] = useState<string>("");
   const [canCreateSessionDraft, setCanCreateSessionDraft] = useState<boolean>(false);
   const [createSessionDisabledReason, setCreateSessionDisabledReason] = useState<string>("Complete COLMAP on the base session before creating new sessions.");
   const [baseColmapProfile, setBaseColmapProfile] = useState<{
@@ -587,6 +593,22 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     }
   };
 
+  const normalizeTrainingConfigForForm = (raw: Record<string, any>): Record<string, any> => {
+    const normalized = { ...raw };
+    if (typeof normalized.max_steps !== "number" && typeof raw.maxSteps === "number") normalized.max_steps = raw.maxSteps;
+    if (typeof normalized.log_interval !== "number" && typeof raw.logInterval === "number") normalized.log_interval = raw.logInterval;
+    if (typeof normalized.splat_export_interval !== "number" && typeof raw.splatInterval === "number") normalized.splat_export_interval = raw.splatInterval;
+    if (typeof normalized.eval_interval !== "number" && typeof raw.evalInterval === "number") normalized.eval_interval = raw.evalInterval;
+    if (typeof normalized.save_interval !== "number" && typeof raw.saveInterval === "number") normalized.save_interval = raw.saveInterval;
+    if (typeof normalized.densify_from_iter !== "number" && typeof raw.densifyFromIter === "number") normalized.densify_from_iter = raw.densifyFromIter;
+    if (typeof normalized.densify_until_iter !== "number" && typeof raw.densifyUntilIter === "number") normalized.densify_until_iter = raw.densifyUntilIter;
+    if (typeof normalized.densification_interval !== "number" && typeof raw.densificationInterval === "number") normalized.densification_interval = raw.densificationInterval;
+    if (typeof normalized.densify_grad_threshold !== "number" && typeof raw.densifyGradThreshold === "number") normalized.densify_grad_threshold = raw.densifyGradThreshold;
+    if (typeof normalized.opacity_threshold !== "number" && typeof raw.opacityThreshold === "number") normalized.opacity_threshold = raw.opacityThreshold;
+    if (typeof normalized.lambda_dssim !== "number" && typeof raw.lambdaDssim === "number") normalized.lambda_dssim = raw.lambdaDssim;
+    return normalized;
+  };
+
   const resetConfigToDefaults = () => {
     const defaults = getDefaultProcessConfig();
     if (configTab === "training") {
@@ -606,6 +628,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   // Persist training config per session.
   useEffect(() => {
+    if (!selectedRunId || hydratedTrainingRunIdRef.current !== selectedRunId) {
+      return;
+    }
+
     const config = {
       mode,
       tune_start_step: tuneStartStep,
@@ -620,20 +646,20 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       start_model_mode: startModelMode,
       source_model_id: sourceModelId,
       engine,
-      maxSteps,
-      logInterval,
-      splatInterval,
-      pngInterval,
-      evalInterval,
-      saveInterval,
+      max_steps: maxSteps,
+      log_interval: logInterval,
+      splat_export_interval: splatInterval,
+      png_export_interval: pngInterval,
+      eval_interval: evalInterval,
+      save_interval: saveInterval,
       sparse_preference: sparsePreference,
       sparse_merge_selection: sparseMergeSelection,
-      densifyFromIter,
-      densifyUntilIter,
-      densificationInterval,
-      densifyGradThreshold,
-      opacityThreshold,
-      lambdaDssim,
+      densify_from_iter: densifyFromIter,
+      densify_until_iter: densifyUntilIter,
+      densification_interval: densificationInterval,
+      densify_grad_threshold: densifyGradThreshold,
+      opacity_threshold: opacityThreshold,
+      lambda_dssim: lambdaDssim,
       litegs_target_primitives: litegsTargetPrimitives,
       litegs_alpha_shrink: litegsAlphaShrink,
     };
@@ -678,6 +704,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   // Persist shared image/COLMAP config once per project.
   useEffect(() => {
+    if (!canManageColmapImages) {
+      // Non-base sessions should not mutate project-level shared config state.
+      return;
+    }
+    if (hydratedSharedProjectRef.current !== projectId) {
+      return;
+    }
     const sharedConfig = {
       images_resize_enabled: imagesResizeEnabled,
       images_max_size: imagesMaxSize,
@@ -698,38 +731,54 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       },
     };
     localStorage.setItem(getSharedConfigStorageKey(), JSON.stringify(sharedConfig));
-  }, [imagesResizeEnabled, imagesMaxSize, colmapMaxImageSize, colmapPeakThreshold, colmapGuidedMatching, colmapCameraModel, colmapSingleCamera, colmapCameraParams, colmapMatchingType, colmapMapperThreads, colmapMapperMinNumMatches, colmapMapperAbsPoseMinNumInliers, colmapMapperInitMinNumInliers, colmapSiftMatchingMinNumInliers, colmapRunImageRegistrator, getSharedConfigStorageKey]);
+  }, [canManageColmapImages, imagesResizeEnabled, imagesMaxSize, colmapMaxImageSize, colmapPeakThreshold, colmapGuidedMatching, colmapCameraModel, colmapSingleCamera, colmapCameraParams, colmapMatchingType, colmapMapperThreads, colmapMapperMinNumMatches, colmapMapperAbsPoseMinNumInliers, colmapMapperInitMinNumInliers, colmapSiftMatchingMinNumInliers, colmapRunImageRegistrator, getSharedConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
     const loadSelectedRunTraining = async () => {
       if (!selectedRunId) return;
-      try {
-        const saved = localStorage.getItem(getTrainingConfigStorageKey(selectedRunId));
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (!cancelled && parsed && typeof parsed === "object") {
-            applyResolvedParamsToForm(parsed, { includeTraining: true, includeShared: false });
-          }
-          return;
-        }
-      } catch (err) {
-        console.warn("Failed to load saved training config for run", selectedRunId, err);
-      }
+      hydratedTrainingRunIdRef.current = "";
 
       try {
         const res = await api.get(`/projects/${projectId}/runs/${selectedRunId}/config`);
         const resolved = res.data?.run_config?.resolved_params;
         if (!cancelled && resolved && typeof resolved === "object") {
           applyResolvedParamsToForm(resolved as Record<string, any>, { includeTraining: true, includeShared: false });
+          hydratedTrainingRunIdRef.current = selectedRunId;
           return;
         }
       } catch {
         // Run might be a new draft without persisted config yet.
       }
 
+      try {
+        const saved = localStorage.getItem(getTrainingConfigStorageKey(selectedRunId));
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (!cancelled && parsed && typeof parsed === "object") {
+            applyResolvedParamsToForm(normalizeTrainingConfigForForm(parsed as Record<string, any>), { includeTraining: true, includeShared: false });
+            hydratedTrainingRunIdRef.current = selectedRunId;
+          }
+          return;
+        }
+
+        // Fallback: if a run-specific cache is missing, use the default training cache.
+        const defaultSaved = localStorage.getItem(getTrainingConfigStorageKey());
+        if (defaultSaved) {
+          const parsedDefault = JSON.parse(defaultSaved);
+          if (!cancelled && parsedDefault && typeof parsedDefault === "object") {
+            applyResolvedParamsToForm(normalizeTrainingConfigForForm(parsedDefault as Record<string, any>), { includeTraining: true, includeShared: false });
+            hydratedTrainingRunIdRef.current = selectedRunId;
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load saved training config for run", selectedRunId, err);
+      }
+
       if (!cancelled) {
         applyTrainingDefaults(getDefaultProcessConfig());
+        hydratedTrainingRunIdRef.current = selectedRunId;
       }
     };
 
@@ -752,6 +801,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             colmap: typeof shared.colmap === "object" && shared.colmap ? shared.colmap : undefined,
           };
           applyResolvedParamsToForm(sharedPayload as Record<string, any>, { includeTraining: false, includeShared: true });
+          hydratedSharedProjectRef.current = projectId;
         }
 
         const activeSparseVersion = typeof res.data?.active_sparse_version === "number" ? res.data.active_sparse_version : null;
@@ -777,6 +827,20 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           });
         }
       } catch {
+        if (canManageColmapImages) {
+          try {
+            const sharedSaved = localStorage.getItem(getSharedConfigStorageKey());
+            if (sharedSaved) {
+              const localShared = JSON.parse(sharedSaved);
+              if (localShared && typeof localShared === "object" && !cancelled) {
+                applyResolvedParamsToForm(localShared as Record<string, any>, { includeTraining: false, includeShared: true });
+                hydratedSharedProjectRef.current = projectId;
+              }
+            }
+          } catch {
+            // Keep defaults when both backend and local fallback fail.
+          }
+        }
         if (!cancelled) setBaseColmapProfile(null);
       }
     };
@@ -785,7 +849,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, baseSessionId, projectRuns]);
+  }, [projectId, baseSessionId, projectRuns, canManageColmapImages, getSharedConfigStorageKey]);
 
   const sharedImageSizeMismatch = useMemo(() => {
     if (!baseColmapProfile || !canCreateSessionDraft || !selectedRunSharedOutdated) return false;
@@ -839,8 +903,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             ? res.data.can_create_session_reason
             : "Complete COLMAP on the base session before creating new sessions.",
         );
+        const persistedRunId = (localStorage.getItem(getSelectedRunStorageKey()) || "").trim();
         if (!selectedRunId && runs.length > 0) {
-          setSelectedRunId(runs[0].run_id);
+          const preferred = persistedRunId && runs.some((r) => r.run_id === persistedRunId)
+            ? persistedRunId
+            : runs[0].run_id;
+          setSelectedRunId(preferred);
         } else if (selectedRunId && !runs.some((r) => r.run_id === selectedRunId)) {
           setSelectedRunId(runs.length > 0 ? runs[0].run_id : "");
         }
@@ -857,7 +925,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       isMounted = false;
       clearInterval(id);
     };
-  }, [projectId, selectedRunId]);
+  }, [projectId, selectedRunId, getSelectedRunStorageKey]);
+
+  useEffect(() => {
+    if (!selectedRunId) return;
+    localStorage.setItem(getSelectedRunStorageKey(), selectedRunId);
+  }, [selectedRunId, getSelectedRunStorageKey]);
 
   useEffect(() => {
     if (!canManageColmapImages) {
@@ -1034,6 +1107,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         
         // Update processing status
         const status = statusRes.data;
+        setBatchTotal(typeof status.batch_total === "number" ? Math.max(0, status.batch_total) : 0);
+        setBatchCompleted(typeof status.batch_completed === "number" ? Math.max(0, status.batch_completed) : 0);
+        setBatchCurrentIndex(typeof status.batch_current_index === "number" ? Math.max(0, status.batch_current_index) : 0);
         const activeRunIdFromStatus =
           (status.status === "processing" || status.status === "stopping") && typeof status.current_run_id === "string"
             ? status.current_run_id
@@ -1052,15 +1128,21 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           (["processing", "stopping"].includes(String(status?.status || "")) ||
             (!suppressStoppedAtStart && ["stopped", "failed"].includes(String(status?.status || "")))),
         );
+        const batchRunIsActive = Boolean(
+          showBatchActions &&
+          (status?.status === "processing" || status?.status === "stopping") &&
+          status?.current_run_id,
+        );
+        const statusContextActive = selectedRunIsActive || batchRunIsActive;
         
         // Store current step and max steps only for the actively running session.
-        setTrainingCurrentStep(selectedRunIsActive ? status.currentStep : undefined);
-        setTrainingMaxSteps(selectedRunIsActive ? status.maxSteps : undefined);
-        setStageProgress(selectedRunIsActive ? status.stage_progress : undefined);
+        setTrainingCurrentStep(statusContextActive ? status.currentStep : undefined);
+        setTrainingMaxSteps(statusContextActive ? status.maxSteps : undefined);
+        setStageProgress(statusContextActive ? status.stage_progress : undefined);
 
         // Use stopped_percentage when stopped, else 'percentage' or 'progress'
         let percent = undefined as number | undefined;
-        if (selectedRunIsActive) {
+        if (statusContextActive) {
           if (status.status === 'stopped' && typeof status.stopped_percentage === 'number') {
             percent = status.stopped_percentage;
           }
@@ -1078,7 +1160,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         // Current stage label
         let stageName = "" as string;
         let stageKey: "docker"|"colmap"|"training"|"export"|"" = "";
-        const rawStopped = selectedRunIsActive && status.status === 'stopped' && !suppressStoppedAtStart;
+        const rawStopped = statusContextActive && status.status === 'stopped' && !suppressStoppedAtStart;
         if (rawStopped) {
           stoppedPollCountRef.current += 1;
         } else {
@@ -1089,7 +1171,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         const confirmedStopped = rawStopped && stoppedPollCountRef.current >= 2;
 
         // If stopped, prefer worker-provided stopped_stage for accurate location.
-        const effectiveStage = selectedRunIsActive
+        const effectiveStage = statusContextActive
           ? ((confirmedStopped && status.stopped_stage) ? status.stopped_stage : status.stage)
           : null;
         // workerStoppedStage: the stage where the worker actually stopped (null if not stopped).
@@ -1107,13 +1189,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setCurrentStage(stageName);
         
         // Check if resumable (has sparse or checkpoints)
-        const resumable = selectedRunIsActive ? (status.can_resume || sparse) : sparse;
+        const resumable = statusContextActive ? (status.can_resume || sparse) : sparse;
         setCanResume(resumable && status.status !== "processing" && status.status !== "stopping");
         // Track which stage the worker stopped at (prefer stopped_stage)
         setStoppedStage(workerStoppedStage);
         
         // Handle stopping state
-        if (selectedRunIsActive && status.status === "stopping") {
+        if (statusContextActive && status.status === "stopping") {
           setIsStopping(true);
           setStoppingMessage(status.message || "Will stop after current step completes...");
         } else {
@@ -1122,7 +1204,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         }
         
         // Update processing flag based on status
-        if (selectedRunIsActive && (status.status === "processing" || status.status === "stopping")) {
+        if (statusContextActive && (status.status === "processing" || status.status === "stopping")) {
           setProcessing(true);
         } else {
           setProcessing(false);
@@ -1134,7 +1216,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
         // Build detailed status message
         let statusMsg: React.ReactNode = null;
-        if (!selectedRunIsActive) {
+        if (!statusContextActive) {
           if (sessionCompleted) {
             statusMsg = (
               <span className="inline-flex items-center gap-1 text-green-700 font-semibold">
@@ -1200,47 +1282,47 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         // Consider COLMAP complete only when there's an explicit sparse reconstruction present
         // OR the pipeline reports full completion for that stage (stage_progress >= 100 and overall status is completed).
         const colmapReadyForSession = Boolean(sparse) || Boolean(canCreateSessionDraft);
-        let colmapComplete = colmapReadyForSession || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed') || workerStoppedStage === 'training' || workerStoppedStage === 'export' || (selectedRunIsActive && status.status === 'completed' && (status.stage === 'colmap' || status.stage === 'training' || status.stage === 'export'));
+        let colmapComplete = colmapReadyForSession || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed') || workerStoppedStage === 'training' || workerStoppedStage === 'export' || (statusContextActive && status.status === 'completed' && (status.stage === 'colmap' || status.stage === 'training' || status.stage === 'export'));
         // If the worker stopped at COLMAP but the COLMAP substep actually did NOT finish, do not treat as complete.
         if (workerStoppedStage === 'colmap' && !(Boolean(sparse) || ((status.stage === 'colmap' || status.stage === 'colmap_only') && typeof status.stage_progress === 'number' && status.stage_progress >= 100 && status.status === 'completed'))) {
           colmapComplete = false;
         }
         if (colmapComplete) {
           newStatus.colmap = 'success';
-        } else if (selectedRunIsActive && (status.stage === 'colmap' || status.stage === 'colmap_only')) {
+        } else if (statusContextActive && (status.stage === 'colmap' || status.stage === 'colmap_only')) {
           // Show running when actively in COLMAP
           newStatus.colmap = (status.status === 'processing' || status.status === 'stopping') ? 'running' : 'pending';
         }
 
         // TRAINING: consider it complete if model outputs exist, or training reached 100% stage_progress,
         // or the worker stopped after training (stoppedStage === export) or overall completed.
-        let trainingComplete = sessionCompleted || (selectedRunIsActive && status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100) || workerStoppedStage === 'export' || (selectedRunIsActive && status.status === 'completed' && (status.stage === 'training' || status.stage === 'export'));
+        let trainingComplete = sessionCompleted || (statusContextActive && status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100) || workerStoppedStage === 'export' || (statusContextActive && status.status === 'completed' && (status.stage === 'training' || status.stage === 'export'));
         // If the worker stopped at training but training hadn't finished, do not mark as complete
         if (workerStoppedStage === 'training' && !(Boolean(model) || (status.stage === 'training' && typeof status.stage_progress === 'number' && status.stage_progress >= 100))) {
           trainingComplete = false;
         }
         if (trainingComplete) {
           newStatus.training = 'success';
-        } else if (selectedRunIsActive && status.stage === 'training') {
+        } else if (statusContextActive && status.stage === 'training') {
           newStatus.training = (status.status === 'processing' || status.status === 'stopping') ? 'running' : 'pending';
         }
 
         // EXPORT: consider it complete if model outputs exist or overall status is completed
-        let exportComplete = sessionCompleted || (selectedRunIsActive && status.status === 'completed' && status.stage === 'export');
+        let exportComplete = sessionCompleted || (statusContextActive && status.status === 'completed' && status.stage === 'export');
         // If worker stopped during export and export did not finish, do not mark as complete
         if (workerStoppedStage === 'export' && !(Boolean(model) || (status.status === 'completed' && status.stage === 'export'))) {
           exportComplete = false;
         }
         if (exportComplete) {
           newStatus.export = 'success';
-        } else if (selectedRunIsActive && status.stage === 'export' && status.status === 'processing') {
+        } else if (statusContextActive && status.stage === 'export' && status.status === 'processing') {
           newStatus.export = 'running';
         }
 
         setStageStatus(newStatus);
 
         // --- Show Completed and hide Stage Status if all are success and not stopped ---
-        const allStagesSuccess = (newStatus.colmap === "success" && newStatus.training === "success" && newStatus.export === "success" && !stopped) || (!selectedRunIsActive && sessionCompleted);
+        const allStagesSuccess = (newStatus.colmap === "success" && newStatus.training === "success" && newStatus.export === "success" && !stopped) || (!statusContextActive && sessionCompleted);
         setPipelineDone(allStagesSuccess);
 
         // --- Fix overall status label ---
@@ -1257,7 +1339,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     // Poll every 3 seconds to update status
     const interval = setInterval(checkOutputs, 3000);
     return () => clearInterval(interval);
-  }, [projectId, show3DModel, selectedRunId, selectedRunMeta?.session_status, startRequestAtMs]);
+  }, [projectId, show3DModel, selectedRunId, selectedRunMeta?.session_status, startRequestAtMs, showBatchActions]);
 
   // Compute map center and bounds for auto-fit
   const mapCenter = useMemo(() => {
@@ -1296,6 +1378,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const prevProcessingRef = useRef<boolean>(false);
   const prevSparsePresenceRef = useRef<boolean>(false);
   const stoppedPollCountRef = useRef<number>(0);
+  const saveToastTimeoutRef = useRef<number | null>(null);
+  const hydratedTrainingRunIdRef = useRef<string>("");
+  const hydratedSharedProjectRef = useRef<string>("");
 
   useEffect(() => {
     stoppedPollCountRef.current = 0;
@@ -1305,6 +1390,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      if (saveToastTimeoutRef.current !== null) {
+        window.clearTimeout(saveToastTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -2200,21 +2288,19 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   const buildCurrentSessionTrainingParams = (): Record<string, any> => {
     const effectiveMode = engine === "gsplat" ? mode : "baseline";
-    const includeSessionControls =
-      engine === "gsplat" && effectiveMode === "modified" && tuneScope === "core_ai_optimization";
     return {
       mode: effectiveMode,
-      tune_start_step: effectiveMode === "modified" ? tuneStartStep : undefined,
-      tune_min_improvement: effectiveMode === "modified" ? tuneMinImprovement : undefined,
-      tune_end_step: effectiveMode === "modified" ? tuneEndStep : undefined,
-      tune_interval: effectiveMode === "modified" ? tuneInterval : undefined,
-      tune_scope: effectiveMode === "modified" ? tuneScope : undefined,
-      run_count: includeSessionControls ? runCount : undefined,
-      run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
-      run_name_prefix: includeSessionControls ? (runNamePrefix?.trim() || undefined) : undefined,
-      continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
-      start_model_mode: includeSessionControls ? startModelMode : undefined,
-      source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
+      tune_start_step: tuneStartStep,
+      tune_min_improvement: tuneMinImprovement,
+      tune_end_step: tuneEndStep,
+      tune_interval: tuneInterval,
+      tune_scope: tuneScope,
+      run_count: runCount,
+      run_jitter_factor: runJitterFactor,
+      run_name_prefix: runNamePrefix?.trim() || undefined,
+      continue_on_failure: continueOnFailure,
+      start_model_mode: startModelMode,
+      source_model_id: sourceModelId || undefined,
       stage: "train_only",
       engine,
       max_steps: maxSteps,
@@ -2230,10 +2316,137 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       opacity_threshold: opacityThreshold,
       lambda_dssim: lambdaDssim,
       sparse_preference: sparsePreference,
-      sparse_merge_selection: sparsePreference === "merge_selected" ? sparseMergeSelection : undefined,
+      sparse_merge_selection: sparseMergeSelection,
       litegs_target_primitives: litegsTargetPrimitives,
       litegs_alpha_shrink: litegsAlphaShrink,
     };
+  };
+
+  const persistCurrentConfigLocally = () => {
+    const trainingConfig = {
+      mode,
+      tune_start_step: tuneStartStep,
+      tune_min_improvement: tuneMinImprovement,
+      tune_end_step: tuneEndStep,
+      tune_interval: tuneInterval,
+      tune_scope: tuneScope,
+      run_count: runCount,
+      run_jitter_factor: runJitterFactor,
+      run_name_prefix: runNamePrefix,
+      continue_on_failure: continueOnFailure,
+      start_model_mode: startModelMode,
+      source_model_id: sourceModelId,
+      engine,
+      max_steps: maxSteps,
+      log_interval: logInterval,
+      splat_export_interval: splatInterval,
+      png_export_interval: pngInterval,
+      eval_interval: evalInterval,
+      save_interval: saveInterval,
+      sparse_preference: sparsePreference,
+      sparse_merge_selection: sparseMergeSelection,
+      densify_from_iter: densifyFromIter,
+      densify_until_iter: densifyUntilIter,
+      densification_interval: densificationInterval,
+      densify_grad_threshold: densifyGradThreshold,
+      opacity_threshold: opacityThreshold,
+      lambda_dssim: lambdaDssim,
+      litegs_target_primitives: litegsTargetPrimitives,
+      litegs_alpha_shrink: litegsAlphaShrink,
+    };
+
+    localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(trainingConfig));
+
+    if (canManageColmapImages) {
+      // Keep default + active run training caches in sync for base/shared workflows.
+      localStorage.setItem(getTrainingConfigStorageKey(), JSON.stringify(trainingConfig));
+
+      const sharedConfig = {
+        images_resize_enabled: imagesResizeEnabled,
+        images_max_size: imagesMaxSize,
+        colmap: {
+          max_image_size: colmapMaxImageSize,
+          peak_threshold: colmapPeakThreshold,
+          guided_matching: colmapGuidedMatching,
+          camera_model: colmapCameraModel,
+          single_camera: colmapSingleCamera,
+          camera_params: colmapCameraParams,
+          matching_type: colmapMatchingType,
+          mapper_num_threads: colmapMapperThreads,
+          mapper_min_num_matches: colmapMapperMinNumMatches,
+          mapper_abs_pose_min_num_inliers: colmapMapperAbsPoseMinNumInliers,
+          mapper_init_min_num_inliers: colmapMapperInitMinNumInliers,
+          sift_matching_min_num_inliers: colmapSiftMatchingMinNumInliers,
+          run_image_registrator: colmapRunImageRegistrator,
+        },
+      };
+      localStorage.setItem(getSharedConfigStorageKey(), JSON.stringify(sharedConfig));
+    }
+  };
+
+  const buildCurrentSharedConfigPayload = (): Record<string, any> => ({
+    images_resize_enabled: imagesResizeEnabled,
+    images_max_size: imagesMaxSize,
+    colmap: {
+      max_image_size: colmapMaxImageSize,
+      peak_threshold: colmapPeakThreshold,
+      guided_matching: colmapGuidedMatching,
+      camera_model: colmapCameraModel,
+      single_camera: colmapSingleCamera,
+      camera_params: colmapCameraParams,
+      matching_type: colmapMatchingType,
+      mapper_num_threads: colmapMapperThreads,
+      mapper_min_num_matches: colmapMapperMinNumMatches,
+      mapper_abs_pose_min_num_inliers: colmapMapperAbsPoseMinNumInliers,
+      mapper_init_min_num_inliers: colmapMapperInitMinNumInliers,
+      sift_matching_min_num_inliers: colmapSiftMatchingMinNumInliers,
+      run_image_registrator: colmapRunImageRegistrator,
+    },
+  });
+
+  const handleSaveConfig = async () => {
+    if (!selectedRunId) {
+      setError("Select a session before saving config.");
+      return;
+    }
+
+    setIsSavingConfig(true);
+    setError(null);
+
+    try {
+      const trainingParams = buildCurrentSessionTrainingParams();
+
+      await api.patch(`/projects/${projectId}/runs/${selectedRunId}/config`, {
+        requested_params: trainingParams,
+        resolved_params: trainingParams,
+      });
+
+      if (canManageColmapImages) {
+        await api.patch(`/projects/${projectId}/shared-config`, {
+          run_id: selectedRunId,
+          shared: buildCurrentSharedConfigPayload(),
+        });
+      }
+
+      persistCurrentConfigLocally();
+      const toastText = canManageColmapImages
+        ? "Saved training + shared config to backend"
+        : "Saved training config to backend";
+      setConfigSavedToast(toastText);
+      if (saveToastTimeoutRef.current !== null) {
+        window.clearTimeout(saveToastTimeoutRef.current);
+      }
+      saveToastTimeoutRef.current = window.setTimeout(() => {
+        setConfigSavedToast("");
+        saveToastTimeoutRef.current = null;
+      }, 2600);
+      setShowConfig(false);
+    } catch (err) {
+      setConfigSavedToast("");
+      setError(err instanceof Error ? err.message : "Failed to save config");
+    } finally {
+      setIsSavingConfig(false);
+    }
   };
 
   const handleCreateSessionDraft = async () => {
@@ -2368,6 +2581,14 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   return (
     <div className="max-w-7xl space-y-4">
+      {configSavedToast && (
+        <div className="fixed bottom-4 right-4 z-[1100] pointer-events-none">
+          <div className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 shadow-lg">
+            <Check className="w-4 h-4 text-emerald-600" />
+            <span>{configSavedToast}</span>
+          </div>
+        </div>
+      )}
       {!gpuAvailable && (
         <div className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded flex items-center gap-3 text-xs text-yellow-800">
           <svg className="h-4 w-4 text-yellow-500" viewBox="0 0 20 20" fill="currentColor">
@@ -2649,6 +2870,19 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                       <span className="font-semibold">Overall Progress</span>
                       <span className="font-bold">{wasStopped ? `${overallProgress}% (stopped)` : `${overallProgress}%`}</span>
                     </div>
+                    {batchTotal > 1 && (
+                      <div className="mb-1.5 text-[11px] text-indigo-800 flex flex-wrap items-center gap-2">
+                        <span className="px-2 py-0.5 rounded bg-indigo-100 border border-indigo-200 font-semibold">
+                          Sessions: {Math.min(batchCompleted, batchTotal)}/{batchTotal} completed
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-indigo-100 border border-indigo-200">
+                          Current session: {Math.min(Math.max(batchCurrentIndex, 1), batchTotal)}/{batchTotal}
+                        </span>
+                        {processingRunId && (
+                          <span className="truncate">Active run: <span className="font-semibold">{processingRunId}</span></span>
+                        )}
+                      </div>
+                    )}
                     {/* Stage labels above the segmented bar */}
                     <div className="flex justify-between mb-0.5 px-1">
                       {[runColmap && <span key="colmap" className="text-[9px] text-indigo-900 font-medium">COLMAP</span>,
@@ -3957,15 +4191,17 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 </button>
                 <button
                   onClick={() => setShowConfig(false)}
+                  disabled={isSavingConfig}
                   className="px-3 py-1.5 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 text-[13px] font-semibold"
                 >
                   Close
                 </button>
                 <button
-                  onClick={() => setShowConfig(false)}
+                  onClick={handleSaveConfig}
+                  disabled={isSavingConfig}
                   className="px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-700 text-[13px] font-semibold"
                 >
-                  Save
+                  {isSavingConfig ? "Saving..." : "Save"}
                 </button>
               </div>
             </div>
