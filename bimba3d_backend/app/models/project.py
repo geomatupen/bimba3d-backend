@@ -92,9 +92,17 @@ class ProcessParams(BaseModel):
     run_name_prefix: Optional[str] = None
     run_jitter_factor: Optional[float] = None
     continue_on_failure: Optional[bool] = None
+    batch_connect_runs: Optional[bool] = None
+    # Internal batch chain metadata (persisted in run configs)
+    batch_plan_id: Optional[str] = None
+    batch_index: Optional[int] = None
+    batch_total: Optional[int] = None
+    batch_continue_on_failure: Optional[bool] = None
+    batch_run_name_prefix: Optional[str] = None
     # Core AI model reuse controls
     start_model_mode: Optional[str] = None  # "scratch" | "reuse"
     source_model_id: Optional[str] = None
+    source_run_id: Optional[str] = None
     # --- ORIGINAL KERBL PARAMETERS ---
     max_steps: Optional[int] = None  # [original]
     log_interval: Optional[int] = None  # [custom]
@@ -192,3 +200,7 @@ class ElevateModelRequest(BaseModel):
 
 class RenameModelRequest(BaseModel):
     model_name: str
+
+
+class ContinueBatchRequest(BaseModel):
+    restart_current: Optional[bool] = True

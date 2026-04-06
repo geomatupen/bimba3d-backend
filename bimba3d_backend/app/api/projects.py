@@ -8,6 +8,7 @@ import os
 import stat
 import struct
 import ast
+import uuid
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,7 @@ from bimba3d_backend.app.models.project import (
     UpdateSharedConfigRequest,
     ElevateModelRequest,
     RenameModelRequest,
+    ContinueBatchRequest,
 )
 from bimba3d_backend.app.services import status, storage, colmap, gsplat, files, sparse_edit, pointsbin
 from bimba3d_backend.app.services import model_registry
@@ -44,6 +46,8 @@ COLMAP_TO_OPENGL = (1.0, -1.0, -1.0)
 BEST_SPARSE_META = ".best_sparse_selection.json"
 SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
 SHARED_CONFIG_FILE = "shared_config.json"
+BATCH_LINEAGE_FILE = ".batch_lineage_latest.json"
+RUN_CONFIG_HISTORY_KEEP = 5
 
 
 def _get_project_shared_config_path(project_dir: Path) -> Path:
@@ -155,6 +159,38 @@ def _read_json_if_exists(path: Path | None):
     except Exception as exc:
         logger.warning("Failed to parse JSON %s: %s", path, exc)
         return None
+
+
+def _get_batch_lineage_path(project_dir: Path) -> Path:
+    return project_dir / BATCH_LINEAGE_FILE
+
+
+def _read_batch_lineage(project_dir: Path) -> dict | None:
+    payload = _read_json_if_exists(_get_batch_lineage_path(project_dir))
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_batch_lineage(project_dir: Path, payload: dict) -> None:
+    target = _get_batch_lineage_path(project_dir)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    tmp.replace(target)
+
+
+def _prune_run_config_history(run_configs_dir: Path, keep: int = RUN_CONFIG_HISTORY_KEEP) -> None:
+    """Keep only the most recent versioned run_config snapshots."""
+    try:
+        files = sorted(run_configs_dir.glob("run_config_*.json"), key=lambda p: p.name, reverse=True)
+        if len(files) <= keep:
+            return
+        for stale in files[keep:]:
+            try:
+                stale.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Failed to prune stale run config snapshot %s: %s", stale, exc)
+    except Exception as exc:
+        logger.warning("Failed to prune run config history in %s: %s", run_configs_dir, exc)
 
 
 def _close_project_log_handlers(project_dir: Path) -> None:
@@ -303,12 +339,35 @@ def _wait_for_run_completion(project_id: str, run_id: str, timeout_seconds: int 
     """Wait until the targeted run reaches a terminal project status."""
     started_at = time.time()
     terminal_states = {"completed", "done", "failed", "stopped"}
+    terminal_seen_at: float | None = None
+    teardown_grace_seconds = 90
     while True:
         current = status.get_status(project_id)
         current_run = str(current.get("current_run_id") or "")
         current_state = str(current.get("status") or "")
         if current_run == run_id and current_state in terminal_states:
-            return current
+            if terminal_seen_at is None:
+                terminal_seen_at = time.time()
+
+            worker_mode = str(current.get("worker_mode") or "local").strip().lower()
+            try:
+                if worker_mode == "docker":
+                    worker_active = bool(colmap.get_project_worker_container_ids(project_id))
+                else:
+                    worker_active = bool(pipeline.is_local_project_active(project_id))
+            except Exception:
+                worker_active = False
+
+            if not worker_active:
+                return current
+
+            if (time.time() - terminal_seen_at) >= teardown_grace_seconds:
+                logger.warning(
+                    "Proceeding after terminal status for %s/%s despite active-worker check still true.",
+                    project_id,
+                    run_id,
+                )
+                return current
         if timeout_seconds > 0 and (time.time() - started_at) >= timeout_seconds:
             return current
         time.sleep(2)
@@ -321,19 +380,31 @@ def _run_batch_process(
     run_name_prefix: str | None,
     jitter_factor: float,
     continue_on_failure: bool,
+    start_index: int = 1,
+    initial_previous_success_run_id: str | None = None,
+    initial_completed_runs: int = 0,
 ) -> None:
     """Run multiple sessions sequentially using the same base config."""
     try:
-        completed_runs = 0
+        project_dir = DATA_DIR / project_id
+        completed_runs = max(0, int(initial_completed_runs))
+        batch_connect_runs = bool(base_params.get("batch_connect_runs", True))
+        previous_success_run_id: str | None = str(initial_previous_success_run_id or "") or None
+        successful_run_ids: list[str] = []
+        last_started_run_id: str | None = None
         prefix = _sanitize_run_token(run_name_prefix or "") if run_name_prefix else ""
-        for idx in range(max(1, int(run_count))):
+        run_count_int = max(1, int(run_count))
+        start_idx = max(1, min(int(start_index), run_count_int))
+        batch_plan_id = _sanitize_run_token(str(base_params.get("batch_plan_id") or ""))
+
+        for idx in range(start_idx - 1, run_count_int):
             status.update_status(
                 project_id,
                 "processing",
-                batch_total=run_count,
+                batch_total=run_count_int,
                 batch_completed=completed_runs,
                 batch_current_index=idx + 1,
-                message=f"Batch session {idx + 1}/{run_count} starting...",
+                message=f"Batch session {idx + 1}/{run_count_int} starting...",
                 error=None,
             )
 
@@ -341,9 +412,22 @@ def _run_batch_process(
             run_params["run_count"] = 1
             run_params["resume"] = False
             run_params["restart_fresh"] = False
+            run_params["batch_connect_runs"] = batch_connect_runs
+            if batch_plan_id:
+                run_params["batch_plan_id"] = batch_plan_id
+            run_params["batch_index"] = idx + 1
+            run_params["batch_total"] = run_count_int
+            run_params["batch_continue_on_failure"] = bool(continue_on_failure)
+            if prefix:
+                run_params["batch_run_name_prefix"] = prefix
 
             if idx > 0:
                 run_params["stage"] = "train_only"
+
+            if batch_connect_runs and previous_success_run_id:
+                run_params["start_model_mode"] = "reuse"
+                run_params["source_run_id"] = previous_success_run_id
+                run_params.pop("source_model_id", None)
 
             if prefix:
                 run_params["run_name"] = f"{prefix}_session{idx + 1}"
@@ -352,25 +436,28 @@ def _run_batch_process(
                 run_params["run_name"] = f"{base_name}_{idx + 1}"
 
             run_params = _apply_run_jitter(run_params, idx, jitter_factor)
-            logger.info("Batch %s/%s starting for %s (run_name=%s)", idx + 1, run_count, project_id, run_params.get("run_name"))
+            logger.info("Batch %s/%s starting for %s (run_name=%s)", idx + 1, run_count_int, project_id, run_params.get("run_name"))
 
             response = process_project(project_id, ProcessParams(**run_params))
             run_id = str(response.get("run_id") or "")
             if not run_id:
                 raise RuntimeError("Batch run started without run_id")
+            last_started_run_id = run_id
 
             final_status = _wait_for_run_completion(project_id, run_id)
             final_state = str(final_status.get("status") or "")
             if final_state in {"completed", "done"}:
                 completed_runs += 1
+                previous_success_run_id = run_id
+                successful_run_ids.append(run_id)
 
             status.update_status(
                 project_id,
                 final_state if final_state in {"processing", "stopping", "completed", "done", "failed", "stopped"} else "processing",
-                batch_total=run_count,
+                batch_total=run_count_int,
                 batch_completed=completed_runs,
                 batch_current_index=idx + 1,
-                message=f"Batch progress: {completed_runs}/{run_count} sessions completed.",
+                message=f"Batch progress: {completed_runs}/{run_count_int} sessions completed.",
             )
 
             if final_state in {"failed", "stopped"} and not continue_on_failure:
@@ -380,11 +467,30 @@ def _run_batch_process(
         status.update_status(
             project_id,
             str(status.get_status(project_id).get("status") or "pending"),
-            batch_total=run_count,
+            batch_total=run_count_int,
             batch_completed=completed_runs,
-            batch_current_index=run_count,
-            message=f"Batch finished: {completed_runs}/{run_count} sessions completed.",
+            batch_current_index=run_count_int,
+            message=f"Batch finished: {completed_runs}/{run_count_int} sessions completed.",
         )
+
+        final_run_id = previous_success_run_id or last_started_run_id
+        if final_run_id:
+            try:
+                _write_batch_lineage(
+                    project_dir,
+                    {
+                        "project_id": project_id,
+                        "captured_at": datetime.utcnow().isoformat() + "Z",
+                        "batch_connect_runs": batch_connect_runs,
+                        "run_count_requested": int(run_count_int),
+                        "start_index": int(start_idx),
+                        "completed_count": int(completed_runs),
+                        "successful_run_ids": successful_run_ids,
+                        "final_run_id": final_run_id,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist batch lineage manifest for %s: %s", project_id, exc)
     except Exception as exc:
         logger.error("Batch process failed for %s: %s", project_id, exc, exc_info=True)
         status.update_status(project_id, "failed", error=str(exc), message=f"Batch failed: {exc}")
@@ -1092,11 +1198,42 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
             run_id=run_id,
             captured_at=captured_at,
         )
+
+        batch_contributors: list[dict] = []
+        try:
+            batch_doc = _read_batch_lineage(project_dir)
+            if (
+                isinstance(batch_doc, dict)
+                and str(batch_doc.get("project_id") or "") == project_id
+                and str(batch_doc.get("final_run_id") or "") == run_id
+            ):
+                successful_ids = batch_doc.get("successful_run_ids") if isinstance(batch_doc.get("successful_run_ids"), list) else []
+                for candidate in successful_ids:
+                    candidate_run_id = str(candidate or "").strip()
+                    if not candidate_run_id or candidate_run_id == run_id:
+                        continue
+                    candidate_run_dir = project_dir / "runs" / candidate_run_id
+                    if not candidate_run_dir.exists() or not candidate_run_dir.is_dir():
+                        continue
+                    batch_contributors.append(
+                        model_registry.snapshot_contributor_configs(
+                            model_dir=model_dir,
+                            project_dir=project_dir,
+                            run_dir=candidate_run_dir,
+                            project_id=project_id,
+                            project_name=str(project_name) if project_name else None,
+                            run_id=candidate_run_id,
+                            captured_at=captured_at,
+                        )
+                    )
+        except Exception as exc:
+            logger.warning("Failed to include batch lineage contributors for %s/%s: %s", project_id, run_id, exc)
+
         lineage_doc = model_registry.write_lineage(
             model_dir=model_dir,
             model_id=model_id,
             source_model_id=source_model_id,
-            contributors=[*parent_contributors, current_contributor],
+            contributors=[*parent_contributors, *batch_contributors, current_contributor],
             captured_at=captured_at,
         )
         provenance_summary = model_registry.summarize_lineage(lineage_doc.get("contributors") or [])
@@ -1310,8 +1447,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
 
         if start_model_mode == "reuse":
             source_model_id = str(requested_params.get("source_model_id") or "").strip()
-            if not source_model_id:
-                raise HTTPException(status_code=400, detail="source_model_id is required when start_model_mode='reuse'")
+            source_run_id = str(requested_params.get("source_run_id") or "").strip()
+            if not source_model_id and not source_run_id:
+                raise HTTPException(status_code=400, detail="source_model_id or source_run_id is required when start_model_mode='reuse'")
 
             mode = str(params_payload.get("mode") or "baseline")
             tune_scope = str(params_payload.get("tune_scope") or "")
@@ -1321,20 +1459,33 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                     detail="Model reuse is supported only for gsplat + modified + core_ai_optimization.",
                 )
 
-            model_record = model_registry.resolve_reusable_model(source_model_id)
-            if not isinstance(model_record, dict):
-                raise HTTPException(status_code=404, detail="Reusable model not found")
+            checkpoint_path: Path | None = None
+            if source_model_id:
+                model_record = model_registry.resolve_reusable_model(source_model_id)
+                if not isinstance(model_record, dict):
+                    raise HTTPException(status_code=404, detail="Reusable model not found")
 
-            checkpoint_path = Path(str((model_record.get("paths") or {}).get("checkpoint") or "")).expanduser()
-            if not checkpoint_path.exists():
-                raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
+                checkpoint_path = Path(str((model_record.get("paths") or {}).get("checkpoint") or "")).expanduser()
+                if not checkpoint_path.exists():
+                    raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
+                params_payload["source_model_id"] = source_model_id
+                params_payload.pop("source_run_id", None)
+            else:
+                source_run_dir = project_dir / "runs" / source_run_id
+                if not source_run_dir.exists() or not source_run_dir.is_dir():
+                    raise HTTPException(status_code=404, detail="Source run for warm-start not found")
+                checkpoint_path = model_registry.find_latest_gsplat_checkpoint(source_run_dir)
+                if checkpoint_path is None or not checkpoint_path.exists():
+                    raise HTTPException(status_code=400, detail="Source run has no gsplat checkpoint")
+                params_payload["source_run_id"] = source_run_id
+                params_payload.pop("source_model_id", None)
 
             params_payload["start_model_mode"] = "reuse"
-            params_payload["source_model_id"] = source_model_id
             params_payload["source_model_checkpoint"] = str(checkpoint_path)
         else:
             params_payload["start_model_mode"] = "scratch"
             params_payload.pop("source_model_id", None)
+            params_payload.pop("source_run_id", None)
             params_payload.pop("source_model_checkpoint", None)
 
         # Optional sequential batch orchestration.
@@ -1345,6 +1496,11 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         if run_count < 1:
             run_count = 1
 
+        # Restart-from-scratch is scoped to one existing selected session.
+        # Never treat restart_fresh requests as batch orchestration.
+        if bool(requested_params.get("restart_fresh")):
+            run_count = 1
+
         if run_count > 1:
             if bool(requested_params.get("resume")):
                 raise HTTPException(status_code=400, detail="Batch resume is not supported. Use Batch Continue from a fresh start.")
@@ -1352,6 +1508,28 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             jitter_factor = float(requested_params.get("run_jitter_factor") or 1.0)
             run_name_prefix = str(requested_params.get("run_name_prefix") or "").strip() or None
             continue_on_failure = bool(requested_params.get("continue_on_failure", True))
+            batch_plan_id = f"batch_{uuid.uuid4().hex[:12]}"
+
+            # Drop selected non-base seed session before creating fresh batch sessions.
+            runs_root = project_dir / "runs"
+            runs_root.mkdir(parents=True, exist_ok=True)
+            seed_run_raw = str(requested_params.get("run_name") or "").strip()
+            seed_run_id = _sanitize_run_token(seed_run_raw)
+            seed_action_note = ""
+            if seed_run_id and (runs_root / seed_run_id).exists():
+                current_state = status.get_status(project_id)
+                base_session_id = str(current_state.get("base_session_id") or "") if isinstance(current_state, dict) else ""
+                if seed_run_id != base_session_id:
+                    try:
+                        _delete_path_strict(runs_root / seed_run_id)
+                        seed_action_note = f"Deleted selected seed session '{seed_run_id}' before batch."
+                    except Exception as exc:
+                        logger.warning("Failed to delete batch seed run %s for %s: %s", seed_run_id, project_id, exc)
+                        seed_action_note = f"Could not delete selected seed session '{seed_run_id}'; continuing with new batch sessions."
+
+            batch_message = f"Batch queued: {run_count} runs (jitter={jitter_factor})."
+            if seed_action_note:
+                batch_message = f"{batch_message} {seed_action_note}"
 
             # Reuse existing conflict checks before launching the batch orchestrator.
             if resolved_worker_mode == "docker":
@@ -1381,7 +1559,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 engine=engine,
                 worker_mode=resolved_worker_mode,
                 stop_requested=False,
-                message=f"Batch queued: {run_count} runs (jitter={jitter_factor}).",
+                message=batch_message,
                 error=None,
                 batch_total=run_count,
                 batch_completed=0,
@@ -1393,6 +1571,11 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             batch_seed_params["run_jitter_factor"] = jitter_factor
             batch_seed_params["run_name_prefix"] = run_name_prefix
             batch_seed_params["continue_on_failure"] = continue_on_failure
+            batch_seed_params["batch_plan_id"] = batch_plan_id
+            batch_seed_params["batch_total"] = int(run_count)
+            batch_seed_params["batch_continue_on_failure"] = bool(continue_on_failure)
+            if run_name_prefix:
+                batch_seed_params["batch_run_name_prefix"] = _sanitize_run_token(run_name_prefix)
 
             thread = threading.Thread(
                 target=_run_batch_process,
@@ -1404,10 +1587,12 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             logger.info("Started batch processing for %s with %s runs", project_id, run_count)
             return {
                 "status": "batch_processing_started",
+                "batch_plan_id": batch_plan_id,
                 "run_count": run_count,
                 "jitter_factor": jitter_factor,
                 "continue_on_failure": continue_on_failure,
                 "run_name_prefix": run_name_prefix,
+                "seed_action_note": seed_action_note or None,
             }
 
         # Create a per-run session directory under project/runs/<run_name>.
@@ -1532,6 +1717,8 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 with open(tmp_path, "w", encoding="utf-8") as handle:
                     json.dump(run_config_payload, handle, indent=2)
                 tmp_path.replace(target_path)
+
+            _prune_run_config_history(run_configs_dir)
 
             logger.info("Saved run configuration: %s", run_config_latest)
         except Exception as exc:
@@ -1762,6 +1949,9 @@ def list_project_runs(project_id: str):
                     "shared_config_version": run_shared_version,
                     "active_sparse_shared_version": active_sparse_version,
                     "shared_outdated": shared_outdated,
+                    "batch_plan_id": resolved.get("batch_plan_id") or requested.get("batch_plan_id"),
+                    "batch_index": resolved.get("batch_index") or requested.get("batch_index"),
+                    "batch_total": resolved.get("batch_total") or requested.get("batch_total"),
                 }
             )
 
@@ -1930,6 +2120,150 @@ def update_project_run_config(
     except Exception as exc:
         logger.error("Error saving run config for %s/%s: %s", project_id, run_id, exc)
         raise HTTPException(status_code=500, detail="Failed to save run config")
+
+
+@router.post("/{project_id}/runs/{run_id}/continue-batch")
+def continue_batch_from_run(
+    project_id: str,
+    run_id: str,
+    payload: ContinueBatchRequest = Body(default=ContinueBatchRequest()),
+):
+    """Restart one run and continue remaining runs in its batch chain."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        run_dir = project_dir / "runs" / run_id
+        if not run_dir.exists() or not run_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        run_cfg = _read_json_if_exists(run_dir / "run_config.json")
+        if not isinstance(run_cfg, dict):
+            raise HTTPException(status_code=404, detail="Run config not found")
+
+        requested = run_cfg.get("requested_params") if isinstance(run_cfg.get("requested_params"), dict) else {}
+        resolved = run_cfg.get("resolved_params") if isinstance(run_cfg.get("resolved_params"), dict) else {}
+
+        raw_total = resolved.get("batch_total", requested.get("batch_total"))
+        raw_index = resolved.get("batch_index", requested.get("batch_index"))
+        try:
+            batch_total = int(raw_total)
+            batch_index = int(raw_index)
+        except Exception:
+            raise HTTPException(status_code=409, detail="Selected run is not part of a resumable batch chain.")
+
+        if batch_total < 2 or batch_index < 1 or batch_index > batch_total:
+            raise HTTPException(status_code=409, detail="Selected run is not part of a valid batch chain.")
+
+        run_name_prefix = str(
+            resolved.get("batch_run_name_prefix")
+            or requested.get("batch_run_name_prefix")
+            or resolved.get("run_name_prefix")
+            or requested.get("run_name_prefix")
+            or ""
+        ).strip() or None
+        continue_on_failure = bool(
+            resolved.get("batch_continue_on_failure", requested.get("batch_continue_on_failure", resolved.get("continue_on_failure", requested.get("continue_on_failure", True))))
+        )
+        batch_connect_runs = bool(resolved.get("batch_connect_runs", requested.get("batch_connect_runs", True)))
+        jitter_factor = float(resolved.get("run_jitter_factor", requested.get("run_jitter_factor", 1.0)) or 1.0)
+        batch_plan_id = str(resolved.get("batch_plan_id") or requested.get("batch_plan_id") or f"batch_{uuid.uuid4().hex[:12]}")
+
+        restart_current = bool(payload.restart_current if payload is not None else True)
+        completed_before = max(0, batch_index - 1)
+        previous_success_run_id: str | None = run_id if batch_connect_runs else None
+
+        base_params = json.loads(json.dumps(requested if requested else resolved))
+        base_params["run_name"] = run_id
+        base_params["run_count"] = 1
+        base_params["run_name_prefix"] = run_name_prefix
+        base_params["continue_on_failure"] = continue_on_failure
+        base_params["batch_connect_runs"] = batch_connect_runs
+        base_params["run_jitter_factor"] = jitter_factor
+        base_params["batch_plan_id"] = batch_plan_id
+        base_params["batch_total"] = batch_total
+        base_params["batch_index"] = batch_index
+        if run_name_prefix:
+            base_params["batch_run_name_prefix"] = _sanitize_run_token(run_name_prefix)
+
+        if restart_current:
+            restart_params = dict(base_params)
+            restart_params["run_name"] = run_id
+            restart_params["restart_fresh"] = True
+            restart_params["resume"] = False
+            restart_params["run_count"] = 1
+            process_project(project_id, ProcessParams(**restart_params))
+
+            final_status = _wait_for_run_completion(project_id, run_id)
+            final_state = str(final_status.get("status") or "")
+            if final_state in {"completed", "done"}:
+                completed_before = batch_index
+                previous_success_run_id = run_id if batch_connect_runs else None
+            elif not continue_on_failure:
+                return {
+                    "status": "batch_continue_aborted",
+                    "reason": f"Restarted run ended with state '{final_state}'",
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                    "batch_total": batch_total,
+                }
+            else:
+                previous_success_run_id = None
+
+        next_index = batch_index + 1
+        if next_index > batch_total:
+            return {
+                "status": "batch_continue_complete",
+                "message": "No remaining sessions after selected run.",
+                "run_id": run_id,
+                "batch_index": batch_index,
+                "batch_total": batch_total,
+            }
+
+        status.update_status(
+            project_id,
+            "processing",
+            progress=1,
+            stop_requested=False,
+            batch_total=batch_total,
+            batch_completed=completed_before,
+            batch_current_index=next_index,
+            message=f"Batch continue queued from session {batch_index}; next session {next_index}/{batch_total}.",
+            error=None,
+        )
+
+        thread = threading.Thread(
+            target=_run_batch_process,
+            args=(
+                project_id,
+                base_params,
+                batch_total,
+                run_name_prefix,
+                jitter_factor,
+                continue_on_failure,
+                next_index,
+                previous_success_run_id,
+                completed_before,
+            ),
+            daemon=True,
+        )
+        thread.start()
+
+        return {
+            "status": "batch_continue_started",
+            "run_id": run_id,
+            "batch_plan_id": batch_plan_id,
+            "batch_index": batch_index,
+            "batch_total": batch_total,
+            "next_index": next_index,
+            "restart_current": restart_current,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error continuing batch for %s/%s: %s", project_id, run_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to continue batch")
 
 
 @router.post("/{project_id}/runs")
