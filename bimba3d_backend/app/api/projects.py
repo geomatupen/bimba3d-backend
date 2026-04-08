@@ -1410,7 +1410,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         params_payload.setdefault("save_interval", 2500)
         params_payload.setdefault("splat_export_interval", 2500)
         params_payload.setdefault("best_splat_interval", 100)
-        params_payload.setdefault("auto_early_stop", False)
+        params_payload.setdefault("auto_early_stop", True)
         params_payload.setdefault("early_stop_monitor_interval", 200)
         params_payload.setdefault("early_stop_decision_points", 10)
         params_payload.setdefault("early_stop_min_eval_points", 6)

@@ -188,7 +188,7 @@ const getDefaultProcessConfig = () => ({
   logInterval: 100,
   splatInterval: 2500,
   bestSplatInterval: 100,
-  auto_early_stop: false,
+  auto_early_stop: true,
   earlyStopMonitorInterval: 200,
   earlyStopDecisionPoints: 10,
   earlyStopMinEvalPoints: 6,
@@ -288,7 +288,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
   const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? 2500);
   const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfg.best_splat_interval ?? 100);
-  const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? false);
+  const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? true);
   const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfg.early_stop_monitor_interval ?? 200);
   const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfg.early_stop_decision_points ?? 10);
   const [earlyStopMinEvalPoints, setEarlyStopMinEvalPoints] = useState<number>(cfg.earlyStopMinEvalPoints ?? cfg.early_stop_min_eval_points ?? 6);
@@ -386,7 +386,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     logInterval: 'How often (in steps) to print consolidated training snapshots in worker logs. Lower values are more verbose. [custom]',
     splatInterval: 'How often (in steps) to export intermediate .splat/.ply files during training. [original]',
     bestSplatInterval: 'How often (in steps) to evaluate and update best.splat using measured training loss. Final export cadence remains controlled by Splat export interval. [custom]',
-    auto_early_stop: 'Enable hybrid early stop: monitor trend every monitor interval and confirm plateau only at eval steps. [custom]',
+    auto_early_stop: 'Enable early stop: monitor trend every monitor interval and confirm plateau only at eval steps. [custom]',
     earlyStopMonitorInterval: 'Cadence for fast EMA trend checks between eval passes. These checks only mark candidate status; they do not stop training directly. [custom]',
     earlyStopDecisionPoints: 'Window size (points) used for both monitor trend and eval confirmation. Recommended 10 for stable decisions. [custom]',
     earlyStopMinEvalPoints: 'Minimum number of eval points required before early-stop confirmation is allowed. [custom]',
@@ -529,7 +529,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setLogInterval(defaults.logInterval ?? 100);
     setSplatInterval(defaults.splatInterval);
     setBestSplatInterval(defaults.bestSplatInterval ?? 100);
-    setAutoEarlyStop(defaults.auto_early_stop ?? false);
+    setAutoEarlyStop(defaults.auto_early_stop ?? true);
     setEarlyStopMonitorInterval(defaults.earlyStopMonitorInterval ?? 200);
     setEarlyStopDecisionPoints(defaults.earlyStopDecisionPoints ?? 10);
     setEarlyStopMinEvalPoints(defaults.earlyStopMinEvalPoints ?? 6);
@@ -4062,7 +4062,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                 </div>
                                 <div className="sm:col-span-2 mt-1 rounded-md border border-slate-200 bg-white p-2">
                                   <label className="flex items-center justify-between text-[11px] font-medium text-slate-700 mb-1">
-                                    <span>Enable Hybrid Early Stop</span>
+                                    <span>Enable Early Stop</span>
                                     <button onClick={() => setSelectedInfoKey("auto_early_stop")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
                                   </label>
                                   <div className="flex items-center gap-2">

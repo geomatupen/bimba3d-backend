@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Hybrid Early Stop Behavior</title>
+  <title>Early Stop Behavior</title>
   <style>
     body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2937; line-height: 1.5; }
     h1, h2 { color: #0f172a; }
@@ -15,13 +15,13 @@
   </style>
 </head>
 <body>
-  <h1>Hybrid Early Stop Behavior (gsplat)</h1>
+  <h1>Early Stop Behavior (gsplat)</h1>
   <p>
-    This document describes the implemented hybrid early-stop logic used by gsplat training.
+    This document describes the implemented early-stop logic used by gsplat training.
     The design uses frequent trend monitoring but only allows hard stop decisions at eval steps.
   </p>
 
-  <h2>Why Hybrid</h2>
+  <h2>Why This Design</h2>
   <ul>
     <li>Monitor trend between eval points so we do not miss slow plateaus.</li>
     <li>Avoid false positives by confirming stop only on eval checkpoints.</li>
@@ -58,8 +58,8 @@
     <tbody>
       <tr>
         <td><code>auto_early_stop</code></td>
-        <td>false</td>
-        <td>Enable hybrid early-stop.</td>
+        <td>true</td>
+        <td>Enable early-stop.</td>
       </tr>
       <tr>
         <td><code>early_stop_monitor_interval</code></td>

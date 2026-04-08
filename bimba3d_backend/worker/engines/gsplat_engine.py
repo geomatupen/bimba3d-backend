@@ -203,7 +203,7 @@ def run_training(
         log_interval = max(1, int(log_interval))
     except Exception:
         log_interval = 100
-    auto_early_stop = bool(p.get("auto_early_stop", False))
+    auto_early_stop = bool(p.get("auto_early_stop", True))
     try:
         early_stop_monitor_interval = max(1, int(p.get("early_stop_monitor_interval", 200)))
     except Exception:
