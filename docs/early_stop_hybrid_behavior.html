@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hybrid Early Stop Behavior</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; color: #1f2937; line-height: 1.5; }
+    h1, h2 { color: #0f172a; }
+    code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; }
+    th, td { border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; }
+    th { background: #e2e8f0; }
+    .note { background: #eff6ff; border: 1px solid #bfdbfe; padding: 10px 12px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Hybrid Early Stop Behavior (gsplat)</h1>
+  <p>
+    This document describes the implemented hybrid early-stop logic used by gsplat training.
+    The design uses frequent trend monitoring but only allows hard stop decisions at eval steps.
+  </p>
+
+  <h2>Why Hybrid</h2>
+  <ul>
+    <li>Monitor trend between eval points so we do not miss slow plateaus.</li>
+    <li>Avoid false positives by confirming stop only on eval checkpoints.</li>
+    <li>Keep behavior stable across noisy minibatch loss updates.</li>
+  </ul>
+
+  <h2>Decision Flow</h2>
+  <ol>
+    <li><strong>Monitor phase</strong> every <code>early_stop_monitor_interval</code> steps: compute EMA loss and rolling improvement.</li>
+    <li>If monitor improvement is too small, set <code>early_stop_candidate=true</code>.</li>
+    <li><strong>Eval confirmation phase</strong> at eval step: only then evaluate stop gates.</li>
+    <li>If gates pass, write early-stop flag and end training gracefully after current step.</li>
+    <li>Export still runs for early-stop runs (final + best artifacts are preserved).</li>
+  </ol>
+
+  <h2>Stop Gates (all required)</h2>
+  <ul>
+    <li>Minimum eval points reached.</li>
+    <li>Minimum completed step ratio reached.</li>
+    <li>Candidate state persisted at least one eval interval.</li>
+    <li>Eval-window relative improvement below threshold.</li>
+    <li>Eval-window volatility ratio below threshold.</li>
+  </ul>
+
+  <h2>Default Parameters</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Default</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>auto_early_stop</code></td>
+        <td>false</td>
+        <td>Enable hybrid early-stop.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_monitor_interval</code></td>
+        <td>200</td>
+        <td>Fast monitor cadence in train steps.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_decision_points</code></td>
+        <td>10</td>
+        <td>Rolling window size for both monitor and eval decisions.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_min_eval_points</code></td>
+        <td>6</td>
+        <td>Minimum eval points before stop can be confirmed.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_min_step_ratio</code></td>
+        <td>0.25</td>
+        <td>Minimum fraction of max steps that must complete first.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_monitor_min_relative_improvement</code></td>
+        <td>0.0015</td>
+        <td>Monitor-window minimum improvement to avoid candidate state.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_eval_min_relative_improvement</code></td>
+        <td>0.003</td>
+        <td>Eval-window minimum improvement to avoid confirmed stop.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_max_volatility_ratio</code></td>
+        <td>0.01</td>
+        <td>Maximum normalized eval volatility allowed for stop.</td>
+      </tr>
+      <tr>
+        <td><code>early_stop_ema_alpha</code></td>
+        <td>0.1</td>
+        <td>EMA smoothing factor for monitor trend.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Recorded Outputs</h2>
+  <ul>
+    <li><code>metadata.json</code> includes <code>early_stop</code> diagnostics and trigger reason.</li>
+    <li>Comparison summary includes <code>stopped_early</code> and <code>early_stop_step</code>.</li>
+    <li>Status updates expose candidate/trigger details for UI visibility.</li>
+  </ul>
+
+  <div class="note">
+    Recommendation: keep <code>early_stop_decision_points=10</code> for stable trend assessment.
+    Smaller windows can react faster but are more sensitive to noise.
+  </div>
+</body>
+</html>

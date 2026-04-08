@@ -99,6 +99,9 @@ def build_summary(project_id: str, run_id: str, run_dir: Path, engine: str = "gs
     best_splat = metadata.get("best_splat") if isinstance(metadata.get("best_splat"), dict) else {}
     best_splat_step = best_splat.get("step") if isinstance(best_splat.get("step"), (int, float)) else None
     best_splat_loss = best_splat.get("loss") if isinstance(best_splat.get("loss"), (int, float)) else None
+    early_stop = metadata.get("early_stop") if isinstance(metadata.get("early_stop"), dict) else {}
+    early_stop_triggered = bool(early_stop.get("triggered"))
+    early_stop_step = early_stop.get("trigger_step") if isinstance(early_stop.get("trigger_step"), (int, float)) else None
 
     return {
         "project_id": project_id,
@@ -117,6 +120,8 @@ def build_summary(project_id: str, run_id: str, run_dir: Path, engine: str = "gs
             "total_time_seconds": total_time_seconds,
             "best_splat_step": int(best_splat_step) if isinstance(best_splat_step, (int, float)) else None,
             "best_splat_loss": float(best_splat_loss) if isinstance(best_splat_loss, (int, float)) else None,
+            "stopped_early": early_stop_triggered,
+            "early_stop_step": int(early_stop_step) if isinstance(early_stop_step, (int, float)) else None,
         },
         "tuning": {
             "initial": first_eval.get("tuning_params") if isinstance(first_eval, dict) and isinstance(first_eval.get("tuning_params"), dict) else {},
@@ -146,6 +151,7 @@ def build_summary(project_id: str, run_id: str, run_dir: Path, engine: str = "gs
         "eval_time_series": eval_time_series,
         "preview_url": None,
         "eval_points": len(eval_history),
+        "early_stop": early_stop if isinstance(early_stop, dict) and early_stop else None,
     }
 
 

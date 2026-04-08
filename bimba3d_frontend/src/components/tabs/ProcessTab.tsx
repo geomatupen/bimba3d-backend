@@ -188,6 +188,15 @@ const getDefaultProcessConfig = () => ({
   logInterval: 100,
   splatInterval: 2500,
   bestSplatInterval: 100,
+  auto_early_stop: false,
+  earlyStopMonitorInterval: 200,
+  earlyStopDecisionPoints: 10,
+  earlyStopMinEvalPoints: 6,
+  earlyStopMinStepRatio: 0.25,
+  earlyStopMonitorMinRelativeImprovement: 0.0015,
+  earlyStopEvalMinRelativeImprovement: 0.003,
+  earlyStopMaxVolatilityRatio: 0.01,
+  earlyStopEmaAlpha: 0.1,
   pngInterval: 50,
   evalInterval: 1000,
   saveInterval: 2500,
@@ -279,6 +288,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
   const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? 2500);
   const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfg.best_splat_interval ?? 100);
+  const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? false);
+  const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfg.early_stop_monitor_interval ?? 200);
+  const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfg.early_stop_decision_points ?? 10);
+  const [earlyStopMinEvalPoints, setEarlyStopMinEvalPoints] = useState<number>(cfg.earlyStopMinEvalPoints ?? cfg.early_stop_min_eval_points ?? 6);
+  const [earlyStopMinStepRatio, setEarlyStopMinStepRatio] = useState<number>(cfg.earlyStopMinStepRatio ?? cfg.early_stop_min_step_ratio ?? 0.25);
+  const [earlyStopMonitorMinRelativeImprovement, setEarlyStopMonitorMinRelativeImprovement] = useState<number>(cfg.earlyStopMonitorMinRelativeImprovement ?? cfg.early_stop_monitor_min_relative_improvement ?? 0.0015);
+  const [earlyStopEvalMinRelativeImprovement, setEarlyStopEvalMinRelativeImprovement] = useState<number>(cfg.earlyStopEvalMinRelativeImprovement ?? cfg.early_stop_eval_min_relative_improvement ?? 0.003);
+  const [earlyStopMaxVolatilityRatio, setEarlyStopMaxVolatilityRatio] = useState<number>(cfg.earlyStopMaxVolatilityRatio ?? cfg.early_stop_max_volatility_ratio ?? 0.01);
+  const [earlyStopEmaAlpha, setEarlyStopEmaAlpha] = useState<number>(cfg.earlyStopEmaAlpha ?? cfg.early_stop_ema_alpha ?? 0.1);
   const [pngInterval, setPngInterval] = useState<number>(cfg.pngInterval ?? 50);
   const [evalInterval, setEvalInterval] = useState<number>(cfg.evalInterval ?? 1000);
   const [saveInterval, setSaveInterval] = useState<number>(cfg.saveInterval ?? 2500);
@@ -368,6 +386,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     logInterval: 'How often (in steps) to print consolidated training snapshots in worker logs. Lower values are more verbose. [custom]',
     splatInterval: 'How often (in steps) to export intermediate .splat/.ply files during training. [original]',
     bestSplatInterval: 'How often (in steps) to evaluate and update best.splat using measured training loss. Final export cadence remains controlled by Splat export interval. [custom]',
+    auto_early_stop: 'Enable hybrid early stop: monitor trend every monitor interval and confirm plateau only at eval steps. [custom]',
+    earlyStopMonitorInterval: 'Cadence for fast EMA trend checks between eval passes. These checks only mark candidate status; they do not stop training directly. [custom]',
+    earlyStopDecisionPoints: 'Window size (points) used for both monitor trend and eval confirmation. Recommended 10 for stable decisions. [custom]',
+    earlyStopMinEvalPoints: 'Minimum number of eval points required before early-stop confirmation is allowed. [custom]',
+    earlyStopMinStepRatio: 'Minimum fraction of max steps that must be completed before early-stop confirmation is allowed. [custom]',
+    earlyStopMonitorMinRelativeImprovement: 'Minimum relative improvement required over monitor window to avoid candidate plateau state. [custom]',
+    earlyStopEvalMinRelativeImprovement: 'Minimum relative improvement required over eval window to avoid confirmed plateau stop. [custom]',
+    earlyStopMaxVolatilityRatio: 'Maximum normalized volatility allowed in eval window for plateau confirmation. [custom]',
+    earlyStopEmaAlpha: 'EMA smoothing factor for monitor loss trend (0-1). Higher values react faster, lower values are smoother. [custom]',
     pngInterval: 'Deprecated for gsplat: previews are generated on eval steps. Use eval interval to control preview cadence.',
     evalInterval: 'How often to run eval passes + metrics collection. Preview images are generated on each eval step. This value is configurable from frontend in both modes. [original]',
     saveInterval: 'Checkpoint frequency for gsplat. This value is configurable from frontend. [original]',
@@ -502,6 +529,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setLogInterval(defaults.logInterval ?? 100);
     setSplatInterval(defaults.splatInterval);
     setBestSplatInterval(defaults.bestSplatInterval ?? 100);
+    setAutoEarlyStop(defaults.auto_early_stop ?? false);
+    setEarlyStopMonitorInterval(defaults.earlyStopMonitorInterval ?? 200);
+    setEarlyStopDecisionPoints(defaults.earlyStopDecisionPoints ?? 10);
+    setEarlyStopMinEvalPoints(defaults.earlyStopMinEvalPoints ?? 6);
+    setEarlyStopMinStepRatio(defaults.earlyStopMinStepRatio ?? 0.25);
+    setEarlyStopMonitorMinRelativeImprovement(defaults.earlyStopMonitorMinRelativeImprovement ?? 0.0015);
+    setEarlyStopEvalMinRelativeImprovement(defaults.earlyStopEvalMinRelativeImprovement ?? 0.003);
+    setEarlyStopMaxVolatilityRatio(defaults.earlyStopMaxVolatilityRatio ?? 0.01);
+    setEarlyStopEmaAlpha(defaults.earlyStopEmaAlpha ?? 0.1);
     setPngInterval(defaults.pngInterval);
     setEvalInterval(defaults.evalInterval);
     setSaveInterval(defaults.saveInterval);
@@ -562,6 +598,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (typeof resolved.log_interval === "number") setLogInterval(resolved.log_interval);
       if (typeof resolved.splat_export_interval === "number") setSplatInterval(resolved.splat_export_interval);
       if (typeof resolved.best_splat_interval === "number") setBestSplatInterval(resolved.best_splat_interval);
+      if (typeof resolved.auto_early_stop === "boolean") setAutoEarlyStop(resolved.auto_early_stop);
+      if (typeof resolved.early_stop_monitor_interval === "number") setEarlyStopMonitorInterval(resolved.early_stop_monitor_interval);
+      if (typeof resolved.early_stop_decision_points === "number") setEarlyStopDecisionPoints(resolved.early_stop_decision_points);
+      if (typeof resolved.early_stop_min_eval_points === "number") setEarlyStopMinEvalPoints(resolved.early_stop_min_eval_points);
+      if (typeof resolved.early_stop_min_step_ratio === "number") setEarlyStopMinStepRatio(resolved.early_stop_min_step_ratio);
+      if (typeof resolved.early_stop_monitor_min_relative_improvement === "number") setEarlyStopMonitorMinRelativeImprovement(resolved.early_stop_monitor_min_relative_improvement);
+      if (typeof resolved.early_stop_eval_min_relative_improvement === "number") setEarlyStopEvalMinRelativeImprovement(resolved.early_stop_eval_min_relative_improvement);
+      if (typeof resolved.early_stop_max_volatility_ratio === "number") setEarlyStopMaxVolatilityRatio(resolved.early_stop_max_volatility_ratio);
+      if (typeof resolved.early_stop_ema_alpha === "number") setEarlyStopEmaAlpha(resolved.early_stop_ema_alpha);
       if (typeof resolved.eval_interval === "number") setEvalInterval(resolved.eval_interval);
       if (typeof resolved.save_interval === "number") setSaveInterval(resolved.save_interval);
       if (typeof resolved.densify_from_iter === "number") setDensifyFromIter(resolved.densify_from_iter);
@@ -612,6 +657,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     if (typeof normalized.log_interval !== "number" && typeof raw.logInterval === "number") normalized.log_interval = raw.logInterval;
     if (typeof normalized.splat_export_interval !== "number" && typeof raw.splatInterval === "number") normalized.splat_export_interval = raw.splatInterval;
     if (typeof normalized.best_splat_interval !== "number" && typeof raw.bestSplatInterval === "number") normalized.best_splat_interval = raw.bestSplatInterval;
+    if (typeof normalized.auto_early_stop !== "boolean" && typeof raw.auto_early_stop === "boolean") normalized.auto_early_stop = raw.auto_early_stop;
+    if (typeof normalized.early_stop_monitor_interval !== "number" && typeof raw.earlyStopMonitorInterval === "number") normalized.early_stop_monitor_interval = raw.earlyStopMonitorInterval;
+    if (typeof normalized.early_stop_decision_points !== "number" && typeof raw.earlyStopDecisionPoints === "number") normalized.early_stop_decision_points = raw.earlyStopDecisionPoints;
+    if (typeof normalized.early_stop_min_eval_points !== "number" && typeof raw.earlyStopMinEvalPoints === "number") normalized.early_stop_min_eval_points = raw.earlyStopMinEvalPoints;
+    if (typeof normalized.early_stop_min_step_ratio !== "number" && typeof raw.earlyStopMinStepRatio === "number") normalized.early_stop_min_step_ratio = raw.earlyStopMinStepRatio;
+    if (typeof normalized.early_stop_monitor_min_relative_improvement !== "number" && typeof raw.earlyStopMonitorMinRelativeImprovement === "number") normalized.early_stop_monitor_min_relative_improvement = raw.earlyStopMonitorMinRelativeImprovement;
+    if (typeof normalized.early_stop_eval_min_relative_improvement !== "number" && typeof raw.earlyStopEvalMinRelativeImprovement === "number") normalized.early_stop_eval_min_relative_improvement = raw.earlyStopEvalMinRelativeImprovement;
+    if (typeof normalized.early_stop_max_volatility_ratio !== "number" && typeof raw.earlyStopMaxVolatilityRatio === "number") normalized.early_stop_max_volatility_ratio = raw.earlyStopMaxVolatilityRatio;
+    if (typeof normalized.early_stop_ema_alpha !== "number" && typeof raw.earlyStopEmaAlpha === "number") normalized.early_stop_ema_alpha = raw.earlyStopEmaAlpha;
     if (typeof normalized.eval_interval !== "number" && typeof raw.evalInterval === "number") normalized.eval_interval = raw.evalInterval;
     if (typeof normalized.save_interval !== "number" && typeof raw.saveInterval === "number") normalized.save_interval = raw.saveInterval;
     if (typeof normalized.densify_from_iter !== "number" && typeof raw.densifyFromIter === "number") normalized.densify_from_iter = raw.densifyFromIter;
@@ -663,6 +717,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      auto_early_stop: autoEarlyStop,
+      early_stop_monitor_interval: earlyStopMonitorInterval,
+      early_stop_decision_points: earlyStopDecisionPoints,
+      early_stop_min_eval_points: earlyStopMinEvalPoints,
+      early_stop_min_step_ratio: earlyStopMinStepRatio,
+      early_stop_monitor_min_relative_improvement: earlyStopMonitorMinRelativeImprovement,
+      early_stop_eval_min_relative_improvement: earlyStopEvalMinRelativeImprovement,
+      early_stop_max_volatility_ratio: earlyStopMaxVolatilityRatio,
+      early_stop_ema_alpha: earlyStopEmaAlpha,
       png_export_interval: pngInterval,
       eval_interval: evalInterval,
       save_interval: saveInterval,
@@ -678,7 +741,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2102,6 +2165,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         log_interval: logInterval,
         splat_export_interval: splatInterval,
         best_splat_interval: bestSplatInterval,
+        auto_early_stop: autoEarlyStop,
+        early_stop_monitor_interval: earlyStopMonitorInterval,
+        early_stop_decision_points: earlyStopDecisionPoints,
+        early_stop_min_eval_points: earlyStopMinEvalPoints,
+        early_stop_min_step_ratio: earlyStopMinStepRatio,
+        early_stop_monitor_min_relative_improvement: earlyStopMonitorMinRelativeImprovement,
+        early_stop_eval_min_relative_improvement: earlyStopEvalMinRelativeImprovement,
+        early_stop_max_volatility_ratio: earlyStopMaxVolatilityRatio,
+        early_stop_ema_alpha: earlyStopEmaAlpha,
         png_export_interval: evalInterval,
         eval_interval: evalInterval,
         save_interval: saveInterval,
@@ -2225,6 +2297,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         log_interval: logInterval,
         splat_export_interval: splatInterval,
         best_splat_interval: bestSplatInterval,
+        auto_early_stop: autoEarlyStop,
+        early_stop_monitor_interval: earlyStopMonitorInterval,
+        early_stop_decision_points: earlyStopDecisionPoints,
+        early_stop_min_eval_points: earlyStopMinEvalPoints,
+        early_stop_min_step_ratio: earlyStopMinStepRatio,
+        early_stop_monitor_min_relative_improvement: earlyStopMonitorMinRelativeImprovement,
+        early_stop_eval_min_relative_improvement: earlyStopEvalMinRelativeImprovement,
+        early_stop_max_volatility_ratio: earlyStopMaxVolatilityRatio,
+        early_stop_ema_alpha: earlyStopEmaAlpha,
         png_export_interval: evalInterval,
         eval_interval: evalInterval,
         save_interval: saveInterval,
@@ -2386,6 +2467,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      auto_early_stop: autoEarlyStop,
+      early_stop_monitor_interval: earlyStopMonitorInterval,
+      early_stop_decision_points: earlyStopDecisionPoints,
+      early_stop_min_eval_points: earlyStopMinEvalPoints,
+      early_stop_min_step_ratio: earlyStopMinStepRatio,
+      early_stop_monitor_min_relative_improvement: earlyStopMonitorMinRelativeImprovement,
+      early_stop_eval_min_relative_improvement: earlyStopEvalMinRelativeImprovement,
+      early_stop_max_volatility_ratio: earlyStopMaxVolatilityRatio,
+      early_stop_ema_alpha: earlyStopEmaAlpha,
       png_export_interval: evalInterval,
       eval_interval: evalInterval,
       save_interval: saveInterval,
@@ -2420,6 +2510,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      auto_early_stop: autoEarlyStop,
+      early_stop_monitor_interval: earlyStopMonitorInterval,
+      early_stop_decision_points: earlyStopDecisionPoints,
+      early_stop_min_eval_points: earlyStopMinEvalPoints,
+      early_stop_min_step_ratio: earlyStopMinStepRatio,
+      early_stop_monitor_min_relative_improvement: earlyStopMonitorMinRelativeImprovement,
+      early_stop_eval_min_relative_improvement: earlyStopEvalMinRelativeImprovement,
+      early_stop_max_volatility_ratio: earlyStopMaxVolatilityRatio,
+      early_stop_ema_alpha: earlyStopEmaAlpha,
       png_export_interval: pngInterval,
       eval_interval: evalInterval,
       save_interval: saveInterval,
@@ -2578,6 +2677,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           log_interval: defaults.logInterval,
           splat_export_interval: defaults.splatInterval,
           best_splat_interval: defaults.bestSplatInterval,
+          auto_early_stop: defaults.auto_early_stop,
+          early_stop_monitor_interval: defaults.earlyStopMonitorInterval,
+          early_stop_decision_points: defaults.earlyStopDecisionPoints,
+          early_stop_min_eval_points: defaults.earlyStopMinEvalPoints,
+          early_stop_min_step_ratio: defaults.earlyStopMinStepRatio,
+          early_stop_monitor_min_relative_improvement: defaults.earlyStopMonitorMinRelativeImprovement,
+          early_stop_eval_min_relative_improvement: defaults.earlyStopEvalMinRelativeImprovement,
+          early_stop_max_volatility_ratio: defaults.earlyStopMaxVolatilityRatio,
+          early_stop_ema_alpha: defaults.earlyStopEmaAlpha,
           png_export_interval: defaults.evalInterval,
           eval_interval: defaults.evalInterval,
           save_interval: defaults.saveInterval,
@@ -3952,6 +4060,139 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                   step={50}
                                 />
                                 </div>
+                                <div className="sm:col-span-2 mt-1 rounded-md border border-slate-200 bg-white p-2">
+                                  <label className="flex items-center justify-between text-[11px] font-medium text-slate-700 mb-1">
+                                    <span>Enable Hybrid Early Stop</span>
+                                    <button onClick={() => setSelectedInfoKey("auto_early_stop")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                  </label>
+                                  <div className="flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={autoEarlyStop}
+                                      onChange={(e) => setAutoEarlyStop(e.target.checked)}
+                                      className="w-4 h-4"
+                                    />
+                                    <span className="text-[11px] text-slate-600">Monitor every N steps, confirm stop at eval points only</span>
+                                  </div>
+                                </div>
+                                {autoEarlyStop && (
+                                  <>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Monitor interval</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopMonitorInterval")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopMonitorInterval}
+                                        onChange={(e) => setEarlyStopMonitorInterval(parseInt(e.target.value) || 200)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={10}
+                                        step={10}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Decision points</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopDecisionPoints")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopDecisionPoints}
+                                        onChange={(e) => setEarlyStopDecisionPoints(parseInt(e.target.value) || 10)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={3}
+                                        step={1}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Min eval points</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopMinEvalPoints")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopMinEvalPoints}
+                                        onChange={(e) => setEarlyStopMinEvalPoints(parseInt(e.target.value) || 6)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={2}
+                                        step={1}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Min step ratio</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopMinStepRatio")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopMinStepRatio}
+                                        onChange={(e) => setEarlyStopMinStepRatio(parseFloat(e.target.value) || 0.25)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={0}
+                                        max={1}
+                                        step={0.05}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Monitor min rel. improve</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopMonitorMinRelativeImprovement")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopMonitorMinRelativeImprovement}
+                                        onChange={(e) => setEarlyStopMonitorMinRelativeImprovement(parseFloat(e.target.value) || 0.0015)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={0}
+                                        step={0.0001}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Eval min rel. improve</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopEvalMinRelativeImprovement")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopEvalMinRelativeImprovement}
+                                        onChange={(e) => setEarlyStopEvalMinRelativeImprovement(parseFloat(e.target.value) || 0.003)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={0}
+                                        step={0.0001}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>Max volatility ratio</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopMaxVolatilityRatio")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopMaxVolatilityRatio}
+                                        onChange={(e) => setEarlyStopMaxVolatilityRatio(parseFloat(e.target.value) || 0.01)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={0}
+                                        step={0.001}
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>EMA alpha</span>
+                                        <button onClick={() => setSelectedInfoKey("earlyStopEmaAlpha")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={earlyStopEmaAlpha}
+                                        onChange={(e) => setEarlyStopEmaAlpha(parseFloat(e.target.value) || 0.1)}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                        min={0.001}
+                                        max={1}
+                                        step={0.01}
+                                      />
+                                    </div>
+                                  </>
+                                )}
                               </>
                               )}
                             </div>

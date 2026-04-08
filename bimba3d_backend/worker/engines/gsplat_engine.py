@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -202,6 +203,39 @@ def run_training(
         log_interval = max(1, int(log_interval))
     except Exception:
         log_interval = 100
+    auto_early_stop = bool(p.get("auto_early_stop", False))
+    try:
+        early_stop_monitor_interval = max(1, int(p.get("early_stop_monitor_interval", 200)))
+    except Exception:
+        early_stop_monitor_interval = 200
+    try:
+        early_stop_decision_points = max(3, int(p.get("early_stop_decision_points", 10)))
+    except Exception:
+        early_stop_decision_points = 10
+    try:
+        early_stop_min_eval_points = max(2, int(p.get("early_stop_min_eval_points", 6)))
+    except Exception:
+        early_stop_min_eval_points = 6
+    try:
+        early_stop_min_step_ratio = max(0.0, min(1.0, float(p.get("early_stop_min_step_ratio", 0.25))))
+    except Exception:
+        early_stop_min_step_ratio = 0.25
+    try:
+        early_stop_monitor_min_rel_improvement = max(0.0, float(p.get("early_stop_monitor_min_relative_improvement", 0.0015)))
+    except Exception:
+        early_stop_monitor_min_rel_improvement = 0.0015
+    try:
+        early_stop_eval_min_rel_improvement = max(0.0, float(p.get("early_stop_eval_min_relative_improvement", 0.003)))
+    except Exception:
+        early_stop_eval_min_rel_improvement = 0.003
+    try:
+        early_stop_max_volatility_ratio = max(0.0, float(p.get("early_stop_max_volatility_ratio", 0.01)))
+    except Exception:
+        early_stop_max_volatility_ratio = 0.01
+    try:
+        early_stop_ema_alpha = max(0.001, min(1.0, float(p.get("early_stop_ema_alpha", 0.1))))
+    except Exception:
+        early_stop_ema_alpha = 0.1
     project_dir = Path(image_dir).parent
     stop_flag = project_dir / "stop_requested"
     gsplat_start = time.time()
@@ -224,6 +258,20 @@ def run_training(
         "elapsed_by_step": {},
         "loss_by_step": {},
         "best_splat": {"step": None, "loss": None, "path": None},
+        "early_stop": {
+            "enabled": bool(auto_early_stop),
+            "candidate": False,
+            "candidate_since_step": None,
+            "triggered": False,
+            "trigger_step": None,
+            "reason": None,
+            "ema_loss": None,
+            "monitor_points": [],
+            "eval_points": [],
+            "monitor_relative_improvement": None,
+            "eval_relative_improvement": None,
+            "eval_volatility_ratio": None,
+        },
     }
 
     def _clamp_int(value: int, low: int, high: int) -> int:
@@ -712,6 +760,96 @@ def run_training(
     def stop_checker() -> bool:
         return stop_flag.exists()
 
+    def _evaluate_early_stop_on_eval(step: int, max_steps_local: int) -> None:
+        early_state = tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else {}
+        if not isinstance(early_state, dict) or not bool(early_state.get("enabled")):
+            return
+        if bool(early_state.get("triggered")):
+            return
+
+        loss_by_step = tuning_state.get("loss_by_step") if isinstance(tuning_state.get("loss_by_step"), dict) else {}
+        eval_loss = loss_by_step.get(int(step))
+        if not isinstance(eval_loss, (int, float)):
+            return
+
+        eval_points = early_state.get("eval_points") if isinstance(early_state.get("eval_points"), list) else []
+        eval_points.append({"step": int(step), "loss": float(eval_loss)})
+        if len(eval_points) > 200:
+            del eval_points[:-200]
+        early_state["eval_points"] = eval_points
+
+        required_points = max(int(early_stop_min_eval_points), int(early_stop_decision_points))
+        if len(eval_points) < required_points:
+            tuning_state["early_stop"] = early_state
+            return
+
+        min_step_gate = int(max_steps_local * float(early_stop_min_step_ratio))
+        if int(step) < min_step_gate:
+            tuning_state["early_stop"] = early_state
+            return
+
+        candidate_since = early_state.get("candidate_since_step")
+        if not isinstance(candidate_since, int):
+            tuning_state["early_stop"] = early_state
+            return
+        if int(step) - int(candidate_since) < int(p.get("eval_interval") or 0):
+            tuning_state["early_stop"] = early_state
+            return
+
+        window = eval_points[-int(early_stop_decision_points):]
+        losses = [float(item.get("loss")) for item in window if isinstance(item.get("loss"), (int, float))]
+        if len(losses) < int(early_stop_decision_points):
+            tuning_state["early_stop"] = early_state
+            return
+
+        first_loss = losses[0]
+        last_loss = losses[-1]
+        denom = max(abs(first_loss), 1e-8)
+        rel_improve = (first_loss - last_loss) / denom
+
+        mean_loss = sum(losses) / max(len(losses), 1)
+        std_loss = statistics.pstdev(losses) if len(losses) > 1 else 0.0
+        volatility_ratio = std_loss / max(abs(mean_loss), 1e-8)
+
+        early_state["eval_relative_improvement"] = float(rel_improve)
+        early_state["eval_volatility_ratio"] = float(volatility_ratio)
+
+        should_stop = (
+            float(rel_improve) < float(early_stop_eval_min_rel_improvement)
+            and float(volatility_ratio) <= float(early_stop_max_volatility_ratio)
+        )
+
+        if should_stop:
+            early_state["triggered"] = True
+            early_state["trigger_step"] = int(step)
+            early_state["reason"] = (
+                f"plateau_confirmed rel_improve={rel_improve:.6f} "
+                f"volatility={volatility_ratio:.6f} points={len(losses)}"
+            )
+            stop_flag.write_text("early_stop")
+            update_status(
+                project_dir,
+                "stopping",
+                progress=60 + int((float(step) / max(float(max_steps_local), 1.0)) * 35),
+                stage="training",
+                stage_progress=int((float(step) / max(float(max_steps_local), 1.0)) * 100),
+                message=(
+                    "🛑 Early stop candidate confirmed on eval; finishing current step and exporting outputs "
+                    f"(step {int(step)})."
+                ),
+                early_stop={
+                    "candidate": bool(early_state.get("candidate")),
+                    "candidate_since_step": early_state.get("candidate_since_step"),
+                    "triggered": True,
+                    "trigger_step": int(step),
+                    "reason": early_state.get("reason"),
+                    "eval_relative_improvement": float(rel_improve),
+                    "eval_volatility_ratio": float(volatility_ratio),
+                },
+            )
+
+        tuning_state["early_stop"] = early_state
+
     def progress_callback(
         step: int,
         max_steps_local: int | None = None,
@@ -748,6 +886,38 @@ def run_training(
         loss_by_step[int(step)] = float(loss)
         tuning_state["elapsed_by_step"] = elapsed_by_step
         tuning_state["loss_by_step"] = loss_by_step
+
+        early_state = tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else {}
+        if isinstance(early_state, dict) and bool(early_state.get("enabled")) and int(step) % int(early_stop_monitor_interval) == 0:
+            prev_ema = early_state.get("ema_loss")
+            if isinstance(prev_ema, (int, float)):
+                ema_loss = float(early_stop_ema_alpha) * float(loss) + (1.0 - float(early_stop_ema_alpha)) * float(prev_ema)
+            else:
+                ema_loss = float(loss)
+            early_state["ema_loss"] = float(ema_loss)
+
+            monitor_points = early_state.get("monitor_points") if isinstance(early_state.get("monitor_points"), list) else []
+            monitor_points.append({"step": int(step), "ema_loss": float(ema_loss)})
+            if len(monitor_points) > 200:
+                del monitor_points[:-200]
+            early_state["monitor_points"] = monitor_points
+
+            if len(monitor_points) >= int(early_stop_decision_points):
+                window = monitor_points[-int(early_stop_decision_points):]
+                first_ema = float(window[0].get("ema_loss"))
+                last_ema = float(window[-1].get("ema_loss"))
+                monitor_rel_improve = (first_ema - last_ema) / max(abs(first_ema), 1e-8)
+                early_state["monitor_relative_improvement"] = float(monitor_rel_improve)
+
+                if float(monitor_rel_improve) < float(early_stop_monitor_min_rel_improvement):
+                    if not bool(early_state.get("candidate")):
+                        early_state["candidate"] = True
+                        early_state["candidate_since_step"] = int(step)
+                else:
+                    early_state["candidate"] = False
+                    early_state["candidate_since_step"] = None
+
+            tuning_state["early_stop"] = early_state
 
         last_step = tuning_state.get("last_callback_step")
         last_elapsed = tuning_state.get("last_callback_elapsed")
@@ -786,6 +956,20 @@ def run_training(
             stage_progress=int(progress_fraction * 100),
             message=message,
             timing=timing,
+            early_stop=(
+                {
+                    "candidate": bool(early_state.get("candidate")),
+                    "candidate_since_step": early_state.get("candidate_since_step"),
+                    "triggered": bool(early_state.get("triggered")),
+                    "trigger_step": early_state.get("trigger_step"),
+                    "reason": early_state.get("reason"),
+                    "monitor_relative_improvement": early_state.get("monitor_relative_improvement"),
+                    "eval_relative_improvement": early_state.get("eval_relative_improvement"),
+                    "eval_volatility_ratio": early_state.get("eval_volatility_ratio"),
+                }
+                if isinstance(early_state, dict) and bool(early_state.get("enabled"))
+                else None
+            ),
         )
         write_metrics(project_dir, {
             "step": step,
@@ -914,6 +1098,7 @@ def run_training(
 
     def eval_callback(step: int) -> None:
         materialize_eval_previews(engine_output_dir, eval_step=step)
+        _evaluate_early_stop_on_eval(int(step), int(max_steps))
 
     def checkpoint_callback(step: int, checkpoint_path: str) -> None:
         if step % best_splat_interval == 0 or step == max_steps:
@@ -1035,21 +1220,29 @@ def run_training(
     runner_ref["runner"] = runner
     stop_reason = runner.train()
     gsplat_end = time.time()
+    early_stop_state = tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else {}
+    early_stop_triggered = bool(isinstance(early_stop_state, dict) and early_stop_state.get("triggered"))
 
     if stop_reason is not None or stop_flag.exists():
-        logger.info("Training stopped by user, skipping export and completion status.")
-        update_status(
-            project_dir,
-            "stopped",
-            progress=60,
-            stage="training",
-            message="⏸️ Training stopped by user.",
-            stopped_stage="training",
-            stopped_step=stop_reason if isinstance(stop_reason, int) else None,
+        if not early_stop_triggered:
+            logger.info("Training stopped by user, skipping export and completion status.")
+            update_status(
+                project_dir,
+                "stopped",
+                progress=60,
+                stage="training",
+                message="⏸️ Training stopped by user.",
+                stopped_stage="training",
+                stopped_step=stop_reason if isinstance(stop_reason, int) else None,
+            )
+            if stop_flag.exists():
+                stop_flag.unlink()
+            return stop_reason if isinstance(stop_reason, int) else 1
+
+        logger.info(
+            "Early stop confirmed at step %s; continuing to export artifacts.",
+            early_stop_state.get("trigger_step") if isinstance(early_stop_state, dict) else None,
         )
-        if stop_flag.exists():
-            stop_flag.unlink()
-        return stop_reason if isinstance(stop_reason, int) else 1
 
     logger.info("Training complete, exporting final checkpoint...")
     update_status(
@@ -1092,7 +1285,7 @@ def run_training(
         latest = ckpts[-1]
         logger.info("Exporting checkpoint: %s", latest)
         update_status(project_dir, "processing", stage="export", stage_progress=40, message="📝 Exporting .splat file...")
-        if stop_flag.exists():
+        if stop_flag.exists() and not early_stop_triggered:
             update_status(project_dir, "stopped", progress=0, stop_requested=True, stage="export", message="⏸️ Processing stopped by user before export.", stopped_stage="export")
             try:
                 stop_flag.unlink()
@@ -1174,6 +1367,7 @@ def run_training(
         metadata["mode"] = mode
         metadata["tune_scope"] = tune_scope if mode == "modified" else None
         metadata["best_splat"] = tuning_state.get("best_splat")
+        metadata["early_stop"] = tuning_state.get("early_stop")
         write_json_atomic(metadata_path, metadata)
 
         loss_milestones: dict[str, float] = {}
@@ -1245,6 +1439,15 @@ def run_training(
                     if isinstance(tuning_state.get("best_splat"), dict)
                     else None
                 ),
+                "stopped_early": bool(
+                    isinstance(tuning_state.get("early_stop"), dict)
+                    and (tuning_state.get("early_stop") or {}).get("triggered")
+                ),
+                "early_stop_step": (
+                    (tuning_state.get("early_stop") or {}).get("trigger_step")
+                    if isinstance(tuning_state.get("early_stop"), dict)
+                    else None
+                ),
             },
             "tuning": {
                 "initial": (eval_history[0].get("tuning_params") if isinstance(eval_history[0], dict) else {}) or {},
@@ -1274,6 +1477,7 @@ def run_training(
             "eval_time_series": eval_time_series,
             "preview_url": None,
             "eval_points": len(eval_history),
+            "early_stop": tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else None,
         }
 
         run_artifact_root = project_dir

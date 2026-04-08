@@ -1410,6 +1410,15 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         params_payload.setdefault("save_interval", 2500)
         params_payload.setdefault("splat_export_interval", 2500)
         params_payload.setdefault("best_splat_interval", 100)
+        params_payload.setdefault("auto_early_stop", False)
+        params_payload.setdefault("early_stop_monitor_interval", 200)
+        params_payload.setdefault("early_stop_decision_points", 10)
+        params_payload.setdefault("early_stop_min_eval_points", 6)
+        params_payload.setdefault("early_stop_min_step_ratio", 0.25)
+        params_payload.setdefault("early_stop_monitor_min_relative_improvement", 0.0015)
+        params_payload.setdefault("early_stop_eval_min_relative_improvement", 0.003)
+        params_payload.setdefault("early_stop_max_volatility_ratio", 0.01)
+        params_payload.setdefault("early_stop_ema_alpha", 0.1)
         params_payload.setdefault("tune_end_step", 15000)
         params_payload.setdefault("tune_interval", 100)
         params_payload.setdefault("batch_size", 1)
@@ -4043,11 +4052,18 @@ def get_experiment_summary(
             if not isinstance(comparison_metadata, dict):
                 comparison_metadata = _read_json_if_exists(run_dir / "outputs" / "engines" / "gsplat" / "metadata.json")
             best_splat = comparison_metadata.get("best_splat") if isinstance(comparison_metadata, dict) and isinstance(comparison_metadata.get("best_splat"), dict) else {}
+            early_stop = comparison_metadata.get("early_stop") if isinstance(comparison_metadata, dict) and isinstance(comparison_metadata.get("early_stop"), dict) else {}
             if metrics_payload.get("best_splat_step") is None and isinstance(best_splat.get("step"), (int, float)):
                 metrics_payload["best_splat_step"] = int(best_splat.get("step"))
             if metrics_payload.get("best_splat_loss") is None and isinstance(best_splat.get("loss"), (int, float)):
                 metrics_payload["best_splat_loss"] = float(best_splat.get("loss"))
+            if metrics_payload.get("stopped_early") is None and "triggered" in early_stop:
+                metrics_payload["stopped_early"] = bool(early_stop.get("triggered"))
+            if metrics_payload.get("early_stop_step") is None and isinstance(early_stop.get("trigger_step"), (int, float)):
+                metrics_payload["early_stop_step"] = int(early_stop.get("trigger_step"))
             response_payload["metrics"] = metrics_payload
+            if response_payload.get("early_stop") is None and isinstance(early_stop, dict) and early_stop:
+                response_payload["early_stop"] = early_stop
             response_payload["preview_url"] = preview_url
             return response_payload
 
@@ -4162,10 +4178,15 @@ def get_experiment_summary(
             if metrics["num_gaussians"] is None:
                 metrics["num_gaussians"] = metadata.get("num_gaussians")
             best_splat = metadata.get("best_splat") if isinstance(metadata.get("best_splat"), dict) else {}
+            early_stop = metadata.get("early_stop") if isinstance(metadata.get("early_stop"), dict) else {}
             if metrics.get("best_splat_step") is None and isinstance(best_splat.get("step"), (int, float)):
                 metrics["best_splat_step"] = int(best_splat.get("step"))
             if metrics.get("best_splat_loss") is None and isinstance(best_splat.get("loss"), (int, float)):
                 metrics["best_splat_loss"] = float(best_splat.get("loss"))
+            if metrics.get("stopped_early") is None and "triggered" in early_stop:
+                metrics["stopped_early"] = bool(early_stop.get("triggered"))
+            if metrics.get("early_stop_step") is None and isinstance(early_stop.get("trigger_step"), (int, float)):
+                metrics["early_stop_step"] = int(early_stop.get("trigger_step"))
 
         final_tuning_params = {}
         initial_tuning_params = {}
@@ -4223,6 +4244,15 @@ def get_experiment_summary(
             "save_interval": resolved_cfg.get("save_interval"),
             "splat_export_interval": resolved_cfg.get("splat_export_interval"),
             "best_splat_interval": resolved_cfg.get("best_splat_interval"),
+            "auto_early_stop": resolved_cfg.get("auto_early_stop"),
+            "early_stop_monitor_interval": resolved_cfg.get("early_stop_monitor_interval"),
+            "early_stop_decision_points": resolved_cfg.get("early_stop_decision_points"),
+            "early_stop_min_eval_points": resolved_cfg.get("early_stop_min_eval_points"),
+            "early_stop_min_step_ratio": resolved_cfg.get("early_stop_min_step_ratio"),
+            "early_stop_monitor_min_relative_improvement": resolved_cfg.get("early_stop_monitor_min_relative_improvement"),
+            "early_stop_eval_min_relative_improvement": resolved_cfg.get("early_stop_eval_min_relative_improvement"),
+            "early_stop_max_volatility_ratio": resolved_cfg.get("early_stop_max_volatility_ratio"),
+            "early_stop_ema_alpha": resolved_cfg.get("early_stop_ema_alpha"),
             "batch_size": resolved_cfg.get("batch_size"),
         }
 
@@ -4266,6 +4296,7 @@ def get_experiment_summary(
             "eval_time_series": eval_time_series,
             "preview_url": preview_url,
             "eval_points": len(eval_history) if isinstance(eval_history, list) else 0,
+            "early_stop": metadata.get("early_stop") if isinstance(metadata, dict) else None,
         }
 
     except HTTPException:
