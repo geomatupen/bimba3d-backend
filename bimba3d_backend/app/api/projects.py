@@ -9,7 +9,8 @@ import stat
 import struct
 import ast
 import uuid
-from typing import Optional
+from typing import Optional, Any
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from PIL import Image, ExifTags
@@ -48,6 +49,31 @@ SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
 SHARED_CONFIG_FILE = "shared_config.json"
 BATCH_LINEAGE_FILE = ".batch_lineage_latest.json"
 RUN_CONFIG_HISTORY_KEEP = 5
+GSPLAT_SNAPSHOT_RE = re.compile(
+    r"\[GSPLAT SNAPSHOT\]\s+step=(?P<step>\d+)/(?:\s*)?(?P<max_steps>\d+).*?loss=(?P<loss>[0-9.eE+-]+).*?elapsed=(?P<elapsed>[0-9.eE+-]+)s.*?eta=(?P<eta>[^\s]+).*?speed=(?P<speed>[^\s]+)",
+    re.IGNORECASE,
+)
+GSPLAT_STEP_RE = re.compile(
+    r"Training step\s+(?P<step>\d+)/(?:\s*)?(?P<max_steps>\d+)\s+\(loss:\s*(?P<loss>[0-9.eE+-]+)\)",
+    re.IGNORECASE,
+)
+VAL_STEP_RE = re.compile(r"^val_step(?P<step>\d+)\.json$", re.IGNORECASE)
+BEST_SPLAT_UPDATE_RE = re.compile(
+    r"BEST_SPLAT_UPDATE\s+step=(?P<step>\d+).*?loss=(?P<loss>[0-9.eE+-]+).*?improvement=(?P<improvement>[0-9.eE+-]+|n/a)",
+    re.IGNORECASE,
+)
+EARLY_STOP_TRIGGER_RE = re.compile(
+    r"EARLY_STOP_TRIGGER\s+step=(?P<step>\d+).*?rel_improve=(?P<rel>[0-9.eE+-]+).*?volatility=(?P<vol>[0-9.eE+-]+)",
+    re.IGNORECASE,
+)
+CORE_AI_DECISION_RE = re.compile(
+    r"Core-AI adaptive decision\s+step=(?P<step>\d+)\s+action=(?P<action>[^\s]+)",
+    re.IGNORECASE,
+)
+RULE_UPDATE_RE = re.compile(
+    r"Modified rule update applied at step\s+(?P<step>\d+)",
+    re.IGNORECASE,
+)
 
 
 def _get_project_shared_config_path(project_dir: Path) -> Path:
@@ -371,6 +397,176 @@ def _wait_for_run_completion(project_id: str, run_id: str, timeout_seconds: int 
         if timeout_seconds > 0 and (time.time() - started_at) >= timeout_seconds:
             return current
         time.sleep(2)
+
+
+def _tail_text_lines(path: Path, max_lines: int) -> list[str]:
+    if not path.exists() or max_lines <= 0:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            return [line.rstrip("\n") for line in deque(handle, maxlen=max_lines)]
+    except Exception:
+        return []
+
+
+def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if "[GSPLAT SNAPSHOT]" in line:
+            match = GSPLAT_SNAPSHOT_RE.search(line)
+            if not match:
+                continue
+            timestamp = line.split(" - ", 1)[0] if " - " in line else None
+            try:
+                step = int(match.group("step"))
+                max_steps = int(match.group("max_steps"))
+                loss = float(match.group("loss"))
+            except Exception:
+                continue
+            elapsed_raw = match.group("elapsed")
+            speed_raw = match.group("speed")
+            eta_raw = match.group("eta")
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "step": step,
+                    "max_steps": max_steps,
+                    "loss": loss,
+                    "elapsed_seconds": float(elapsed_raw) if re.match(r"^[0-9.eE+-]+$", elapsed_raw or "") else None,
+                    "eta": None if str(eta_raw).lower() in {"none", "n/a"} else eta_raw,
+                    "speed": None if str(speed_raw).lower() in {"none", "n/a"} else speed_raw,
+                    "source": "snapshot",
+                }
+            )
+            continue
+
+        step_match = GSPLAT_STEP_RE.search(line)
+        if step_match:
+            timestamp = line.split(" - ", 1)[0] if " - " in line else None
+            try:
+                step = int(step_match.group("step"))
+                max_steps = int(step_match.group("max_steps"))
+                loss = float(step_match.group("loss"))
+            except Exception:
+                continue
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "step": step,
+                    "max_steps": max_steps,
+                    "loss": loss,
+                    "elapsed_seconds": None,
+                    "eta": None,
+                    "speed": None,
+                    "source": "step",
+                }
+            )
+
+    if row_limit > 0 and len(rows) > row_limit:
+        rows = rows[-row_limit:]
+    return rows
+
+
+def _extract_eval_rows(stats_dir: Path, eval_limit: int) -> list[dict[str, Any]]:
+    if not stats_dir.exists():
+        return []
+
+    rows: list[dict[str, Any]] = []
+    candidates: list[tuple[int, Path]] = []
+    for stats_file in stats_dir.glob("val_step*.json"):
+        match = VAL_STEP_RE.match(stats_file.name)
+        if not match:
+            continue
+        try:
+            step_zero = int(match.group("step"))
+        except Exception:
+            continue
+        candidates.append((step_zero, stats_file))
+
+    for step_zero, stats_file in sorted(candidates, key=lambda item: item[0]):
+        payload = _read_json_if_exists(stats_file)
+        if not isinstance(payload, dict):
+            continue
+        rows.append(
+            {
+                "step": int(step_zero + 1),
+                "psnr": payload.get("psnr"),
+                "lpips": payload.get("lpips"),
+                "ssim": payload.get("ssim"),
+                "num_gaussians": payload.get("num_GS"),
+            }
+        )
+
+    if eval_limit > 0 and len(rows) > eval_limit:
+        rows = rows[-eval_limit:]
+    return rows
+
+
+def _extract_event_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        timestamp = line.split(" - ", 1)[0] if " - " in line else None
+
+        best_match = BEST_SPLAT_UPDATE_RE.search(line)
+        if best_match:
+            step = int(best_match.group("step"))
+            loss = float(best_match.group("loss"))
+            improvement_raw = best_match.group("improvement")
+            improvement = (
+                float(improvement_raw)
+                if isinstance(improvement_raw, str) and re.match(r"^[0-9.eE+-]+$", improvement_raw)
+                else None
+            )
+            summary = (
+                f"Best splat updated at step {step:,} (loss {loss:.6f})"
+                + (f", improvement {improvement:.6f}" if improvement is not None else "")
+            )
+            rows.append({
+                "timestamp": timestamp,
+                "type": "best_splat_update",
+                "step": step,
+                "summary": summary,
+            })
+            continue
+
+        early_match = EARLY_STOP_TRIGGER_RE.search(line)
+        if early_match:
+            step = int(early_match.group("step"))
+            rel = float(early_match.group("rel"))
+            vol = float(early_match.group("vol"))
+            rows.append({
+                "timestamp": timestamp,
+                "type": "early_stop_trigger",
+                "step": step,
+                "summary": f"Early stop triggered at step {step:,} (rel {rel:.6f}, vol {vol:.6f})",
+            })
+            continue
+
+        ai_match = CORE_AI_DECISION_RE.search(line)
+        if ai_match:
+            step = int(ai_match.group("step"))
+            action = str(ai_match.group("action") or "keep")
+            rows.append({
+                "timestamp": timestamp,
+                "type": "core_ai_decision",
+                "step": step,
+                "summary": f"Core-AI decision at step {step:,}: {action}",
+            })
+            continue
+
+        rule_match = RULE_UPDATE_RE.search(line)
+        if rule_match:
+            step = int(rule_match.group("step"))
+            rows.append({
+                "timestamp": timestamp,
+                "type": "rule_update",
+                "step": step,
+                "summary": f"Rule update applied at step {step:,}",
+            })
+
+    if row_limit > 0 and len(rows) > row_limit:
+        rows = rows[-row_limit:]
+    return rows
 
 
 def _run_batch_process(
@@ -1809,6 +2005,71 @@ def get_status_endpoint(project_id: str):
     except Exception as e:
         logger.error(f"Error getting status: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get status")
+
+
+@router.get("/{project_id}/telemetry")
+def get_project_telemetry(
+    project_id: str,
+    run_id: Optional[str] = Query(default=None),
+    log_limit: int = Query(default=150, ge=20, le=500),
+    eval_limit: int = Query(default=20, ge=1, le=100),
+):
+    """Return lightweight telemetry snapshots for the Process tab modal."""
+    try:
+        project_dir = DATA_DIR / project_id
+        if not project_dir.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        project_status = status.get_status(project_id)
+        resolved_run_id = (run_id or project_status.get("current_run_id") or "").strip()
+        if not resolved_run_id:
+            return {
+                "project_id": project_id,
+                "run_id": None,
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "training_rows": [],
+                "event_rows": [],
+                "eval_rows": [],
+                "latest_eval": None,
+                "status": {
+                    "stage": project_status.get("stage"),
+                    "message": project_status.get("message"),
+                    "currentStep": project_status.get("currentStep"),
+                    "maxSteps": project_status.get("maxSteps"),
+                    "current_loss": project_status.get("current_loss"),
+                },
+            }
+
+        run_dir = project_dir / "runs" / resolved_run_id
+        run_log_path = run_dir / "processing.log"
+        stats_dir = run_dir / "outputs" / "engines" / "gsplat" / "stats"
+
+        tail_lines = _tail_text_lines(run_log_path, max_lines=log_limit)
+        training_rows = _extract_training_rows(tail_lines, row_limit=log_limit)
+        event_rows = _extract_event_rows(tail_lines, row_limit=max(10, min(100, log_limit)))
+        eval_rows = _extract_eval_rows(stats_dir, eval_limit=eval_limit)
+
+        return {
+            "project_id": project_id,
+            "run_id": resolved_run_id,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "training_rows": training_rows,
+            "event_rows": event_rows,
+            "eval_rows": eval_rows,
+            "latest_eval": eval_rows[-1] if eval_rows else None,
+            "status": {
+                "stage": project_status.get("stage"),
+                "message": project_status.get("message"),
+                "currentStep": project_status.get("currentStep"),
+                "maxSteps": project_status.get("maxSteps"),
+                "current_loss": project_status.get("current_loss"),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error getting telemetry for %s: %s", project_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to get telemetry")
 
 
 @router.post("/{project_id}/stop")

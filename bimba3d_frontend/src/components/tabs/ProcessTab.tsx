@@ -44,6 +44,49 @@ interface EngineOutputBundle {
   snapshots: SnapshotEntry[];
 }
 
+interface TelemetryTrainingRow {
+  timestamp?: string | null;
+  step?: number | null;
+  max_steps?: number | null;
+  loss?: number | null;
+  elapsed_seconds?: number | null;
+  eta?: string | null;
+  speed?: string | null;
+  source?: string | null;
+}
+
+interface TelemetryEvalRow {
+  step?: number | null;
+  psnr?: number | null;
+  lpips?: number | null;
+  ssim?: number | null;
+  num_gaussians?: number | null;
+}
+
+interface TelemetryEventRow {
+  timestamp?: string | null;
+  type?: string | null;
+  step?: number | null;
+  summary?: string | null;
+}
+
+interface TelemetryPayload {
+  project_id: string;
+  run_id?: string | null;
+  generated_at?: string;
+  training_rows?: TelemetryTrainingRow[];
+  event_rows?: TelemetryEventRow[];
+  eval_rows?: TelemetryEvalRow[];
+  latest_eval?: TelemetryEvalRow | null;
+  status?: {
+    stage?: string | null;
+    message?: string | null;
+    currentStep?: number | null;
+    maxSteps?: number | null;
+    current_loss?: number | null;
+  };
+}
+
 interface MergeReportSourceDetail {
   relative_path?: string;
   used?: boolean;
@@ -466,7 +509,6 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [stoppingMessage, setStoppingMessage] = useState<string | null>(null);
   const [trainingCurrentStep, setTrainingCurrentStep] = useState<number | undefined>(undefined);
   const [trainingMaxSteps, setTrainingMaxSteps] = useState<number | undefined>(undefined);
-  const [trainingLoss, setTrainingLoss] = useState<number | undefined>(undefined);
   const [overallProgress, setOverallProgress] = useState<number>(0);
   const [currentStage, setCurrentStage] = useState<string>("");
   const [currentStageKey, setCurrentStageKey] = useState<"docker"|"colmap"|"training"|"export"|"">("");
@@ -474,6 +516,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [batchTotal, setBatchTotal] = useState<number>(0);
   const [batchCompleted, setBatchCompleted] = useState<number>(0);
   const [batchCurrentIndex, setBatchCurrentIndex] = useState<number>(0);
+  const [showTelemetryModal, setShowTelemetryModal] = useState<boolean>(false);
+  const [telemetryLoading, setTelemetryLoading] = useState<boolean>(false);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
+  const [telemetryData, setTelemetryData] = useState<TelemetryPayload | null>(null);
   const [pipelineDone, setPipelineDone] = useState(false);
   const [projectRuns, setProjectRuns] = useState<ProjectRunInfo[]>([]);
   const [processingRunId, setProcessingRunId] = useState<string>("");
@@ -1206,13 +1252,87 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             ? status.current_run_id
             : "";
         setProcessingRunId(activeRunIdFromStatus);
-        if (activeRunIdFromStatus && selectedRunId && activeRunIdFromStatus === selectedRunId) {
+        const startupWindowActive =
+          restartPendingRef.current &&
+          startRequestAtMs > 0 &&
+          Date.now() - startRequestAtMs < 30000;
+
+        const resolvedCurrentStep =
+          typeof status.currentStep === "number"
+            ? status.currentStep
+            : (typeof status?.last_tuning?.step === "number" ? status.last_tuning.step : undefined);
+        const resolvedMaxSteps =
+          typeof status.maxSteps === "number"
+            ? status.maxSteps
+            : (typeof maxSteps === "number" ? maxSteps : undefined);
+
+        const startupStaleTerminalTraining =
+          startupWindowActive &&
+          status?.status === "processing" &&
+          status?.stage === "training" &&
+          typeof resolvedCurrentStep === "number" &&
+          typeof resolvedMaxSteps === "number" &&
+          resolvedMaxSteps > 0 &&
+          resolvedCurrentStep >= resolvedMaxSteps;
+
+        const hasFreshStartSignal =
+          status?.status === "processing" &&
+          (
+            status?.stage === "docker" ||
+            status?.stage === "queued" ||
+            status?.stage === "colmap" ||
+            status?.stage === "colmap_only" ||
+            status?.stage === "export" ||
+            (typeof resolvedCurrentStep === "number" && typeof resolvedMaxSteps === "number" && resolvedCurrentStep < resolvedMaxSteps) ||
+            (typeof status?.stage_progress === "number" && status.stage_progress < 100)
+          );
+
+        if (
+          startupWindowActive &&
+          hasFreshStartSignal &&
+          activeRunIdFromStatus &&
+          selectedRunId &&
+          activeRunIdFromStatus === selectedRunId
+        ) {
+          restartPendingRef.current = false;
           setStartRequestAtMs(0);
         }
         const suppressStoppedAtStart =
           startRequestAtMs > 0 &&
           Date.now() - startRequestAtMs < 15000 &&
           status?.current_run_id === selectedRunId;
+
+        // Immediately after requesting start/restart, ignore stale completed/idle snapshots
+        // until worker reports processing/stopping for the new run.
+        const waitingForFreshStart =
+          startRequestAtMs > 0 &&
+          Date.now() - startRequestAtMs < 15000 &&
+          (
+            (status?.status !== "processing" && status?.status !== "stopping") ||
+            startupStaleTerminalTraining
+          );
+        if (waitingForFreshStart) {
+          setProcessing(true);
+          setProcessingStatus("Starting...");
+          setOverallProgress(0);
+          setTrainingCurrentStep(undefined);
+          setTrainingMaxSteps(undefined);
+          setStageProgress(undefined);
+          setCurrentStage("");
+          setCurrentStageKey("");
+          setStageStatus({ colmap: "pending", training: "pending", export: "pending" });
+          setPipelineDone(false);
+          setWasStopped(false);
+          setStoppedStage(null);
+          setCanResume(false);
+          setIsStopping(false);
+          setStoppingMessage(null);
+          return;
+        }
+
+        if (restartPendingRef.current && !startupWindowActive) {
+          restartPendingRef.current = false;
+        }
         const selectedRunIsActive = Boolean(
           selectedRunId &&
           status?.current_run_id === selectedRunId &&
@@ -1228,28 +1348,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         const statusContextActive = selectedRunIsActive || batchRunIsActive;
         
         // Store training telemetry only for the actively running session.
-        const resolvedCurrentStep =
-          typeof status.currentStep === "number"
-            ? status.currentStep
-            : (typeof status?.last_tuning?.step === "number" ? status.last_tuning.step : undefined);
-        const resolvedMaxSteps =
-          typeof status.maxSteps === "number"
-            ? status.maxSteps
-            : (typeof maxSteps === "number" ? maxSteps : undefined);
-        let resolvedLoss: number | undefined =
-          typeof status.current_loss === "number" ? status.current_loss : undefined;
-        if (resolvedLoss === undefined && typeof status.message === "string") {
-          const lossMatch = status.message.match(/loss:\s*([0-9]*\.?[0-9]+)/i);
-          if (lossMatch) {
-            const parsedLoss = Number.parseFloat(lossMatch[1]);
-            if (Number.isFinite(parsedLoss)) {
-              resolvedLoss = parsedLoss;
-            }
-          }
-        }
         setTrainingCurrentStep(statusContextActive ? resolvedCurrentStep : undefined);
         setTrainingMaxSteps(statusContextActive ? resolvedMaxSteps : undefined);
-        setTrainingLoss(statusContextActive ? resolvedLoss : undefined);
         setStageProgress(statusContextActive ? status.stage_progress : undefined);
 
         // Use stopped_percentage when stopped, else 'percentage' or 'progress'
@@ -1437,6 +1537,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         const allStagesSuccess = (newStatus.colmap === "success" && newStatus.training === "success" && newStatus.export === "success" && !stopped) || (!statusContextActive && sessionCompleted);
         setPipelineDone(allStagesSuccess);
 
+        if (allStagesSuccess) {
+          setOverallProgress(100);
+        }
+
         // --- Fix overall status label ---
         if (allStagesSuccess) {
           setCurrentStage("");
@@ -1492,8 +1596,37 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const stoppedPollCountRef = useRef<number>(0);
   const saveToastTimeoutRef = useRef<number | null>(null);
   const processInfoToastTimeoutRef = useRef<number | null>(null);
+  const telemetryGenerationRef = useRef<number>(0);
+  const telemetryModalOpenRef = useRef<boolean>(false);
+  const restartPendingRef = useRef<boolean>(false);
   const hydratedTrainingRunIdRef = useRef<string>("");
   const hydratedSharedProjectRef = useRef<string>("");
+
+  const resetProgressDisplayForNewRun = () => {
+    stoppedPollCountRef.current = 0;
+    restartPendingRef.current = true;
+    setOverallProgress(0);
+    setTrainingCurrentStep(undefined);
+    setTrainingMaxSteps(undefined);
+    setStageProgress(undefined);
+    setCurrentStage("");
+    setCurrentStageKey("");
+    setStageStatus({ colmap: "pending", training: "pending", export: "pending" });
+    setPipelineDone(false);
+    setProcessingStatus("Starting...");
+    setBatchCompleted(0);
+    setBatchCurrentIndex(0);
+    telemetryGenerationRef.current += 1;
+    setTelemetryData(null);
+    setTelemetryError(null);
+    setShowTelemetryModal(false);
+    setPngFiles([]);
+    setSelectedPng(null);
+    setModelSnapshots([]);
+    setSelectedModelSnapshot(null);
+    setHasSparseCloud(false);
+    setHas3DModel(false);
+  };
 
   useEffect(() => {
     stoppedPollCountRef.current = 0;
@@ -1515,6 +1648,16 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   useEffect(() => {
     selectedEngineRef.current = selectedEngineName;
   }, [selectedEngineName]);
+
+  useEffect(() => {
+    telemetryModalOpenRef.current = showTelemetryModal;
+    if (!showTelemetryModal) {
+      telemetryGenerationRef.current += 1;
+      setTelemetryLoading(false);
+      setTelemetryData(null);
+      setTelemetryError(null);
+    }
+  }, [showTelemetryModal]);
 
   const refreshSparseOptions = useCallback(async () => {
     const fallback = [
@@ -2115,7 +2258,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     const includeSessionControlsForIntent =
       engine === "gsplat" && effectiveModeForIntent === "modified" && tuneScope === "core_ai_optimization";
     const wantsBatchStart = includeSessionControlsForIntent && runCount > 1;
-    const isRestart = !wantsBatchStart && (pipelineDone || wasStopped);
+    const isRestart = !wantsBatchStart && Boolean(selectedRunId);
+    const shouldReuseSelectedSession = Boolean(selectedRunId) && !wantsBatchStart;
     if (isRestart && !skipRestartConfirm) {
       setShowRestartConfirmModal(true);
       return;
@@ -2126,9 +2270,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       return;
     }
 
-    const runNameForRequest = isRestart
+    const runNameForRequest = shouldReuseSelectedSession
       ? selectedRunId
-      : (selectedRunId || newRunName.trim() || buildDefaultRunName(projectDisplayName, projectId, projectRuns));
+      : (newRunName.trim() || buildDefaultRunName(projectDisplayName, projectId, projectRuns));
 
     setProcessing(true);
     setError(null);
@@ -2148,6 +2292,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       setProcessing(false);
       return;
     }
+
+    resetProgressDisplayForNewRun();
 
     // Determine stage based on checkboxes
     let stage: "full" | "colmap_only" | "train_only";
@@ -2257,6 +2403,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setStoppedStage(null);
     setStartRequestAtMs(Date.now());
     stoppedPollCountRef.current = 0;
+    resetProgressDisplayForNewRun();
     try {
       await api.post(`/projects/${projectId}/runs/${selectedRunId}/continue-batch`, {
         restart_current: true,
@@ -2274,6 +2421,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setStoppedStage(null);
     setStartRequestAtMs(Date.now());
     stoppedPollCountRef.current = 0;
+    resetProgressDisplayForNewRun();
     if (sparsePreference === "merge_selected" && sparseMergeSelection.length < 2) {
       setError("Select at least two sparse folders when using merge mode.");
       setProcessing(false);
@@ -2789,6 +2937,56 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     return null;
   })();
 
+  const fetchTelemetry = useCallback(async () => {
+    const requestGeneration = telemetryGenerationRef.current;
+    const runIdForTelemetry = processingRunId || selectedRunId || undefined;
+    if (!runIdForTelemetry) {
+      if (requestGeneration === telemetryGenerationRef.current) {
+        setTelemetryData(null);
+      }
+      return;
+    }
+    try {
+      setTelemetryLoading(true);
+      setTelemetryError(null);
+      const res = await api.get(`/projects/${projectId}/telemetry`, {
+        params: {
+          run_id: runIdForTelemetry,
+          log_limit: 120,
+          eval_limit: 20,
+        },
+      });
+      if (
+        requestGeneration !== telemetryGenerationRef.current ||
+        !telemetryModalOpenRef.current
+      ) {
+        return;
+      }
+      setTelemetryData(res.data as TelemetryPayload);
+    } catch (err) {
+      if (
+        requestGeneration !== telemetryGenerationRef.current ||
+        !telemetryModalOpenRef.current
+      ) {
+        return;
+      }
+      setTelemetryError(err instanceof Error ? err.message : "Failed to load telemetry");
+    } finally {
+      if (requestGeneration === telemetryGenerationRef.current) {
+        setTelemetryLoading(false);
+      }
+    }
+  }, [projectId, processingRunId, selectedRunId]);
+
+  useEffect(() => {
+    if (!showTelemetryModal) return;
+    void fetchTelemetry();
+    const pollId = setInterval(() => {
+      void fetchTelemetry();
+    }, 3000);
+    return () => clearInterval(pollId);
+  }, [showTelemetryModal, fetchTelemetry]);
+
   const engineOptions = Object.values(engineOutputMap).filter((bundle) => bundle.hasModel);
   const hasEngineOutputs = Object.keys(engineOutputMap).length > 0;
   const showEngineDropdown = engineOptions.length > 1;
@@ -3114,7 +3312,16 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                   {/* Always show overall progress bar with all selected steps */}
                   <div className="px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg">
                     <div className="flex items-center justify-between text-xs text-indigo-700 mb-1">
-                      <span className="font-semibold">Overall Progress</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">Overall Progress</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowTelemetryModal(true)}
+                          className="text-[11px] font-semibold text-indigo-700 underline decoration-indigo-400 hover:text-indigo-900"
+                        >
+                          Full log
+                        </button>
+                      </div>
                       <span className="font-bold">{wasStopped ? `${overallProgress}% (stopped)` : `${overallProgress}%`}</span>
                     </div>
                     {batchTotal > 1 && (
@@ -3533,6 +3740,144 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           </div>
         </div>
       </div>
+
+      {showTelemetryModal && (
+        <div className="fixed inset-0 z-[1200]">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setShowTelemetryModal(false)} />
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <div className="w-[1080px] max-w-full max-h-[92vh] overflow-hidden bg-white rounded-xl shadow-2xl border border-slate-200">
+              <div className="flex items-center justify-between px-4 py-2 border-b border-slate-200">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Training Telemetry</h3>
+                  <p className="text-xs text-slate-500">Run: {telemetryData?.run_id || processingRunId || selectedRunId || "-"}</p>
+                </div>
+                <button className="text-sm text-slate-600" onClick={() => setShowTelemetryModal(false)}>Close</button>
+              </div>
+
+              <div className="p-4 overflow-auto max-h-[84vh] space-y-4 text-sm">
+                {telemetryLoading && <p className="text-xs text-slate-500">Loading telemetry...</p>}
+                {telemetryError && <p className="text-xs text-red-600">{telemetryError}</p>}
+
+                {telemetryData?.status && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-semibold text-slate-700 mb-1">Current status</p>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-slate-700">
+                      <div>Stage: <span className="font-semibold">{telemetryData.status.stage || "-"}</span></div>
+                      <div>Step: <span className="font-semibold">{typeof telemetryData.status.currentStep === "number" ? telemetryData.status.currentStep.toLocaleString() : "-"}</span></div>
+                      <div>Loss: <span className="font-semibold">{typeof telemetryData.status.current_loss === "number" ? telemetryData.status.current_loss.toFixed(6) : "-"}</span></div>
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Important events</p>
+                  <div className="h-40 overflow-auto border border-slate-200 rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-700">
+                        <tr>
+                          <th className="text-left px-3 py-2">Time</th>
+                          <th className="text-left px-3 py-2">Type</th>
+                          <th className="text-left px-3 py-2">Step</th>
+                          <th className="text-left px-3 py-2">Summary</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(telemetryData?.event_rows || []).length === 0 ? (
+                          <tr>
+                            <td className="px-3 py-2 text-slate-500" colSpan={4}>No important events yet.</td>
+                          </tr>
+                        ) : (
+                          (telemetryData?.event_rows || []).map((row, idx) => (
+                            <tr key={`${row.type || "event"}-${row.step || "na"}-${idx}`} className="border-t border-slate-100">
+                              <td className="px-3 py-2 text-slate-700">{row.timestamp || "-"}</td>
+                              <td className="px-3 py-2 text-slate-900">{row.type || "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.step === "number" ? row.step.toLocaleString() : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{row.summary || "-"}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Log-interval snapshots</p>
+                  <div className="h-64 overflow-auto border border-slate-200 rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-700">
+                        <tr>
+                          <th className="text-left px-3 py-2">Time</th>
+                          <th className="text-left px-3 py-2">Step</th>
+                          <th className="text-left px-3 py-2">Loss</th>
+                          <th className="text-left px-3 py-2">Elapsed</th>
+                          <th className="text-left px-3 py-2">ETA</th>
+                          <th className="text-left px-3 py-2">Speed</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(telemetryData?.training_rows || []).length === 0 ? (
+                          <tr>
+                            <td className="px-3 py-2 text-slate-500" colSpan={6}>No snapshots yet.</td>
+                          </tr>
+                        ) : (
+                          (telemetryData?.training_rows || []).map((row, idx) => (
+                            <tr key={`${row.step || "na"}-${idx}`} className="border-t border-slate-100">
+                              <td className="px-3 py-2 text-slate-700">{row.timestamp || "-"}</td>
+                              <td className="px-3 py-2 text-slate-900">
+                                {typeof row.step === "number" ? row.step.toLocaleString() : "-"}
+                                {typeof row.max_steps === "number" ? ` / ${row.max_steps.toLocaleString()}` : ""}
+                              </td>
+                              <td className="px-3 py-2 text-slate-900">{typeof row.loss === "number" ? row.loss.toFixed(6) : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.elapsed_seconds === "number" ? `${row.elapsed_seconds.toFixed(1)}s` : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{row.eta || "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{row.speed || "-"}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Latest eval metrics</p>
+                  <div className="h-56 overflow-auto border border-slate-200 rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-700">
+                        <tr>
+                          <th className="text-left px-3 py-2">Eval step</th>
+                          <th className="text-left px-3 py-2">PSNR</th>
+                          <th className="text-left px-3 py-2">LPIPS</th>
+                          <th className="text-left px-3 py-2">SSIM</th>
+                          <th className="text-left px-3 py-2">Gaussians</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(telemetryData?.eval_rows || []).length === 0 ? (
+                          <tr>
+                            <td className="px-3 py-2 text-slate-500" colSpan={5}>No eval entries yet.</td>
+                          </tr>
+                        ) : (
+                          (telemetryData?.eval_rows || []).map((row, idx) => (
+                            <tr key={`${row.step || "na"}-${idx}`} className="border-t border-slate-100">
+                              <td className="px-3 py-2 text-slate-900">{typeof row.step === "number" ? row.step.toLocaleString() : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.psnr === "number" ? row.psnr.toFixed(4) : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.lpips === "number" ? row.lpips.toFixed(4) : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.ssim === "number" ? row.ssim.toFixed(4) : "-"}</td>
+                              <td className="px-3 py-2 text-slate-700">{typeof row.num_gaussians === "number" ? row.num_gaussians.toLocaleString() : "-"}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showConfig && (
         <div className="fixed inset-0 z-50">
