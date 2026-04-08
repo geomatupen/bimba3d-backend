@@ -13,6 +13,25 @@ _ACTIVE_LOCAL_PROJECTS: set[str] = set()
 _ACTIVE_LOCAL_LOCK = threading.Lock()
 
 
+def _attach_file_handler_once(log_path: Path) -> bool:
+    """Attach a file handler only once per path for the current process."""
+    resolved = log_path.resolve()
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                existing = Path(getattr(handler, "baseFilename", "")).resolve()
+            except Exception:
+                continue
+            if existing == resolved:
+                return False
+    file_handler = logging.FileHandler(resolved, mode="a")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    root_logger.addHandler(file_handler)
+    return True
+
+
 def _mark_active_sparse_shared_version_if_ready(project_id: str, params: dict, final_status: dict) -> None:
     """Advance active sparse shared version only after successful base COLMAP runs."""
     try:
@@ -106,22 +125,15 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
             _project_dir = _storage.get_project_dir(project_id)
             _log_file = _project_dir / "processing.log"
             _log_file.parent.mkdir(parents=True, exist_ok=True)
-            _fh = logging.FileHandler(_log_file, mode='a')
-            _fh.setLevel(logging.INFO)
-            _fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-            _root = logging.getLogger()
-            _root.addHandler(_fh)
-            logger.info(f"Initialized project log file: {_log_file}")
+            if _attach_file_handler_once(_log_file):
+                logger.info(f"Initialized project log file: {_log_file}")
 
             _run_id = str(params.get("run_id") or "").strip()
             if _run_id:
                 _run_log_file = _project_dir / "runs" / _run_id / "processing.log"
                 _run_log_file.parent.mkdir(parents=True, exist_ok=True)
-                _run_fh = logging.FileHandler(_run_log_file, mode='a')
-                _run_fh.setLevel(logging.INFO)
-                _run_fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-                _root.addHandler(_run_fh)
-                logger.info(f"Initialized run log file: {_run_log_file}")
+                if _attach_file_handler_once(_run_log_file):
+                    logger.info(f"Initialized run log file: {_run_log_file}")
         except Exception as e:
             logger.warning(f"Failed to initialize project log file: {e}")
 

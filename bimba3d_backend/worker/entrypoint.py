@@ -27,6 +27,25 @@ from .colmap_loader import COLMAPDataset, qvec2rotmat, read_images_binary, read_
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+def _attach_file_handler_once(log_path: Path) -> bool:
+    """Attach a file handler to root logger only if the exact path is not already attached."""
+    resolved = log_path.resolve()
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            try:
+                existing = Path(getattr(handler, "baseFilename", "")).resolve()
+            except Exception:
+                continue
+            if existing == resolved:
+                return False
+    file_handler = logging.FileHandler(resolved, mode="a")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    root_logger.addHandler(file_handler)
+    return True
+
 COLMAP_EXE = (os.getenv("COLMAP_EXE") or "colmap").strip() or "colmap"
 
 ENGINE_SUBDIR = "engines"
@@ -232,12 +251,14 @@ def update_status(
     tuning_active: bool = None,
     currentStep: int = None,
     maxSteps: int = None,
+    current_loss: float = None,
     last_tuning: dict = None,
     stop_requested: bool = None,
     stage: str = None,
     stage_progress: int = None,
     message: str = None,
     timing: dict = None,
+    early_stop: dict = None,
     stopped_stage: str = None,
     stopped_step: int | str = None,
     stopped_percentage: float = None,
@@ -269,6 +290,8 @@ def update_status(
             data["currentStep"] = currentStep
         if maxSteps is not None:
             data["maxSteps"] = maxSteps
+        if current_loss is not None:
+            data["current_loss"] = float(current_loss)
         if last_tuning is not None:
             data["last_tuning"] = last_tuning
         if stop_requested is not None:
@@ -281,6 +304,8 @@ def update_status(
             data["message"] = message
         if timing is not None:
             data["timing"] = timing
+        if early_stop is not None:
+            data["early_stop"] = early_stop
         if device is not None:
             data["device"] = device
         if engine is not None:
@@ -1529,6 +1554,7 @@ def _export_with_gsplat(
     splat_name: str = "splats.splat",
     ply_name: str = "splats.ply",
     export_ply: bool = True,
+    log_details: bool = True,
 ):
     """Load a checkpoint and export .splat (and optional .ply) using gsplat exporter."""
     import torch
@@ -1582,15 +1608,16 @@ def _export_with_gsplat(
     if opacities.ndim > 1:
         opacities = opacities.squeeze()
 
-    logger.info(
-        "Exporting with gsplat exporter | means %s, scales %s, quats %s, opacities %s, sh0 %s, shN %s",
-        tuple(means.shape),
-        tuple(scales.shape),
-        tuple(quats.shape),
-        tuple(opacities.shape),
-        tuple(sh0.shape),
-        tuple(shN.shape),
-    )
+    if log_details:
+        logger.info(
+            "Exporting with gsplat exporter | means %s, scales %s, quats %s, opacities %s, sh0 %s, shN %s",
+            tuple(means.shape),
+            tuple(scales.shape),
+            tuple(quats.shape),
+            tuple(opacities.shape),
+            tuple(sh0.shape),
+            tuple(shN.shape),
+        )
 
     splat_path = output_dir / splat_name
     export_splats(
@@ -1603,7 +1630,8 @@ def _export_with_gsplat(
         format="splat",
         save_to=str(splat_path),
     )
-    logger.info("Exported .splat -> %s (%d bytes)", splat_path, splat_path.stat().st_size)
+    if log_details:
+        logger.info("Exported .splat -> %s (%d bytes)", splat_path, splat_path.stat().st_size)
 
     if export_ply:
         ply_path = output_dir / ply_name
@@ -1617,7 +1645,8 @@ def _export_with_gsplat(
             format="ply",
             save_to=str(ply_path),
         )
-        logger.info("Exported .ply -> %s (%d bytes)", ply_path, ply_path.stat().st_size)
+        if log_details:
+            logger.info("Exported .ply -> %s (%d bytes)", ply_path, ply_path.stat().st_size)
 
 
 def _parse_step_from_name(name: str, prefix: str) -> int | None:
@@ -1902,14 +1931,14 @@ def main():
 
     # Configure file logging per project
     try:
-        logs_file = project_dir / "processing.log"
-        logs_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(logs_file, mode='a')
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        root_logger = logging.getLogger()
-        root_logger.addHandler(file_handler)
-        logger.info("Initialized project log file: %s", logs_file)
+        if os.getenv("BIMBA3D_PARENT_LOGGING", "0") == "1":
+            logger.info("Skipping worker file-handler setup (parent process handles logging).")
+        else:
+            logs_file = project_dir / "processing.log"
+            logs_file.parent.mkdir(parents=True, exist_ok=True)
+            attached = _attach_file_handler_once(logs_file)
+            if attached:
+                logger.info("Initialized project log file: %s", logs_file)
     except Exception as e:
         logger.warning(f"Failed to initialize project log file: {e}")
 

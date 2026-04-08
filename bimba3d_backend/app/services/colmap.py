@@ -240,6 +240,7 @@ def run_worker_local(project_id: str, params: dict = None) -> None:
     logger.info("Running local worker: %s", " ".join(cmd))
     child_env = os.environ.copy()
     child_env["BIMBA3D_DOCKER_WORKER"] = "0"
+    child_env["BIMBA3D_PARENT_LOGGING"] = "1"
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)

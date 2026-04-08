@@ -466,6 +466,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [stoppingMessage, setStoppingMessage] = useState<string | null>(null);
   const [trainingCurrentStep, setTrainingCurrentStep] = useState<number | undefined>(undefined);
   const [trainingMaxSteps, setTrainingMaxSteps] = useState<number | undefined>(undefined);
+  const [trainingLoss, setTrainingLoss] = useState<number | undefined>(undefined);
   const [overallProgress, setOverallProgress] = useState<number>(0);
   const [currentStage, setCurrentStage] = useState<string>("");
   const [currentStageKey, setCurrentStageKey] = useState<"docker"|"colmap"|"training"|"export"|"">("");
@@ -1226,9 +1227,29 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         );
         const statusContextActive = selectedRunIsActive || batchRunIsActive;
         
-        // Store current step and max steps only for the actively running session.
-        setTrainingCurrentStep(statusContextActive ? status.currentStep : undefined);
-        setTrainingMaxSteps(statusContextActive ? status.maxSteps : undefined);
+        // Store training telemetry only for the actively running session.
+        const resolvedCurrentStep =
+          typeof status.currentStep === "number"
+            ? status.currentStep
+            : (typeof status?.last_tuning?.step === "number" ? status.last_tuning.step : undefined);
+        const resolvedMaxSteps =
+          typeof status.maxSteps === "number"
+            ? status.maxSteps
+            : (typeof maxSteps === "number" ? maxSteps : undefined);
+        let resolvedLoss: number | undefined =
+          typeof status.current_loss === "number" ? status.current_loss : undefined;
+        if (resolvedLoss === undefined && typeof status.message === "string") {
+          const lossMatch = status.message.match(/loss:\s*([0-9]*\.?[0-9]+)/i);
+          if (lossMatch) {
+            const parsedLoss = Number.parseFloat(lossMatch[1]);
+            if (Number.isFinite(parsedLoss)) {
+              resolvedLoss = parsedLoss;
+            }
+          }
+        }
+        setTrainingCurrentStep(statusContextActive ? resolvedCurrentStep : undefined);
+        setTrainingMaxSteps(statusContextActive ? resolvedMaxSteps : undefined);
+        setTrainingLoss(statusContextActive ? resolvedLoss : undefined);
         setStageProgress(statusContextActive ? status.stage_progress : undefined);
 
         // Use stopped_percentage when stopped, else 'percentage' or 'progress'

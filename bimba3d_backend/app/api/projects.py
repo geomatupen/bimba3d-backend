@@ -1755,6 +1755,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             stop_requested=False,
             message=f"Processing started ({resolved_worker_mode} mode).",
             error=None,
+            batch_total=1,
+            batch_completed=0,
+            batch_current_index=1,
         )
 
         # Start processing in background thread

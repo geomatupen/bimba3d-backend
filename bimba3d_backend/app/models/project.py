@@ -55,6 +55,7 @@ class StatusResponse(BaseModel):
     tuning_active: Optional[bool] = None
     currentStep: Optional[int] = None
     maxSteps: Optional[int] = None
+    current_loss: Optional[float] = None
     last_tuning: Optional[LastTuning] = None
     stop_requested: Optional[bool] = None
     stage: Optional[str] = None

@@ -827,6 +827,15 @@ def run_training(
                 f"volatility={volatility_ratio:.6f} points={len(losses)}"
             )
             stop_flag.write_text("early_stop")
+            logger.info(
+                "EARLY_STOP_TRIGGER step=%d rel_improve=%.6f volatility=%.6f points=%d candidate_since=%s min_step_ratio=%.3f",
+                int(step),
+                float(rel_improve),
+                float(volatility_ratio),
+                len(losses),
+                str(early_state.get("candidate_since_step")),
+                float(early_stop_min_step_ratio),
+            )
             update_status(
                 project_dir,
                 "stopping",
@@ -856,14 +865,14 @@ def run_training(
         loss: float = 0.0,
         **kwargs: object,
     ) -> None:
+        schedule = tuning_state.get("adaptive_schedule") if isinstance(tuning_state.get("adaptive_schedule"), dict) else None
+        tune_end_for_phase = int(schedule.get("end_step")) if isinstance(schedule, dict) else int(modified_tune_end_step)
         if max_steps_local is None:
             raw_max_steps = kwargs.get("max_steps", max_steps)
             try:
                 max_steps_local = int(raw_max_steps)
             except Exception:
                 max_steps_local = int(max_steps)
-            schedule = tuning_state.get("adaptive_schedule") if isinstance(tuning_state.get("adaptive_schedule"), dict) else None
-            tune_end_for_phase = int(schedule.get("end_step")) if isinstance(schedule, dict) else int(modified_tune_end_step)
             if mode == "modified" and not tuning_state.get("phase_complete_logged") and step == tune_end_for_phase + 1:
                 tuning_state["phase_complete_logged"] = True
         apply_modified_rules(step, loss)
@@ -951,6 +960,7 @@ def run_training(
             tuning_active=(mode == "modified" and step <= max(tune_end_for_phase, strategy_tune_end_step)),
             currentStep=step,
             maxSteps=max_steps_local,
+            current_loss=float(loss),
             stop_requested=requested_stop,
             stage="training",
             stage_progress=int(progress_fraction * 100),
@@ -1111,21 +1121,29 @@ def run_training(
                     not isinstance(best_loss, (int, float)) or float(current_loss) < float(best_loss)
                 )
                 if should_update_best:
+                    previous_best = float(best_loss) if isinstance(best_loss, (int, float)) else None
                     export_with_gsplat(
                         Path(checkpoint_path),
                         engine_output_dir,
                         splat_name="best.splat",
                         export_ply=False,
+                        log_details=False,
                     )
                     tuning_state["best_splat"] = {
                         "step": int(step),
                         "loss": float(current_loss),
                         "path": str(engine_output_dir / "best.splat"),
                     }
+                    best_path = engine_output_dir / "best.splat"
+                    best_size = best_path.stat().st_size if best_path.exists() else None
+                    improvement = (previous_best - float(current_loss)) if previous_best is not None else None
                     logger.info(
-                        "Updated best.splat at step %d with loss %.6f",
+                        "BEST_SPLAT_UPDATE step=%d loss=%.6f prev_best=%s improvement=%s bytes=%s",
                         int(step),
                         float(current_loss),
+                        f"{previous_best:.6f}" if previous_best is not None else "n/a",
+                        f"{improvement:.6f}" if improvement is not None else "n/a",
+                        str(best_size) if best_size is not None else "n/a",
                     )
             except Exception as exc:
                 logger.warning("Failed to export best.splat at step %s: %s", step, exc)
