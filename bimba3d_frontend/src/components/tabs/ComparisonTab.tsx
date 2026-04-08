@@ -29,7 +29,7 @@ interface SummaryPayload {
   mode?: string;
   engine?: string | null;
   metrics?: Record<string, number | null | undefined>;
-  major_params?: Record<string, number | null | undefined>;
+  major_params?: Record<string, number | boolean | null | undefined>;
   tuning?: {
     initial?: Record<string, number | null | undefined>;
     final?: Record<string, number | null | undefined>;
@@ -136,6 +136,11 @@ function formatDuration(seconds: number): string {
 function fmtMetricValue(key: string, v: unknown): string {
   if (key === "total_time_seconds" && typeof v === "number") return formatDuration(v);
   if (key === "best_splat_step" && typeof v === "number" && Number.isFinite(v)) return Math.round(v).toLocaleString();
+  return fmt(v);
+}
+
+function fmtMajorParamValue(v: unknown): string {
+  if (typeof v === "boolean") return v ? "Enabled" : "Disabled";
   return fmt(v);
 }
 
@@ -802,12 +807,22 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                   ["densify_until_iter", "End densification"],
                   ["densification_interval", "Densification interval"],
                   ["eval_interval", "Eval interval"],
+                  ["best_splat_interval", "Best splat interval"],
+                  ["auto_early_stop", "Auto early stop"],
+                  ["early_stop_monitor_interval", "Early-stop monitor interval"],
+                  ["early_stop_decision_points", "Early-stop decision points"],
+                  ["early_stop_min_eval_points", "Early-stop min eval points"],
+                  ["early_stop_min_step_ratio", "Early-stop min step ratio"],
+                  ["early_stop_monitor_min_relative_improvement", "Early-stop monitor min relative improvement"],
+                  ["early_stop_eval_min_relative_improvement", "Early-stop eval min relative improvement"],
+                  ["early_stop_max_volatility_ratio", "Early-stop max volatility ratio"],
+                  ["early_stop_ema_alpha", "Early-stop EMA alpha"],
                   ["batch_size", "Batch size"],
                 ].map(([key, label]) => (
                   <tr key={key} className="border-t border-slate-100">
                     <td className="px-4 py-2 text-slate-700">{label}</td>
-                    <td className="px-4 py-2 text-slate-900">{fmt(leftSummary.major_params?.[key] as number | undefined)}</td>
-                    <td className="px-4 py-2 text-slate-900">{fmt(rightSummary.major_params?.[key] as number | undefined)}</td>
+                    <td className="px-4 py-2 text-slate-900">{fmtMajorParamValue(leftSummary.major_params?.[key])}</td>
+                    <td className="px-4 py-2 text-slate-900">{fmtMajorParamValue(rightSummary.major_params?.[key])}</td>
                   </tr>
                 ))}
               </tbody>
