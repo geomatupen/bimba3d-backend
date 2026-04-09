@@ -4359,6 +4359,48 @@ def get_experiment_summary(
             response_payload["metrics"] = metrics_payload
             if response_payload.get("early_stop") is None and isinstance(early_stop, dict) and early_stop:
                 response_payload["early_stop"] = early_stop
+
+            if (
+                response_payload.get("eval_psnr_series") is None
+                or response_payload.get("eval_ssim_series") is None
+                or response_payload.get("eval_lpips_series") is None
+            ):
+                eval_history_for_series = _read_json_if_exists(run_dir / "comparison" / "eval_history.json")
+                if not isinstance(eval_history_for_series, list):
+                    eval_history_for_series = _read_json_if_exists(run_dir / "outputs" / "engines" / "gsplat" / "eval_history.json")
+                eval_rows_for_series = (
+                    sorted(
+                        [item for item in eval_history_for_series if isinstance(item, dict)],
+                        key=lambda item: float(item.get("step")) if isinstance(item.get("step"), (int, float)) else float("inf"),
+                    )
+                    if isinstance(eval_history_for_series, list)
+                    else []
+                )
+                if eval_rows_for_series:
+                    eval_psnr_series = []
+                    eval_ssim_series = []
+                    eval_lpips_series = []
+                    for point in eval_rows_for_series:
+                        step_value = point.get("step")
+                        if not isinstance(step_value, (int, float)):
+                            continue
+                        step_int = int(step_value)
+                        psnr_value = point.get("convergence_speed")
+                        if isinstance(psnr_value, (int, float)):
+                            eval_psnr_series.append({"step": step_int, "value": float(psnr_value)})
+                        ssim_value = point.get("sharpness_mean")
+                        if isinstance(ssim_value, (int, float)):
+                            eval_ssim_series.append({"step": step_int, "value": float(ssim_value)})
+                        lpips_value = point.get("lpips_mean")
+                        if isinstance(lpips_value, (int, float)):
+                            eval_lpips_series.append({"step": step_int, "value": float(lpips_value)})
+                    if response_payload.get("eval_psnr_series") is None:
+                        response_payload["eval_psnr_series"] = eval_psnr_series
+                    if response_payload.get("eval_ssim_series") is None:
+                        response_payload["eval_ssim_series"] = eval_ssim_series
+                    if response_payload.get("eval_lpips_series") is None:
+                        response_payload["eval_lpips_series"] = eval_lpips_series
+
             response_payload["preview_url"] = preview_url
             return response_payload
 
@@ -4412,6 +4454,9 @@ def get_experiment_summary(
 
         eval_series = []
         eval_time_series = []
+        eval_psnr_series = []
+        eval_ssim_series = []
+        eval_lpips_series = []
         runtime_tuning_series = []
         if eval_history_sorted:
             for point in eval_history_sorted:
@@ -4428,6 +4473,17 @@ def get_experiment_summary(
                         "step": int(step_value),
                         "elapsed_seconds": float(step_value) / float(conv_speed),
                     })
+
+                if isinstance(step_value, (int, float)) and isinstance(conv_speed, (int, float)):
+                    eval_psnr_series.append({"step": int(step_value), "value": float(conv_speed)})
+
+                ssim_value = point.get("sharpness_mean")
+                if isinstance(step_value, (int, float)) and isinstance(ssim_value, (int, float)):
+                    eval_ssim_series.append({"step": int(step_value), "value": float(ssim_value)})
+
+                lpips_value = point.get("lpips_mean")
+                if isinstance(step_value, (int, float)) and isinstance(lpips_value, (int, float)):
+                    eval_lpips_series.append({"step": int(step_value), "value": float(lpips_value)})
 
         if len(eval_series) < 2 and loss_milestones:
             milestone_points = []
@@ -4590,6 +4646,9 @@ def get_experiment_summary(
             "loss_milestones": loss_milestones,
             "eval_series": eval_series,
             "eval_time_series": eval_time_series,
+            "eval_psnr_series": eval_psnr_series,
+            "eval_ssim_series": eval_ssim_series,
+            "eval_lpips_series": eval_lpips_series,
             "preview_url": preview_url,
             "eval_points": len(eval_history) if isinstance(eval_history, list) else 0,
             "early_stop": metadata.get("early_stop") if isinstance(metadata, dict) else None,

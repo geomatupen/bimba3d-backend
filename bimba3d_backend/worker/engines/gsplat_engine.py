@@ -1403,25 +1403,65 @@ def run_training(
         loss_milestones: dict[str, float] = {}
         eval_series: list[dict] = []
         eval_time_series: list[dict] = []
+        eval_psnr_series: list[dict] = []
+        eval_ssim_series: list[dict] = []
+        eval_lpips_series: list[dict] = []
+        log_loss_series: list[dict] = []
+        log_time_series: list[dict] = []
         for point in eval_history:
             if not isinstance(point, dict):
                 continue
             step_value = point.get("step")
             if isinstance(step_value, (int, float)):
+                step_int = int(step_value)
                 loss_value = point.get("final_loss")
                 if isinstance(loss_value, (int, float)):
-                    eval_series.append({"step": int(step_value), "loss": float(loss_value)})
+                    eval_series.append({"step": step_int, "loss": float(loss_value)})
 
                 elapsed_value = point.get("elapsed_seconds")
                 if isinstance(elapsed_value, (int, float)) and float(elapsed_value) >= 0:
                     eval_time_series.append({
-                        "step": int(step_value),
+                        "step": step_int,
                         "elapsed_seconds": float(elapsed_value),
                     })
+
+                psnr_value = point.get("convergence_speed")
+                if isinstance(psnr_value, (int, float)):
+                    eval_psnr_series.append({"step": step_int, "value": float(psnr_value)})
+
+                ssim_value = point.get("sharpness_mean")
+                if isinstance(ssim_value, (int, float)):
+                    eval_ssim_series.append({"step": step_int, "value": float(ssim_value)})
+
+                lpips_value = point.get("lpips_mean")
+                if isinstance(lpips_value, (int, float)):
+                    eval_lpips_series.append({"step": step_int, "value": float(lpips_value)})
 
             for key, value in point.items():
                 if isinstance(key, str) and key.startswith("loss_at_") and isinstance(value, (int, float)):
                     loss_milestones[key] = float(value)
+
+        if isinstance(loss_by_step, dict):
+            for step_value, loss_value in loss_by_step.items():
+                try:
+                    step_int = int(step_value)
+                except Exception:
+                    continue
+                if isinstance(loss_value, (int, float)):
+                    log_loss_series.append({"step": step_int, "loss": float(loss_value)})
+        if log_loss_series:
+            log_loss_series.sort(key=lambda row: int(row.get("step", 0)))
+
+        if isinstance(elapsed_by_step, dict):
+            for step_value, elapsed_value in elapsed_by_step.items():
+                try:
+                    step_int = int(step_value)
+                except Exception:
+                    continue
+                if isinstance(elapsed_value, (int, float)) and float(elapsed_value) >= 0:
+                    log_time_series.append({"step": step_int, "elapsed_seconds": float(elapsed_value)})
+        if log_time_series:
+            log_time_series.sort(key=lambda row: int(row.get("step", 0)))
 
         runtime_tuning_series = [
             {"step": item.get("step"), "params": item.get("params")}
@@ -1503,8 +1543,13 @@ def run_training(
                 "batch_size": p.get("batch_size"),
             },
             "loss_milestones": loss_milestones,
+            "log_loss_series": log_loss_series,
+            "log_time_series": log_time_series,
             "eval_series": eval_series,
             "eval_time_series": eval_time_series,
+            "eval_psnr_series": eval_psnr_series,
+            "eval_ssim_series": eval_ssim_series,
+            "eval_lpips_series": eval_lpips_series,
             "preview_url": None,
             "eval_points": len(eval_history),
             "early_stop": tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else None,

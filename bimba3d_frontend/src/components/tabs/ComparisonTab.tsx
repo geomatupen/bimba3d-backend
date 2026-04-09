@@ -52,8 +52,13 @@ interface SummaryPayload {
     }>;
   };
   loss_milestones?: Record<string, number | null | undefined>;
+  log_loss_series?: Array<{ step?: number; loss?: number }>;
+  log_time_series?: Array<{ step?: number; elapsed_seconds?: number }>;
   eval_series?: Array<{ step?: number; loss?: number }>;
   eval_time_series?: Array<{ step?: number; elapsed_seconds?: number }>;
+  eval_psnr_series?: Array<{ step?: number; value?: number }>;
+  eval_ssim_series?: Array<{ step?: number; value?: number }>;
+  eval_lpips_series?: Array<{ step?: number; value?: number }>;
   preview_url?: string | null;
   eval_points?: number;
 }
@@ -85,20 +90,16 @@ const metricRows: Array<{ key: string; label: string; lowerIsBetter?: boolean }>
   { key: "num_gaussians", label: "Gaussian Count" },
 ];
 
-const graphMetricRows: Array<{ key: string; label: string; type: "loss" | "time" | "tuning" | "major"; path?: string[] }> = [
-  { key: "loss_milestone", label: "Step vs Loss", type: "loss" },
-  { key: "elapsed_time", label: "Step vs Time (elapsed)", type: "time" },
+const graphMetricRows: Array<{ key: string; label: string; type: "loss_log" | "time_log" | "loss_eval" | "time_eval" | "psnr_eval" | "ssim_eval" | "lpips_eval" | "tuning" | "major"; path?: string[] }> = [
+  { key: "loss_log", label: "Step vs Training Loss (log interval)", type: "loss_log" },
+  { key: "time_log", label: "Step vs Training Time (log interval)", type: "time_log" },
+  { key: "loss_eval", label: "Step vs Eval Loss (eval interval)", type: "loss_eval" },
+  { key: "time_eval", label: "Step vs Eval Time (eval interval)", type: "time_eval" },
+  { key: "psnr_eval", label: "Step vs PSNR (eval interval)", type: "psnr_eval" },
+  { key: "ssim_eval", label: "Step vs SSIM (eval interval)", type: "ssim_eval" },
+  { key: "lpips_eval", label: "Step vs LPIPS (eval interval)", type: "lpips_eval" },
   { key: "means_lr", label: "Step vs Means LR (tuning)", type: "tuning", path: ["learning_rates", "means"] },
-  { key: "opacities_lr", label: "Step vs Opacities LR (tuning)", type: "tuning", path: ["learning_rates", "opacities"] },
-  { key: "sh0_lr", label: "Step vs SH0 LR (tuning)", type: "tuning", path: ["learning_rates", "sh0"] },
   { key: "grow_grad2d", label: "Step vs Grow Grad2D (tuning)", type: "tuning", path: ["strategy", "grow_grad2d"] },
-  { key: "refine_every", label: "Step vs Refine Every (tuning)", type: "tuning", path: ["strategy", "refine_every"] },
-  { key: "max_steps", label: "Configured Max Steps", type: "major" },
-  { key: "densify_from_iter", label: "Start Densification", type: "major" },
-  { key: "densify_until_iter", label: "End Densification", type: "major" },
-  { key: "densification_interval", label: "Densification Interval", type: "major" },
-  { key: "eval_interval", label: "Eval Interval", type: "major" },
-  { key: "batch_size", label: "Batch Size", type: "major" },
 ];
 
 type GraphPoint = { x: number; y: number };
@@ -162,8 +163,9 @@ function extractStepFromPreviewName(name: string): number | null {
   return Number.isFinite(step) ? step : null;
 }
 
-function getLossSeriesPoints(summary?: SummaryPayload | null): GraphPoint[] {
-  return (summary?.eval_series ?? [])
+function getLossSeriesPoints(summary: SummaryPayload | null | undefined, source: "log" | "eval"): GraphPoint[] {
+  const sourceSeries = source === "log" ? (summary?.log_loss_series ?? []) : (summary?.eval_series ?? []);
+  return sourceSeries
     .map((item) => {
       if (!item || typeof item.step !== "number" || typeof item.loss !== "number") return null;
       if (!Number.isFinite(item.step) || !Number.isFinite(item.loss)) return null;
@@ -173,12 +175,33 @@ function getLossSeriesPoints(summary?: SummaryPayload | null): GraphPoint[] {
     .sort((a, b) => a.x - b.x);
 }
 
-function getTimeSeriesPoints(summary?: SummaryPayload | null): GraphPoint[] {
-  return (summary?.eval_time_series ?? [])
+function getTimeSeriesPoints(summary: SummaryPayload | null | undefined, source: "log" | "eval"): GraphPoint[] {
+  const sourceSeries = source === "log" ? (summary?.log_time_series ?? []) : (summary?.eval_time_series ?? []);
+  return sourceSeries
     .map((item) => {
       if (!item || typeof item.step !== "number" || typeof item.elapsed_seconds !== "number") return null;
       if (!Number.isFinite(item.step) || !Number.isFinite(item.elapsed_seconds)) return null;
       return { x: item.step, y: item.elapsed_seconds };
+    })
+    .filter((item): item is GraphPoint => item !== null)
+    .sort((a, b) => a.x - b.x);
+}
+
+function getEvalMetricSeriesPoints(
+  summary: SummaryPayload | null | undefined,
+  metric: "psnr" | "ssim" | "lpips",
+): GraphPoint[] {
+  const sourceSeries =
+    metric === "psnr"
+      ? (summary?.eval_psnr_series ?? [])
+      : metric === "ssim"
+        ? (summary?.eval_ssim_series ?? [])
+        : (summary?.eval_lpips_series ?? []);
+  return sourceSeries
+    .map((item) => {
+      if (!item || typeof item.step !== "number" || typeof item.value !== "number") return null;
+      if (!Number.isFinite(item.step) || !Number.isFinite(item.value)) return null;
+      return { x: item.step, y: item.value };
     })
     .filter((item): item is GraphPoint => item !== null)
     .sort((a, b) => a.x - b.x);
@@ -300,7 +323,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const [rightSummary, setRightSummary] = useState<SummaryPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedGraphMetric, setSelectedGraphMetric] = useState<string>("loss_milestone");
+  const [selectedGraphMetric, setSelectedGraphMetric] = useState<string>("loss_log");
   const [leftPreviewByStep, setLeftPreviewByStep] = useState<Record<number, string>>({});
   const [rightPreviewByStep, setRightPreviewByStep] = useState<Record<number, string>>({});
   const [selectedEvalStep, setSelectedEvalStep] = useState<number | null>(null);
@@ -580,8 +603,20 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const selectedGraphRow = graphMetricRows.find((row) => row.key === selectedGraphMetric) ?? graphMetricRows[0];
   const graphXMax = useMemo(() => {
     const points = [
-      ...getLossSeriesPoints(leftSummary),
-      ...getLossSeriesPoints(rightSummary),
+      ...getLossSeriesPoints(leftSummary, "log"),
+      ...getLossSeriesPoints(rightSummary, "log"),
+      ...getLossSeriesPoints(leftSummary, "eval"),
+      ...getLossSeriesPoints(rightSummary, "eval"),
+      ...getTimeSeriesPoints(leftSummary, "log"),
+      ...getTimeSeriesPoints(rightSummary, "log"),
+      ...getTimeSeriesPoints(leftSummary, "eval"),
+      ...getTimeSeriesPoints(rightSummary, "eval"),
+      ...getEvalMetricSeriesPoints(leftSummary, "psnr"),
+      ...getEvalMetricSeriesPoints(rightSummary, "psnr"),
+      ...getEvalMetricSeriesPoints(leftSummary, "ssim"),
+      ...getEvalMetricSeriesPoints(rightSummary, "ssim"),
+      ...getEvalMetricSeriesPoints(leftSummary, "lpips"),
+      ...getEvalMetricSeriesPoints(rightSummary, "lpips"),
       ...leftHistory
         .map((h) => (typeof h.step === "number" ? h.step : null))
         .filter((v): v is number => v !== null),
@@ -597,22 +632,43 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   }, [leftSummary, rightSummary, leftHistory, rightHistory]);
 
   const leftGraphPoints = useMemo(() => {
-    if (selectedGraphRow.type === "loss") return getLossSeriesPoints(leftSummary);
-    if (selectedGraphRow.type === "time") return getTimeSeriesPoints(leftSummary);
+    if (selectedGraphRow.type === "loss_log") return getLossSeriesPoints(leftSummary, "log");
+    if (selectedGraphRow.type === "time_log") return getTimeSeriesPoints(leftSummary, "log");
+    if (selectedGraphRow.type === "loss_eval") return getLossSeriesPoints(leftSummary, "eval");
+    if (selectedGraphRow.type === "time_eval") return getTimeSeriesPoints(leftSummary, "eval");
+    if (selectedGraphRow.type === "psnr_eval") return getEvalMetricSeriesPoints(leftSummary, "psnr");
+    if (selectedGraphRow.type === "ssim_eval") return getEvalMetricSeriesPoints(leftSummary, "ssim");
+    if (selectedGraphRow.type === "lpips_eval") return getEvalMetricSeriesPoints(leftSummary, "lpips");
     if (selectedGraphRow.type === "tuning") return getTuningSeriesPoints(leftSummary, selectedGraphRow.path);
     return getMajorParamSeriesPoints(leftSummary, selectedGraphRow.key, graphXMax);
   }, [leftSummary, selectedGraphRow, graphXMax]);
 
   const rightGraphPoints = useMemo(() => {
-    if (selectedGraphRow.type === "loss") return getLossSeriesPoints(rightSummary);
-    if (selectedGraphRow.type === "time") return getTimeSeriesPoints(rightSummary);
+    if (selectedGraphRow.type === "loss_log") return getLossSeriesPoints(rightSummary, "log");
+    if (selectedGraphRow.type === "time_log") return getTimeSeriesPoints(rightSummary, "log");
+    if (selectedGraphRow.type === "loss_eval") return getLossSeriesPoints(rightSummary, "eval");
+    if (selectedGraphRow.type === "time_eval") return getTimeSeriesPoints(rightSummary, "eval");
+    if (selectedGraphRow.type === "psnr_eval") return getEvalMetricSeriesPoints(rightSummary, "psnr");
+    if (selectedGraphRow.type === "ssim_eval") return getEvalMetricSeriesPoints(rightSummary, "ssim");
+    if (selectedGraphRow.type === "lpips_eval") return getEvalMetricSeriesPoints(rightSummary, "lpips");
     if (selectedGraphRow.type === "tuning") return getTuningSeriesPoints(rightSummary, selectedGraphRow.path);
     return getMajorParamSeriesPoints(rightSummary, selectedGraphRow.key, graphXMax);
   }, [rightSummary, selectedGraphRow, graphXMax]);
 
   const allGraphPoints = [...leftGraphPoints, ...rightGraphPoints];
   const graphHasData = allGraphPoints.length > 0;
-  const graphXMin = graphHasData ? Math.min(...allGraphPoints.map((p) => p.x)) : 0;
+  const forceZeroXStart =
+    selectedGraphRow.type === "loss_log" ||
+    selectedGraphRow.type === "time_log" ||
+    selectedGraphRow.type === "loss_eval" ||
+    selectedGraphRow.type === "time_eval" ||
+    selectedGraphRow.type === "psnr_eval" ||
+    selectedGraphRow.type === "ssim_eval" ||
+    selectedGraphRow.type === "lpips_eval" ||
+    selectedGraphRow.type === "major";
+  const graphXMin = graphHasData
+    ? (forceZeroXStart ? 0 : Math.min(...allGraphPoints.map((p) => p.x)))
+    : 0;
   const graphXMaxUsed = graphHasData ? Math.max(...allGraphPoints.map((p) => p.x)) : 1;
   const graphYMinRaw = graphHasData ? Math.min(...allGraphPoints.map((p) => p.y)) : 0;
   const graphYMaxRaw = graphHasData ? Math.max(...allGraphPoints.map((p) => p.y)) : 1;
