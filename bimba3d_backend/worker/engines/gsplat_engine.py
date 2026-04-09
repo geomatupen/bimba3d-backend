@@ -198,6 +198,11 @@ def run_training(
         best_splat_interval = max(1, int(best_splat_interval))
     except Exception:
         best_splat_interval = 100
+    best_splat_start_step = p.get("best_splat_start_step")
+    try:
+        best_splat_start_step = int(best_splat_start_step) if best_splat_start_step is not None else None
+    except Exception:
+        best_splat_start_step = None
     log_interval = p.get("log_interval", 100)
     try:
         log_interval = max(1, int(log_interval))
@@ -236,6 +241,12 @@ def run_training(
         early_stop_ema_alpha = max(0.001, min(1.0, float(p.get("early_stop_ema_alpha", 0.1))))
     except Exception:
         early_stop_ema_alpha = 0.1
+    if best_splat_start_step is None:
+        best_splat_start_step = max(
+            int(strategy_tune_start_step),
+            int(early_stop_monitor_interval) * int(early_stop_decision_points),
+        )
+    best_splat_start_step = max(1, int(best_splat_start_step))
     project_dir = Path(image_dir).parent
     stop_flag = project_dir / "stop_requested"
     gsplat_start = time.time()
@@ -1093,10 +1104,11 @@ def run_training(
         os.environ.pop("TQDM_DISABLE", None)
 
     logger.info(
-        "GSPLAT logging cadence: snapshot every %d steps (log_interval), callback every %d steps, modified_tune_interval=%d; tqdm=%s",
+        "GSPLAT logging cadence: snapshot every %d steps (log_interval), callback every %d steps, modified_tune_interval=%d, best_splat_start_step=%d; tqdm=%s",
         log_interval,
         cfg.progress_every,
         modified_tune_interval,
+        best_splat_start_step,
         "disabled" if cfg.disable_tqdm else "enabled",
     )
 
@@ -1111,7 +1123,7 @@ def run_training(
         _evaluate_early_stop_on_eval(int(step), int(max_steps))
 
     def checkpoint_callback(step: int, checkpoint_path: str) -> None:
-        if step % best_splat_interval == 0 or step == max_steps:
+        if step >= best_splat_start_step and (step % best_splat_interval == 0 or step == max_steps):
             try:
                 loss_by_step = tuning_state.get("loss_by_step") if isinstance(tuning_state.get("loss_by_step"), dict) else {}
                 best_state = tuning_state.get("best_splat") if isinstance(tuning_state.get("best_splat"), dict) else {}

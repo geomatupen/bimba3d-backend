@@ -619,6 +619,7 @@ def _run_batch_process(
                 run_params["batch_plan_id"] = batch_plan_id
             run_params["batch_index"] = idx + 1
             run_params["batch_total"] = run_count_int
+            run_params["batch_completed"] = completed_runs
             run_params["batch_continue_on_failure"] = bool(continue_on_failure)
             if idx > 0:
                 run_params["stage"] = "train_only"
@@ -658,7 +659,12 @@ def _run_batch_process(
                 message=f"Batch progress: {completed_runs}/{run_count_int} sessions completed.",
             )
 
-            if final_state in {"failed", "stopped"} and not continue_on_failure:
+            # A user stop must always terminate the remaining batch chain.
+            if final_state == "stopped":
+                logger.warning("Batch halted for %s after run %s was stopped", project_id, run_id)
+                break
+
+            if final_state == "failed" and not continue_on_failure:
                 logger.warning("Batch halted for %s after run %s ended with %s", project_id, run_id, final_state)
                 break
 
@@ -1606,6 +1612,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         params_payload.setdefault("save_interval", 2500)
         params_payload.setdefault("splat_export_interval", 2500)
         params_payload.setdefault("best_splat_interval", 100)
+        params_payload.setdefault("best_splat_start_step", 2000)
         params_payload.setdefault("auto_early_stop", True)
         params_payload.setdefault("early_stop_monitor_interval", 200)
         params_payload.setdefault("early_stop_decision_points", 10)
@@ -1940,6 +1947,22 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                     ),
                 )
 
+        batch_total_value = int(params_payload.get("batch_total") or 1)
+        if batch_total_value < 1:
+            batch_total_value = 1
+
+        batch_current_index_value = int(params_payload.get("batch_index") or 1)
+        if batch_current_index_value < 1:
+            batch_current_index_value = 1
+        if batch_current_index_value > batch_total_value:
+            batch_current_index_value = batch_total_value
+
+        batch_completed_value = int(params_payload.get("batch_completed") or 0)
+        if batch_completed_value < 0:
+            batch_completed_value = 0
+        if batch_completed_value > batch_total_value:
+            batch_completed_value = batch_total_value
+
         # Update status to processing with the resolved engine
         status.update_status(
             project_id,
@@ -1951,9 +1974,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             stop_requested=False,
             message=f"Processing started ({resolved_worker_mode} mode).",
             error=None,
-            batch_total=1,
-            batch_completed=0,
-            batch_current_index=1,
+            batch_total=batch_total_value,
+            batch_completed=batch_completed_value,
+            batch_current_index=batch_current_index_value,
         )
 
         # Start processing in background thread
@@ -2455,6 +2478,14 @@ def continue_batch_from_run(
             if final_state in {"completed", "done"}:
                 completed_before = batch_index
                 previous_success_run_id = run_id if batch_connect_runs else None
+            elif final_state == "stopped":
+                return {
+                    "status": "batch_continue_aborted",
+                    "reason": "Restarted run was stopped by user.",
+                    "run_id": run_id,
+                    "batch_index": batch_index,
+                    "batch_total": batch_total,
+                }
             elif not continue_on_failure:
                 return {
                     "status": "batch_continue_aborted",
@@ -4508,6 +4539,7 @@ def get_experiment_summary(
             "save_interval": resolved_cfg.get("save_interval"),
             "splat_export_interval": resolved_cfg.get("splat_export_interval"),
             "best_splat_interval": resolved_cfg.get("best_splat_interval"),
+            "best_splat_start_step": resolved_cfg.get("best_splat_start_step"),
             "auto_early_stop": resolved_cfg.get("auto_early_stop"),
             "early_stop_monitor_interval": resolved_cfg.get("early_stop_monitor_interval"),
             "early_stop_decision_points": resolved_cfg.get("early_stop_decision_points"),

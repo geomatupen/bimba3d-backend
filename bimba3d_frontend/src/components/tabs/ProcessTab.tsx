@@ -231,6 +231,7 @@ const getDefaultProcessConfig = () => ({
   logInterval: 100,
   splatInterval: 2500,
   bestSplatInterval: 100,
+  bestSplatStartStep: 2000,
   auto_early_stop: true,
   earlyStopMonitorInterval: 200,
   earlyStopDecisionPoints: 10,
@@ -331,6 +332,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
   const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? 2500);
   const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfg.best_splat_interval ?? 100);
+  const [bestSplatStartStep, setBestSplatStartStep] = useState<number>(cfg.bestSplatStartStep ?? cfg.best_splat_start_step ?? 2000);
   const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? true);
   const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfg.early_stop_monitor_interval ?? 200);
   const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfg.early_stop_decision_points ?? 10);
@@ -429,6 +431,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     logInterval: 'How often (in steps) to print consolidated training snapshots in worker logs. Lower values are more verbose. [custom]',
     splatInterval: 'How often (in steps) to export intermediate .splat/.ply files during training. [original]',
     bestSplatInterval: 'How often (in steps) to evaluate and update best.splat using measured training loss. Final export cadence remains controlled by Splat export interval. [custom]',
+    bestSplatStartStep: 'First step where best.splat tracking becomes active. Use this to skip expensive best-splat checks early in training. [custom]',
     auto_early_stop: 'Enable early stop: monitor trend every monitor interval and confirm plateau only at eval steps. [custom]',
     earlyStopMonitorInterval: 'Cadence for fast EMA trend checks between eval passes. These checks only mark candidate status; they do not stop training directly. [custom]',
     earlyStopDecisionPoints: 'Window size (points) used for both monitor trend and eval confirmation. Recommended 10 for stable decisions. [custom]',
@@ -576,6 +579,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setLogInterval(defaults.logInterval ?? 100);
     setSplatInterval(defaults.splatInterval);
     setBestSplatInterval(defaults.bestSplatInterval ?? 100);
+    setBestSplatStartStep(defaults.bestSplatStartStep ?? 2000);
     setAutoEarlyStop(defaults.auto_early_stop ?? true);
     setEarlyStopMonitorInterval(defaults.earlyStopMonitorInterval ?? 200);
     setEarlyStopDecisionPoints(defaults.earlyStopDecisionPoints ?? 10);
@@ -645,6 +649,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (typeof resolved.log_interval === "number") setLogInterval(resolved.log_interval);
       if (typeof resolved.splat_export_interval === "number") setSplatInterval(resolved.splat_export_interval);
       if (typeof resolved.best_splat_interval === "number") setBestSplatInterval(resolved.best_splat_interval);
+      if (typeof resolved.best_splat_start_step === "number") setBestSplatStartStep(resolved.best_splat_start_step);
       if (typeof resolved.auto_early_stop === "boolean") setAutoEarlyStop(resolved.auto_early_stop);
       if (typeof resolved.early_stop_monitor_interval === "number") setEarlyStopMonitorInterval(resolved.early_stop_monitor_interval);
       if (typeof resolved.early_stop_decision_points === "number") setEarlyStopDecisionPoints(resolved.early_stop_decision_points);
@@ -704,6 +709,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     if (typeof normalized.log_interval !== "number" && typeof raw.logInterval === "number") normalized.log_interval = raw.logInterval;
     if (typeof normalized.splat_export_interval !== "number" && typeof raw.splatInterval === "number") normalized.splat_export_interval = raw.splatInterval;
     if (typeof normalized.best_splat_interval !== "number" && typeof raw.bestSplatInterval === "number") normalized.best_splat_interval = raw.bestSplatInterval;
+    if (typeof normalized.best_splat_start_step !== "number" && typeof raw.bestSplatStartStep === "number") normalized.best_splat_start_step = raw.bestSplatStartStep;
     if (typeof normalized.auto_early_stop !== "boolean" && typeof raw.auto_early_stop === "boolean") normalized.auto_early_stop = raw.auto_early_stop;
     if (typeof normalized.early_stop_monitor_interval !== "number" && typeof raw.earlyStopMonitorInterval === "number") normalized.early_stop_monitor_interval = raw.earlyStopMonitorInterval;
     if (typeof normalized.early_stop_decision_points !== "number" && typeof raw.earlyStopDecisionPoints === "number") normalized.early_stop_decision_points = raw.earlyStopDecisionPoints;
@@ -764,6 +770,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      best_splat_start_step: bestSplatStartStep,
       auto_early_stop: autoEarlyStop,
       early_stop_monitor_interval: earlyStopMonitorInterval,
       early_stop_decision_points: earlyStopDecisionPoints,
@@ -788,7 +795,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2332,6 +2339,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         log_interval: logInterval,
         splat_export_interval: splatInterval,
         best_splat_interval: bestSplatInterval,
+        best_splat_start_step: bestSplatStartStep,
         auto_early_stop: autoEarlyStop,
         early_stop_monitor_interval: earlyStopMonitorInterval,
         early_stop_decision_points: earlyStopDecisionPoints,
@@ -2466,6 +2474,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         log_interval: logInterval,
         splat_export_interval: splatInterval,
         best_splat_interval: bestSplatInterval,
+        best_splat_start_step: bestSplatStartStep,
         auto_early_stop: autoEarlyStop,
         early_stop_monitor_interval: earlyStopMonitorInterval,
         early_stop_decision_points: earlyStopDecisionPoints,
@@ -2636,6 +2645,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      best_splat_start_step: bestSplatStartStep,
       auto_early_stop: autoEarlyStop,
       early_stop_monitor_interval: earlyStopMonitorInterval,
       early_stop_decision_points: earlyStopDecisionPoints,
@@ -2679,6 +2689,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       log_interval: logInterval,
       splat_export_interval: splatInterval,
       best_splat_interval: bestSplatInterval,
+      best_splat_start_step: bestSplatStartStep,
       auto_early_stop: autoEarlyStop,
       early_stop_monitor_interval: earlyStopMonitorInterval,
       early_stop_decision_points: earlyStopDecisionPoints,
@@ -2846,6 +2857,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           log_interval: defaults.logInterval,
           splat_export_interval: defaults.splatInterval,
           best_splat_interval: defaults.bestSplatInterval,
+          best_splat_start_step: defaults.bestSplatStartStep,
           auto_early_stop: defaults.auto_early_stop,
           early_stop_monitor_interval: defaults.earlyStopMonitorInterval,
           early_stop_decision_points: defaults.earlyStopDecisionPoints,
@@ -4381,6 +4393,20 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                   onChange={(e) => setBestSplatInterval(parseInt(e.target.value) || 100)}
                                   className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
                                   min={10}
+                                  step={10}
+                                />
+                                </div>
+                                <div>
+                                <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                  <span>Best splat start step</span>
+                                  <button onClick={() => setSelectedInfoKey("bestSplatStartStep")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                </label>
+                                <input
+                                  type="number"
+                                  value={bestSplatStartStep}
+                                  onChange={(e) => setBestSplatStartStep(parseInt(e.target.value) || 2000)}
+                                  className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md"
+                                  min={1}
                                   step={10}
                                 />
                                 </div>
