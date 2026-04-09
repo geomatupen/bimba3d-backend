@@ -410,7 +410,8 @@ def _tail_text_lines(path: Path, max_lines: int) -> list[str]:
 
 
 def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    snapshot_rows: list[dict[str, Any]] = []
+    step_rows: list[dict[str, Any]] = []
     for line in lines:
         if "[GSPLAT SNAPSHOT]" in line:
             match = GSPLAT_SNAPSHOT_RE.search(line)
@@ -426,7 +427,7 @@ def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, A
             elapsed_raw = match.group("elapsed")
             speed_raw = match.group("speed")
             eta_raw = match.group("eta")
-            rows.append(
+            snapshot_rows.append(
                 {
                     "timestamp": timestamp,
                     "step": step,
@@ -449,7 +450,7 @@ def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, A
                 loss = float(step_match.group("loss"))
             except Exception:
                 continue
-            rows.append(
+            step_rows.append(
                 {
                     "timestamp": timestamp,
                     "step": step,
@@ -462,6 +463,9 @@ def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, A
                 }
             )
 
+    # Prefer explicit [GSPLAT SNAPSHOT] rows (configured log_interval cadence).
+    # Fallback to generic "Training step" rows only when snapshots are absent.
+    rows = snapshot_rows if snapshot_rows else step_rows
     if row_limit > 0 and len(rows) > row_limit:
         rows = rows[-row_limit:]
     return rows
@@ -2191,8 +2195,9 @@ def list_project_runs(project_id: str):
                     run_dir / "outputs" / "engines" / "litegs" / "metadata.json",
                 )
             )
+            has_comparison_summary = (run_dir / "comparison" / "experiment_summary.json").exists()
             is_base_run = run_id == base_session_id
-            is_completed = has_completed_outputs or (is_base_run and project_has_completed_outputs)
+            is_completed = has_completed_outputs or has_comparison_summary or (is_base_run and project_has_completed_outputs)
             run_shared_version = run_config.get("shared_config_version") if isinstance(run_config, dict) else None
             if not isinstance(run_shared_version, int):
                 run_shared_version = None
@@ -4359,6 +4364,43 @@ def get_experiment_summary(
             response_payload["metrics"] = metrics_payload
             if response_payload.get("early_stop") is None and isinstance(early_stop, dict) and early_stop:
                 response_payload["early_stop"] = early_stop
+
+            summary_major = response_payload.get("major_params") if isinstance(response_payload.get("major_params"), dict) else {}
+            run_cfg = _read_json_if_exists(run_dir / "run_config.json")
+            resolved_cfg = run_cfg.get("resolved_params") if isinstance(run_cfg, dict) and isinstance(run_cfg.get("resolved_params"), dict) else {}
+            requested_cfg = run_cfg.get("requested_params") if isinstance(run_cfg, dict) and isinstance(run_cfg.get("requested_params"), dict) else {}
+            major_keys = [
+                "max_steps",
+                "densify_from_iter",
+                "densify_until_iter",
+                "densification_interval",
+                "eval_interval",
+                "save_interval",
+                "splat_export_interval",
+                "best_splat_interval",
+                "best_splat_start_step",
+                "auto_early_stop",
+                "early_stop_monitor_interval",
+                "early_stop_decision_points",
+                "early_stop_min_eval_points",
+                "early_stop_min_step_ratio",
+                "early_stop_monitor_min_relative_improvement",
+                "early_stop_eval_min_relative_improvement",
+                "early_stop_max_volatility_ratio",
+                "early_stop_ema_alpha",
+                "batch_size",
+            ]
+            for key in major_keys:
+                if summary_major.get(key) is not None:
+                    continue
+                if resolved_cfg.get(key) is not None:
+                    summary_major[key] = resolved_cfg.get(key)
+                    continue
+                if requested_cfg.get(key) is not None:
+                    summary_major[key] = requested_cfg.get(key)
+
+            if summary_major:
+                response_payload["major_params"] = summary_major
 
             if (
                 response_payload.get("eval_psnr_series") is None
