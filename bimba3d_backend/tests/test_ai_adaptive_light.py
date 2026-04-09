@@ -72,7 +72,7 @@ class CoreAIAdaptiveControllerTests(unittest.TestCase):
 
             self.assertEqual(first.action, ACTION_KEEP)
             self.assertEqual(second.action, ACTION_LR_UP)
-            self.assertTrue((Path(tmp) / "adaptive_ai" / "runs" / "test-run.summary.json").exists())
+            self.assertTrue((Path(tmp) / "runs" / "test-run" / "adaptive_ai" / "runs" / "test-run.summary.json").exists())
 
     def test_strategy_action_blocked_outside_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,6 +91,60 @@ class CoreAIAdaptiveControllerTests(unittest.TestCase):
 
             self.assertEqual(decision.action, ACTION_KEEP)
             self.assertEqual(decision.reason, "outside_window")
+
+    def test_small_change_band_keeps_action_stable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp))
+            runner = make_runner()
+
+            def fake_forward(_x):
+                logits = np.zeros((len(ACTIONS),), dtype=np.float64)
+                logits[ACTIONS.index(ACTION_LR_UP)] = 5.0
+                return np.zeros((64,), dtype=np.float64), np.zeros((64,), dtype=np.float64), logits
+
+            controller.model.forward = fake_forward  # type: ignore[assignment]
+
+            controller.decide_and_apply(step=200, loss=1.0, runner_obj=runner, apply_lr=True, apply_strategy=True)
+            decision = controller.decide_and_apply(step=300, loss=0.995, runner_obj=runner, apply_lr=True, apply_strategy=True)
+
+            self.assertEqual(decision.action, ACTION_KEEP)
+            self.assertEqual(decision.reason, "stable_small_change")
+
+    def test_late_phase_quality_priority_blocks_risky_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp))
+            runner = make_runner()
+
+            def fake_forward(_x):
+                logits = np.zeros((len(ACTIONS),), dtype=np.float64)
+                logits[ACTIONS.index(ACTION_LR_UP)] = 5.0
+                return np.zeros((64,), dtype=np.float64), np.zeros((64,), dtype=np.float64), logits
+
+            controller.model.forward = fake_forward  # type: ignore[assignment]
+
+            controller.decide_and_apply(step=7900, loss=1.0, runner_obj=runner, apply_lr=True, apply_strategy=True)
+            decision = controller.decide_and_apply(step=8000, loss=1.005, runner_obj=runner, apply_lr=True, apply_strategy=True)
+
+            self.assertEqual(decision.action, ACTION_KEEP)
+            self.assertEqual(decision.reason, "late_phase_quality_priority")
+
+    def test_late_phase_quality_priority_allows_risky_action_on_strong_gain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp))
+            runner = make_runner()
+
+            def fake_forward(_x):
+                logits = np.zeros((len(ACTIONS),), dtype=np.float64)
+                logits[ACTIONS.index(ACTION_LR_UP)] = 5.0
+                return np.zeros((64,), dtype=np.float64), np.zeros((64,), dtype=np.float64), logits
+
+            controller.model.forward = fake_forward  # type: ignore[assignment]
+
+            controller.decide_and_apply(step=7900, loss=1.0, runner_obj=runner, apply_lr=True, apply_strategy=True)
+            decision = controller.decide_and_apply(step=8000, loss=0.95, runner_obj=runner, apply_lr=True, apply_strategy=True)
+
+            self.assertEqual(decision.action, ACTION_LR_UP)
+            self.assertEqual(decision.reason, "late_phase_gate_allow")
 
 
 if __name__ == "__main__":

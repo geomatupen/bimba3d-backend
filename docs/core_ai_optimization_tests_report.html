@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Core AI Optimization Tests</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --ink: #18212f;
+      --muted: #506079;
+      --line: #d7deea;
+      --accent: #0f5fa8;
+      --good: #1f7a3a;
+      --warn: #8d5f00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 0% 0%, #eaf3ff 0%, transparent 26%),
+        radial-gradient(circle at 100% 0%, #edf8f1 0%, transparent 24%),
+        var(--bg);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 60px; }
+    .hero {
+      background: linear-gradient(135deg, #0f5fa8 0%, #2172ba 100%);
+      color: #fff;
+      border-radius: 14px;
+      padding: 22px;
+      box-shadow: 0 12px 28px rgba(16, 56, 94, 0.22);
+    }
+    .hero h1 { margin: 0 0 8px; font-size: 1.9rem; }
+    .hero p { margin: 0; opacity: 0.95; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.1rem;
+      color: var(--accent);
+    }
+    p { margin: 8px 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.94rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #eef4fc;
+      color: #16385e;
+    }
+    .ok { color: var(--good); font-weight: 700; }
+    .warn { color: var(--warn); font-weight: 700; }
+    code {
+      font-family: Consolas, "Cascadia Code", monospace;
+      background: #f0f4fb;
+      border: 1px solid #d9e2f0;
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-size: 0.9em;
+    }
+    .muted { color: var(--muted); }
+    @media (max-width: 900px) {
+      .hero h1 { font-size: 1.5rem; }
+      table { font-size: 0.87rem; }
+      th, td { padding: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Core AI Optimization Tests</h1>
+      <p>
+        Purpose: keep a report-ready history of major runs, key configuration parameters, and measured outcomes.
+        Update this page after each new run batch.
+      </p>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>1) Experiment Context and Baseline Anchor</h2>
+        <table>
+          <tbody>
+            <tr><th>Project name</th><td>Podoli</td></tr>
+            <tr><th>Project ID</th><td><code>9429dc3a-5357-43f8-bb46-3be9e7f9dcd3</code></td></tr>
+            <tr><th>Base run</th><td><code>podoli_session1</code></td></tr>
+            <tr><th>Comparison batch</th><td><code>batch_b46d165adba9</code> (3 modified runs)</td></tr>
+            <tr><th>Last update</th><td>2026-04-09 (local status + run summaries)</td></tr>
+          </tbody>
+        </table>
+      </article>
+
+      <article class="card">
+        <h2>1.1) Comparative Outcome Metrics</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Mode</th>
+              <th>Status</th>
+              <th>Start Source</th>
+              <th>Final Loss</th>
+              <th>Best Splat</th>
+              <th>Total Time (s)</th>
+              <th>Gaussians</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>podoli_session1</code></td>
+              <td>baseline</td>
+              <td><span class="ok">completed</span></td>
+              <td>scratch</td>
+              <td>0.0411398858</td>
+              <td>0.0300606191 @ step 13900</td>
+              <td>3283.919</td>
+              <td>2877296</td>
+              <td>Reference baseline.</td>
+            </tr>
+            <tr>
+              <td><code>podoli_session2</code></td>
+              <td>modified</td>
+              <td><span class="ok">completed</span></td>
+              <td>reuse external model id</td>
+              <td>0.0458630994</td>
+              <td>0.0337413326 @ step 13400</td>
+              <td>2891.397</td>
+              <td>2434451</td>
+              <td>Faster than baseline, worse final loss.</td>
+            </tr>
+            <tr>
+              <td><code>podoli_session2_run2</code></td>
+              <td>modified</td>
+              <td><span class="ok">completed</span></td>
+              <td>reuse <code>podoli_session2</code> checkpoint</td>
+              <td>0.0451963954</td>
+              <td>0.0337469615 @ step 13400</td>
+              <td>2934.848</td>
+              <td>2477179</td>
+              <td>Slightly better than run1, still worse than baseline.</td>
+            </tr>
+            <tr>
+              <td><code>podoli_session2_run3</code></td>
+              <td>modified</td>
+              <td><span class="ok">completed</span></td>
+              <td>reuse <code>podoli_session2_run2</code> checkpoint</td>
+              <td>0.0420721844 (status snapshot)</td>
+              <td>n/a (summary file not generated)</td>
+              <td>2830.498 (status timing)</td>
+              <td>n/a</td>
+              <td>Project status indicates completion; summary artifact missing.</td>
+            </tr>
+          </tbody>
+        </table>
+      </article>
+
+      <article class="card">
+        <h2>1.2) Core-AI Mechanism and Result Interpretation</h2>
+        <p>
+          In these modified runs, <code>core_ai_optimization</code> applies a guarded adaptive policy during training.
+          It monitors recent loss behavior and decides whether to keep settings stable or make small updates to core
+          optimization controls (mainly learning-rate and densification sensitivity behavior), with cooldown and gate
+          checks to avoid overreacting to noise.
+        </p>
+        <ul>
+          <li><strong>What it showed (major data):</strong> baseline final loss was <code>0.04114</code>; modified run1 and run2 ended at <code>0.04586</code> and <code>0.04520</code> (worse loss), while being faster than baseline by about 10-12% total time. Modified run3 completed with status loss snapshot <code>0.04207</code> and the fastest total time snapshot (<code>2830.50s</code>), but its summary artifact is still missing.</li>
+          <li><strong>Descriptive result:</strong> the controller is improving runtime efficiency and sometimes reaches low mid-run losses, but consistency to beat baseline quality is not yet proven.</li>
+          <li><strong>Meaning:</strong> current policy likely favors speed and adaptation responsiveness over stable final-quality convergence. This is promising for throughput, but report conclusions should treat quality-gain claims as provisional until a complete run3 summary and one more confirmatory run are recorded.</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>2) Stability Guard Update for Next Test</h2>
+        <p>
+          A conservative control safeguard was added in the Core-AI controller:
+          when relative improvement is inside a small stability band, the controller now keeps parameters unchanged
+          instead of forcing an LR or strategy action.
+        </p>
+        <table>
+          <thead>
+            <tr><th>Change</th><th>Reason</th><th>Expected Effect</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>stable_small_change</code> decision branch in <code>CoreAIAdaptiveController</code></td>
+              <td>Avoid over-reacting to noisy tiny changes around plateau regions.</td>
+              <td>Fewer unnecessary LR perturbations and smoother convergence around late training.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <strong>Next steps to improve:</strong>
+        </p>
+        <ul>
+          <li>Run one additional modified trial with this safeguard and compare against baseline using the same metrics table.</li>
+          <li>If final loss is still worse, tighten adaptation further (longer cooldown and stricter quality gate) before changing larger training knobs.</li>
+          <li>Only after repeat quality parity or improvement, extend experiments to broader tuning scopes.</li>
+        </ul>
+      </article>
+
+      <article class="card">
+        <h2>3) Evidence and Source Files</h2>
+        <ul>
+          <li><code>bimba3d_backend/data/projects/9429dc3a-5357-43f8-bb46-3be9e7f9dcd3/status.json</code></li>
+          <li><code>bimba3d_backend/data/projects/9429dc3a-5357-43f8-bb46-3be9e7f9dcd3/runs/podoli_session1/comparison/experiment_summary.json</code></li>
+          <li><code>bimba3d_backend/data/projects/9429dc3a-5357-43f8-bb46-3be9e7f9dcd3/runs/podoli_session2/comparison/experiment_summary.json</code></li>
+          <li><code>bimba3d_backend/data/projects/9429dc3a-5357-43f8-bb46-3be9e7f9dcd3/runs/podoli_session2_run2/comparison/experiment_summary.json</code></li>
+          <li><code>bimba3d_backend/data/projects/9429dc3a-5357-43f8-bb46-3be9e7f9dcd3/runs/*/run_config.json</code></li>
+        </ul>
+        <p class="muted">Tip: keep this file under version control and append one row per new run batch.</p>
+      </article>
+    </section>
+  </div>
+</body>
+</html>

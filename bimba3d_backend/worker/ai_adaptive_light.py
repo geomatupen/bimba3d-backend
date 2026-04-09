@@ -135,6 +135,14 @@ class CoreAIAdaptiveController:
         self.cooldown_left = 0
         self.gate_alpha = 0.6
         self.learning_rate = 0.001
+        self.small_change_band = 0.015
+        self.quality_priority_start_step = max(self.tune_start_step, int(self.max_steps * 0.7))
+        self.quality_priority_gate_multiplier = 2.0
+        self.quality_priority_risky_actions = {
+            ACTION_LR_UP,
+            ACTION_DENSIFY_UP,
+            ACTION_DENSIFY_DOWN,
+        }
 
         self.loss_history: deque[float] = deque(maxlen=16)
         self.gaussian_history: deque[float] = deque(maxlen=16)
@@ -450,6 +458,12 @@ class CoreAIAdaptiveController:
 
         phase, _, progress = self._phase_info(step)
         gate_threshold = self._adaptive_gate_threshold(phase, progress)
+        strict_gate_threshold = self._clamp(
+            gate_threshold * self.quality_priority_gate_multiplier,
+            gate_threshold,
+            0.12,
+        )
+        quality_priority_active = int(step) >= self.quality_priority_start_step
         features = self._build_features(
             step=step,
             loss=loss_value,
@@ -469,9 +483,20 @@ class CoreAIAdaptiveController:
         elif relative_improvement is None:
             action = ACTION_KEEP
             reason = "warmup_no_prev_loss"
-        elif float(relative_improvement) >= float(gate_threshold):
-            action = ACTION_KEEP
-            reason = "adaptive_gate_keep"
+        else:
+            rel = float(relative_improvement)
+            if quality_priority_active and action in self.quality_priority_risky_actions:
+                if rel >= float(strict_gate_threshold):
+                    reason = "late_phase_gate_allow"
+                else:
+                    action = ACTION_KEEP
+                    reason = "late_phase_quality_priority"
+            elif rel >= float(gate_threshold):
+                action = ACTION_KEEP
+                reason = "adaptive_gate_keep"
+            elif rel >= -float(self.small_change_band):
+                action = ACTION_KEEP
+                reason = "stable_small_change"
 
         if not self._action_allowed(action, apply_lr=apply_lr, apply_strategy=apply_strategy):
             action = ACTION_KEEP
@@ -500,6 +525,9 @@ class CoreAIAdaptiveController:
             "loss": float(loss_value),
             "relative_improvement": float(relative_improvement) if relative_improvement is not None else None,
             "gate_threshold": float(gate_threshold),
+            "quality_priority_active": bool(quality_priority_active),
+            "quality_priority_start_step": int(self.quality_priority_start_step),
+            "quality_priority_gate_threshold": float(strict_gate_threshold),
             "action": action,
             "reason": reason,
             "reward_from_previous": float(reward_from_previous) if reward_from_previous is not None else None,
