@@ -116,6 +116,7 @@ interface ProjectRunInfo {
   session_status?: "completed" | "pending" | string;
   max_steps?: number | null;
   tune_scope?: string | null;
+  trend_scope?: string | null;
   adaptive_event_count?: number;
   has_run_config?: boolean;
   has_run_log?: boolean;
@@ -132,6 +133,7 @@ type NewSessionConfigSource = "current" | "defaults";
 
 type TrainingEngine = "gsplat" | "litegs";
 type TuneScope = "core_individual" | "core_only" | "core_ai_optimization" | "core_individual_plus_strategy";
+type TrendScope = "run" | "phase";
 type StartModelMode = "scratch" | "reuse";
 
 interface ReusableModelEntry {
@@ -221,6 +223,7 @@ const getDefaultProcessConfig = () => ({
   tune_end_step: 15000,
   tune_interval: 100,
   tune_scope: "core_individual_plus_strategy" as TuneScope,
+  trend_scope: "run" as TrendScope,
   run_count: 1,
   run_jitter_factor: 1,
   continue_on_failure: true,
@@ -319,6 +322,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [tuneEndStep, setTuneEndStep] = useState<number>(cfg.tune_end_step ?? 15000);
   const [tuneInterval, setTuneInterval] = useState<number>(cfg.tune_interval ?? 100);
   const [tuneScope, setTuneScope] = useState<TuneScope>(cfg.tune_scope ?? "core_individual_plus_strategy");
+  const [trendScope, setTrendScope] = useState<TrendScope>(cfg.trend_scope === "phase" ? "phase" : "run");
   const [runCount, setRunCount] = useState<number>(cfg.run_count ?? 1);
   const [runJitterFactor, setRunJitterFactor] = useState<number>(cfg.run_jitter_factor ?? 1);
   const [continueOnFailure, setContinueOnFailure] = useState<boolean>(cfg.continue_on_failure ?? true);
@@ -421,6 +425,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     tune_end_step: 'For Modified mode, this is the last step where rule-based tuning updates are allowed. The worker keeps applying rule checks until this step, then continues normal training.',
     tune_interval: 'For Modified mode, worker evaluates and applies rule-based updates every N steps during the tuning window.',
     tune_scope: 'Rule tuning scope: Core individual updates only LR groups. Core only updates LR groups + core strategy threshold. Core AI optimization runs a lightweight adaptive controller with gated actions and cross-run memory; it uses tune_min_improvement as the baseline anchor, then adapts thresholds over time. Core individual + strategy updates LR groups and full strategy controls.',
+    trend_scope: 'Core AI optimization trend scope for reward shaping: Run uses the whole current run trend, while Phase tracks trend independently inside each training phase. Phase is often more robust when early and late phases have different dynamics.',
     run_count: 'Total sessions in this batch, including the selected session as run 1. Default 1 keeps manual behavior.',
     run_jitter_factor: 'Per-run multiplier for LR-related params. 1 means no jitter across runs.',
     continue_on_failure: 'If enabled, remaining runs continue even when one run fails/stops.',
@@ -569,6 +574,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setTuneEndStep(defaults.tune_end_step ?? 15000);
     setTuneInterval(defaults.tune_interval ?? 100);
     setTuneScope(defaults.tune_scope ?? "core_individual_plus_strategy");
+    setTrendScope(defaults.trend_scope === "phase" ? "phase" : "run");
     setRunCount(defaults.run_count ?? 1);
     setRunJitterFactor(defaults.run_jitter_factor ?? 1);
     setContinueOnFailure(defaults.continue_on_failure ?? true);
@@ -639,6 +645,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (typeof resolved.tune_end_step === "number") setTuneEndStep(resolved.tune_end_step);
       if (typeof resolved.tune_interval === "number") setTuneInterval(resolved.tune_interval);
       if (resolved.tune_scope) setTuneScope(resolved.tune_scope as TuneScope);
+      if (resolved.trend_scope === "run" || resolved.trend_scope === "phase") setTrendScope(resolved.trend_scope as TrendScope);
       if (typeof resolved.run_count === "number") setRunCount(Math.max(1, Math.floor(resolved.run_count)));
       if (typeof resolved.run_jitter_factor === "number") setRunJitterFactor(Math.max(0.1, resolved.run_jitter_factor));
       if (typeof resolved.continue_on_failure === "boolean") setContinueOnFailure(resolved.continue_on_failure);
@@ -705,6 +712,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   const normalizeTrainingConfigForForm = (raw: Record<string, any>): Record<string, any> => {
     const normalized = { ...raw };
+    if (typeof normalized.trend_scope !== "string" && typeof raw.trendScope === "string") normalized.trend_scope = raw.trendScope;
     if (typeof normalized.max_steps !== "number" && typeof raw.maxSteps === "number") normalized.max_steps = raw.maxSteps;
     if (typeof normalized.log_interval !== "number" && typeof raw.logInterval === "number") normalized.log_interval = raw.logInterval;
     if (typeof normalized.splat_export_interval !== "number" && typeof raw.splatInterval === "number") normalized.splat_export_interval = raw.splatInterval;
@@ -760,6 +768,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_end_step: tuneEndStep,
       tune_interval: tuneInterval,
       tune_scope: tuneScope,
+      trend_scope: trendScope,
       run_count: runCount,
       run_jitter_factor: runJitterFactor,
       continue_on_failure: continueOnFailure,
@@ -795,7 +804,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, trendScope, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2328,6 +2337,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         tune_end_step: effectiveMode === "modified" ? tuneEndStep : undefined,
         tune_interval: effectiveMode === "modified" ? tuneInterval : undefined,
         tune_scope: effectiveMode === "modified" ? tuneScope : undefined,
+        trend_scope:
+          effectiveMode === "modified" && tuneScope === "core_ai_optimization"
+            ? trendScope
+            : undefined,
         run_count: includeBatchControls ? runCount : 1,
         run_jitter_factor: includeBatchControls ? runJitterFactor : undefined,
         continue_on_failure: includeBatchControls ? continueOnFailure : undefined,
@@ -2463,6 +2476,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         tune_end_step: effectiveMode === "modified" ? tuneEndStep : undefined,
         tune_interval: effectiveMode === "modified" ? tuneInterval : undefined,
         tune_scope: effectiveMode === "modified" ? tuneScope : undefined,
+        trend_scope:
+          effectiveMode === "modified" && tuneScope === "core_ai_optimization"
+            ? trendScope
+            : undefined,
         run_count: includeSessionControls ? runCount : undefined,
         run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
         continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
@@ -2634,6 +2651,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_end_step: tuneEndStep,
       tune_interval: tuneInterval,
       tune_scope: tuneScope,
+      trend_scope: tuneScope === "core_ai_optimization" ? trendScope : undefined,
       run_count: runCount,
       run_jitter_factor: runJitterFactor,
       continue_on_failure: continueOnFailure,
@@ -2679,6 +2697,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_end_step: tuneEndStep,
       tune_interval: tuneInterval,
       tune_scope: tuneScope,
+      trend_scope: tuneScope === "core_ai_optimization" ? trendScope : undefined,
       run_count: runCount,
       run_jitter_factor: runJitterFactor,
       continue_on_failure: continueOnFailure,
@@ -2844,6 +2863,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           tune_end_step: defaults.tune_end_step,
           tune_interval: defaults.tune_interval,
           tune_scope: defaults.tune_scope,
+          trend_scope:
+            defaults.tune_scope === "core_ai_optimization"
+              ? (defaults.trend_scope === "phase" ? "phase" : "run")
+              : undefined,
           run_count: includeSessionControls ? defaults.run_count : undefined,
           run_jitter_factor: includeSessionControls ? defaults.run_jitter_factor : undefined,
           continue_on_failure: includeSessionControls ? defaults.continue_on_failure : undefined,
@@ -4021,6 +4044,21 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                   <span className="text-[10px] text-blue-700">Core AI optimization only</span>
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                  <div className="md:col-span-2">
+                                    <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                      <span>Trend scope</span>
+                                      <button onClick={() => setSelectedInfoKey("trend_scope")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                    </label>
+                                    <select
+                                      value={trendScope}
+                                      onChange={(e) => setTrendScope((e.target.value as TrendScope) === "phase" ? "phase" : "run")}
+                                      className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    >
+                                      <option value="run">Whole current run trend</option>
+                                      <option value="phase">Phase-wise trend</option>
+                                    </select>
+                                    <p className="mt-1 text-[10px] text-slate-500">Run = one trend across all steps. Phase = separate trend per phase.</p>
+                                  </div>
                                   <div>
                                     <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
                                       <span>Run count</span>

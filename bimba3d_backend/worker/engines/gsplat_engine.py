@@ -178,6 +178,8 @@ def run_training(
     except Exception:
         tune_min_improvement = 0.005
     tune_scope = normalize_tune_scope(p.get("tune_scope", "with_strategy"))
+    trend_scope_raw = str(p.get("trend_scope") or "run").strip().lower()
+    trend_scope = trend_scope_raw if trend_scope_raw in {"run", "phase"} else "run"
     raw_densify_start = p.get("densify_from_iter", 500)
     raw_densify_end = p.get("densify_until_iter", 10000)
     try:
@@ -308,6 +310,7 @@ def run_training(
             "end_step": int(bounded_end),
             "interval": int(bounded_interval),
             "min_improvement": float(bounded_min_improve),
+            "trend_scope": trend_scope,
         }
 
         core_ai_controller = CoreAIAdaptiveController(
@@ -320,6 +323,7 @@ def run_training(
             strategy_end_step=strategy_tune_end_step,
             base_min_improvement=bounded_min_improve,
             decision_interval=bounded_interval,
+            trend_scope=trend_scope,
         )
     runner_ref: dict[str, object] = {"runner": None}
     last_snapshot_step: dict[str, int] = {"value": -1}

@@ -120,6 +120,9 @@ class CoreAIAdaptiveController:
         strategy_end_step: int,
         base_min_improvement: float,
         decision_interval: int,
+        reward_step_weight: float = 0.65,
+        reward_trend_weight: float = 0.35,
+        trend_scope: str = "run",
     ):
         self.project_dir = Path(project_dir)
         self.run_id = str(run_id)
@@ -130,6 +133,11 @@ class CoreAIAdaptiveController:
         self.strategy_end_step = max(self.strategy_start_step, int(strategy_end_step))
         self.base_min_improvement = float(max(0.0, min(1.0, base_min_improvement)))
         self.decision_interval = max(1, int(decision_interval))
+        self.reward_step_weight = max(0.0, float(reward_step_weight))
+        self.reward_trend_weight = max(0.0, float(reward_trend_weight))
+        self.trend_scope = str(trend_scope).strip().lower() or "run"
+        if self.trend_scope not in {"run", "phase"}:
+            self.trend_scope = "run"
 
         self.cooldown_intervals = 2
         self.cooldown_left = 0
@@ -151,6 +159,18 @@ class CoreAIAdaptiveController:
         self.last_action: str | None = None
         self.pending_transition: dict[str, Any] | None = None
         self.updates_since_save = 0
+
+        # Online full-run trend stats (O(1) updates) for reward shaping.
+        self._trend_count = 0
+        self._trend_sum_x = 0.0
+        self._trend_sum_y = 0.0
+        self._trend_sum_xx = 0.0
+        self._trend_sum_xy = 0.0
+        self._phase_trend_stats: dict[int, dict[str, float]] = {
+            0: {"count": 0.0, "sum_x": 0.0, "sum_y": 0.0, "sum_xx": 0.0, "sum_xy": 0.0},
+            1: {"count": 0.0, "sum_x": 0.0, "sum_y": 0.0, "sum_xx": 0.0, "sum_xy": 0.0},
+            2: {"count": 0.0, "sum_x": 0.0, "sum_y": 0.0, "sum_xx": 0.0, "sum_xy": 0.0},
+        }
 
         self._run_root_dir = self.project_dir / "runs" / self.run_id
         self._storage_dir = self._run_root_dir / "adaptive_ai"
@@ -282,6 +302,66 @@ class CoreAIAdaptiveController:
         cur = float(self.gaussian_history[-1])
         denom = max(abs(prev), 1.0)
         return (cur - prev) / denom
+
+    def _normalized_reward_weights(self) -> tuple[float, float]:
+        total = self.reward_step_weight + self.reward_trend_weight
+        if total <= 1e-12:
+            return 1.0, 0.0
+        return self.reward_step_weight / total, self.reward_trend_weight / total
+
+    def _update_run_trend_reward(self, loss: float) -> float:
+        self._trend_count += 1
+        x = float(self._trend_count)
+        y = float(loss)
+        self._trend_sum_x += x
+        self._trend_sum_y += y
+        self._trend_sum_xx += x * x
+        self._trend_sum_xy += x * y
+
+        if self._trend_count < 3:
+            return 0.0
+
+        n = float(self._trend_count)
+        denom = (n * self._trend_sum_xx) - (self._trend_sum_x * self._trend_sum_x)
+        if abs(denom) < 1e-12:
+            return 0.0
+
+        slope = ((n * self._trend_sum_xy) - (self._trend_sum_x * self._trend_sum_y)) / denom
+        mean_loss = self._trend_sum_y / n
+        # Lower loss trend (negative slope) should increase reward.
+        relative_slope = -slope / max(abs(mean_loss), 1e-8)
+        return self._clamp(relative_slope, -0.05, 0.05)
+
+    def _update_phase_trend_reward(self, *, phase: int, loss: float) -> float:
+        stats = self._phase_trend_stats.get(int(phase))
+        if stats is None:
+            return 0.0
+
+        count = stats["count"] + 1.0
+        x = count
+        y = float(loss)
+        sum_x = stats["sum_x"] + x
+        sum_y = stats["sum_y"] + y
+        sum_xx = stats["sum_xx"] + (x * x)
+        sum_xy = stats["sum_xy"] + (x * y)
+
+        stats["count"] = count
+        stats["sum_x"] = sum_x
+        stats["sum_y"] = sum_y
+        stats["sum_xx"] = sum_xx
+        stats["sum_xy"] = sum_xy
+
+        if count < 3.0:
+            return 0.0
+
+        denom = (count * sum_xx) - (sum_x * sum_x)
+        if abs(denom) < 1e-12:
+            return 0.0
+
+        slope = ((count * sum_xy) - (sum_x * sum_y)) / denom
+        mean_loss = sum_y / count
+        relative_slope = -slope / max(abs(mean_loss), 1e-8)
+        return self._clamp(relative_slope, -0.05, 0.05)
 
     def _extract_runner_stats(self, runner_obj: Any) -> tuple[dict[str, float], dict[str, float], float]:
         lrs: dict[str, float] = {}
@@ -432,6 +512,12 @@ class CoreAIAdaptiveController:
     ) -> AdaptiveDecision:
         loss_value = float(loss)
         self.loss_history.append(loss_value)
+        phase, _, _ = self._phase_info(step)
+        run_trend_reward = (
+            self._update_phase_trend_reward(phase=phase, loss=loss_value)
+            if self.trend_scope == "phase"
+            else self._update_run_trend_reward(loss_value)
+        )
 
         previous_loss = self.last_loss
         relative_improvement = None
@@ -440,23 +526,35 @@ class CoreAIAdaptiveController:
             relative_improvement = (previous_loss - loss_value) / denom
 
         reward_from_previous = None
+        step_reward_from_previous = None
+        trend_reward_from_previous = None
         trained_transition: dict[str, Any] | None = None
         if self.pending_transition is not None and previous_loss is not None:
             denom = max(abs(previous_loss), 1e-8)
-            reward = (previous_loss - loss_value) / denom
-            reward = self._clamp(reward, -0.05, 0.05)
+            step_reward = (previous_loss - loss_value) / denom
+            step_reward = self._clamp(step_reward, -0.05, 0.05)
+            trend_reward = float(run_trend_reward)
+            w_step, w_trend = self._normalized_reward_weights()
+            reward = self._clamp((w_step * step_reward) + (w_trend * trend_reward), -0.05, 0.05)
             prev_feat = np.asarray(self.pending_transition.get("features", [0.0] * self.feature_dim), dtype=np.float64)
             prev_action_idx = int(self.pending_transition.get("action_idx", 0))
             self.model.train_selected_action(prev_feat, prev_action_idx, float(reward), learning_rate=self.learning_rate)
             reward_from_previous = float(reward)
+            step_reward_from_previous = float(step_reward)
+            trend_reward_from_previous = float(trend_reward)
             trained_transition = {
                 "step": int(self.pending_transition.get("step", 0) or 0),
                 "features": [float(v) for v in self.pending_transition.get("features", [])],
                 "action": str(self.pending_transition.get("action") or ACTION_KEEP),
                 "reward": float(reward),
+                "step_reward": float(step_reward),
+                "run_trend_reward": float(trend_reward),
+                "reward_step_weight": float(w_step),
+                "reward_trend_weight": float(w_trend),
+                "trend_scope": self.trend_scope,
             }
 
-        phase, _, progress = self._phase_info(step)
+        _, _, progress = self._phase_info(step)
         gate_threshold = self._adaptive_gate_threshold(phase, progress)
         strict_gate_threshold = self._clamp(
             gate_threshold * self.quality_priority_gate_multiplier,
@@ -531,6 +629,12 @@ class CoreAIAdaptiveController:
             "action": action,
             "reason": reason,
             "reward_from_previous": float(reward_from_previous) if reward_from_previous is not None else None,
+            "step_reward_from_previous": float(step_reward_from_previous) if step_reward_from_previous is not None else None,
+            "run_trend_reward": float(run_trend_reward),
+            "trend_reward_from_previous": float(trend_reward_from_previous) if trend_reward_from_previous is not None else None,
+            "reward_step_weight": float(self._normalized_reward_weights()[0]),
+            "reward_trend_weight": float(self._normalized_reward_weights()[1]),
+            "trend_scope": self.trend_scope,
             "trained_transition": trained_transition,
             "apply_lr": bool(apply_lr),
             "apply_strategy": bool(apply_strategy),

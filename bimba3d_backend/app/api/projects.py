@@ -1628,6 +1628,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         params_payload.setdefault("early_stop_ema_alpha", 0.1)
         params_payload.setdefault("tune_end_step", 15000)
         params_payload.setdefault("tune_interval", 100)
+        params_payload.setdefault("trend_scope", "run")
         params_payload.setdefault("batch_size", 1)
         params_payload.setdefault("densify_from_iter", 500)
         params_payload.setdefault("densify_until_iter", 10000)
@@ -2208,14 +2209,17 @@ def list_project_runs(project_id: str):
             )
 
             adaptive_runs_dir = run_dir / "adaptive_ai" / "runs"
-            adaptive_logs = sorted(adaptive_runs_dir.glob("*.jsonl")) if adaptive_runs_dir.exists() else []
             adaptive_events = 0
-            for log_path in adaptive_logs:
-                try:
-                    with log_path.open("r", encoding="utf-8") as f:
-                        adaptive_events += sum(1 for _ in f)
-                except Exception:
-                    continue
+            try:
+                adaptive_logs = sorted(adaptive_runs_dir.glob("*.jsonl")) if adaptive_runs_dir.is_dir() else []
+                for log_path in adaptive_logs:
+                    try:
+                        with log_path.open("r", encoding="utf-8") as f:
+                            adaptive_events += sum(1 for _ in f)
+                    except Exception:
+                        continue
+            except Exception as exc:
+                logger.warning("Skipping adaptive logs for run %s due to access error: %s", run_id, exc)
 
             runs.append(
                 {
@@ -2232,6 +2236,7 @@ def list_project_runs(project_id: str):
                     "engine": resolved.get("engine") or requested.get("engine"),
                     "max_steps": resolved.get("max_steps") or requested.get("max_steps"),
                     "tune_scope": resolved.get("tune_scope") or requested.get("tune_scope"),
+                    "trend_scope": resolved.get("trend_scope") or requested.get("trend_scope"),
                     "adaptive_event_count": adaptive_events,
                     "has_run_config": run_config_path.exists(),
                     "has_run_log": (run_dir / "processing.log").exists(),
@@ -2795,7 +2800,22 @@ def delete_project_run(project_id: str, run_id: str):
             status.update_status(project_id, "stopped", current_run_id=None, stop_requested=True)
             current_status = status.get_status(project_id)
 
-        _delete_path_strict(target_dir)
+        try:
+            _delete_path_strict(target_dir)
+        except PermissionError as exc:
+            logger.warning("Delete blocked by permissions for %s/%s: %s", project_id, run_id, exc)
+            raise HTTPException(
+                status_code=423,
+                detail="Cannot delete session because files are locked or access is denied. Close open previews/File Explorer handles and retry.",
+            )
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in {5, 32}:
+                logger.warning("Delete blocked by Windows file lock for %s/%s: %s", project_id, run_id, exc)
+                raise HTTPException(
+                    status_code=423,
+                    detail="Cannot delete session because files are locked by another process. Close apps using the session files and retry.",
+                )
+            raise
 
         base_session_id = current_status.get("base_session_id") if isinstance(current_status, dict) else None
         deleted_was_base = base_session_id == run_id
@@ -4388,6 +4408,7 @@ def get_experiment_summary(
                 "early_stop_eval_min_relative_improvement",
                 "early_stop_max_volatility_ratio",
                 "early_stop_ema_alpha",
+                "trend_scope",
                 "batch_size",
             ]
             for key in major_keys:
@@ -4626,6 +4647,7 @@ def get_experiment_summary(
 
         resolved_cfg = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
         tune_interval = resolved_cfg.get("tune_interval")
+        trend_scope = resolved_cfg.get("trend_scope")
         log_interval = resolved_cfg.get("log_interval")
         major_params = {
             "max_steps": resolved_cfg.get("max_steps"),
@@ -4681,6 +4703,7 @@ def get_experiment_summary(
                 "history_count": tuning_history_count,
                 "history": tuning_history,
                 "tune_interval": tune_interval,
+                "trend_scope": trend_scope,
                 "log_interval": log_interval,
                 "runtime_series": runtime_tuning_series,
             },

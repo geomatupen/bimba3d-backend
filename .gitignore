@@ -20,6 +20,7 @@ __pycache__/
 bimba3d_backend/venv/
 bimba3d_backend/env/
 bimba3d_backend/data/projects/
+bimba3d_backend/data/archived_projects/
 bimba3d_backend/data/.cache/
 bimba3d_backend/**/outputs/
 bimba3d_backend/**/status.json

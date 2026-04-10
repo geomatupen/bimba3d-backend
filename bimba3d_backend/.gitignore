@@ -18,6 +18,7 @@ env/
 
 # Runtime data
 data/projects/
+data/archived_projects/
 data/**/outputs/
 data/**/status.json
 processing.log
