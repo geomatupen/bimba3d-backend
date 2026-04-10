@@ -2,6 +2,8 @@
 import { Play, Settings2, Layers, Map as MapIcon, Boxes, Check, X, Clock, Square, Download, Info as LucideInfo } from "lucide-react";
 import Map, { NavigationControl } from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 import { api } from "../../api/client";
 import ViewerTab from "./ViewerTab";
 import SparseViewer from "../SparseViewer.tsx";
@@ -72,6 +74,7 @@ interface TelemetryEventRow {
 
 interface TelemetryPayload {
   project_id: string;
+  project_name?: string | null;
   run_id?: string | null;
   generated_at?: string;
   training_rows?: TelemetryTrainingRow[];
@@ -165,6 +168,15 @@ const sanitizeRunToken = (value: string): string =>
     .slice(0, 80);
 
 const sanitizeModelToken = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 80);
+
+const sanitizeFilenameToken = (value: string): string =>
   value
     .trim()
     .toLowerCase()
@@ -528,6 +540,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [telemetryLoading, setTelemetryLoading] = useState<boolean>(false);
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [telemetryData, setTelemetryData] = useState<TelemetryPayload | null>(null);
+  const [telemetryDownloadBusy, setTelemetryDownloadBusy] = useState<boolean>(false);
   const [pipelineDone, setPipelineDone] = useState(false);
   const [projectRuns, setProjectRuns] = useState<ProjectRunInfo[]>([]);
   const [processingRunId, setProcessingRunId] = useState<string>("");
@@ -3013,14 +3026,307 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     }
   }, [projectId, processingRunId, selectedRunId]);
 
+  const handleDownloadTelemetryJson = useCallback(async (evt?: { preventDefault?: () => void; stopPropagation?: () => void }) => {
+    evt?.preventDefault?.();
+    evt?.stopPropagation?.();
+
+    const runIdForTelemetry = (telemetryData?.run_id || processingRunId || selectedRunId || "").trim();
+    if (!runIdForTelemetry) {
+      setTelemetryError("No session selected for telemetry export.");
+      return;
+    }
+
+    try {
+      setTelemetryDownloadBusy(true);
+      setTelemetryError(null);
+
+      const res = await api.get(`/projects/${projectId}/telemetry`, {
+        params: {
+          run_id: runIdForTelemetry,
+          log_limit: 500,
+          eval_limit: 100,
+          from_start: 1,
+        },
+      });
+
+      const telemetryPayload = res.data as TelemetryPayload;
+      const exportedAt = new Date().toISOString();
+      const exportDocument = {
+        export_type: "process_tab_full_log",
+        exported_at: exportedAt,
+        project: {
+          id: projectId,
+          name: telemetryPayload.project_name || projectDisplayName || projectId,
+        },
+        run: {
+          id: runIdForTelemetry,
+          name: selectedRunMeta?.run_name || runIdForTelemetry,
+          is_base: selectedRunMeta?.is_base ?? null,
+          session_status: selectedRunMeta?.session_status ?? null,
+          shared_config_version: selectedRunMeta?.shared_config_version ?? null,
+          active_sparse_shared_version: selectedRunMeta?.active_sparse_shared_version ?? null,
+          shared_outdated: selectedRunMeta?.shared_outdated ?? null,
+        },
+        telemetry: telemetryPayload,
+      };
+
+      const projectToken = sanitizeFilenameToken(telemetryPayload.project_name || projectDisplayName || projectId) || "project";
+      const runToken = sanitizeFilenameToken(runIdForTelemetry) || "run";
+      const stamp = exportedAt.replace(/[:.]/g, "-");
+      const filename = `${projectToken}_${runToken}_full_log_${stamp}.json`;
+
+      const blob = new Blob([JSON.stringify(exportDocument, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setTelemetryError(err instanceof Error ? err.message : "Failed to download telemetry JSON");
+    } finally {
+      setTelemetryDownloadBusy(false);
+    }
+  }, [telemetryData?.run_id, processingRunId, selectedRunId, projectId, projectDisplayName, selectedRunMeta]);
+
+  const handleDownloadTelemetryPdf = useCallback(async (evt?: { preventDefault?: () => void; stopPropagation?: () => void }) => {
+    evt?.preventDefault?.();
+    evt?.stopPropagation?.();
+
+    const runIdForTelemetry = (telemetryData?.run_id || processingRunId || selectedRunId || "").trim();
+    if (!runIdForTelemetry) {
+      setTelemetryError("No session selected for telemetry export.");
+      return;
+    }
+
+    try {
+      setTelemetryDownloadBusy(true);
+      setTelemetryError(null);
+
+      const res = await api.get(`/projects/${projectId}/telemetry`, {
+        params: {
+          run_id: runIdForTelemetry,
+          log_limit: 500,
+          eval_limit: 100,
+          from_start: 1,
+        },
+      });
+
+      const telemetryPayload = res.data as TelemetryPayload;
+      const projectName = telemetryPayload.project_name || projectDisplayName || projectId;
+      const runName = selectedRunMeta?.run_name || runIdForTelemetry;
+      const exportedAt = new Date().toISOString();
+
+      // Create PDF
+      const pdf = new jsPDF({ format: "a4", compress: true });
+      pdf.setFont("helvetica", "normal");
+      let yPos = 15;
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 12;
+      const contentWidth = pageWidth - 2 * margin;
+
+      const addHeading = (text: string, size: number = 14, isBold: boolean = true) => {
+        if (yPos + 8 > pageHeight - 10) {
+          pdf.addPage();
+          yPos = 15;
+        }
+        pdf.setFontSize(size);
+        if (isBold) pdf.setFont("helvetica", "bold");
+        pdf.text(text, margin, yPos);
+        pdf.setFont("helvetica", "normal");
+        yPos += size / 2.5 + 2;
+      };
+
+      const addText = (text: string, size: number = 10) => {
+        if (yPos + 4 > pageHeight - 10) {
+          pdf.addPage();
+          yPos = 15;
+        }
+        pdf.setFontSize(size);
+        const wrapped = pdf.splitTextToSize(text, contentWidth);
+        pdf.text(wrapped, margin, yPos);
+        yPos += wrapped.length * (size / 2.8) + 1;
+      };
+
+      const addSection = (title: string) => {
+        if (yPos + 8 > pageHeight - 10) {
+          pdf.addPage();
+          yPos = 15;
+        }
+        pdf.setFontSize(11);
+        pdf.setFont("helvetica", "bold");
+        pdf.setTextColor(25, 55, 120);
+        pdf.text(title, margin, yPos);
+        pdf.setTextColor(0, 0, 0);
+        pdf.setFont("helvetica", "normal");
+        yPos += 6;
+      };
+
+      const addKeyValue = (key: string, value: any, size: number = 9) => {
+        if (yPos + 4 > pageHeight - 10) {
+          pdf.addPage();
+          yPos = 15;
+        }
+        pdf.setFontSize(size);
+        const displayValue = value === null || value === undefined ? "-" : String(value);
+        pdf.text(`${key}: ${displayValue}`, margin + 2, yPos);
+        yPos += 4;
+      };
+
+      // Title
+      addHeading("Training Telemetry Report", 18, true);
+      addText(`Exported: ${exportedAt}`, 8);
+      yPos += 2;
+
+      // Project & Run Info
+      addSection("Project Information");
+      addKeyValue("Project Name", projectName);
+      addKeyValue("Project ID", projectId);
+      yPos += 2;
+
+      addSection("Session Information");
+      addKeyValue("Session Name", runName);
+      addKeyValue("Session ID", runIdForTelemetry);
+      addKeyValue("Is Base", selectedRunMeta?.is_base ? "Yes" : "No");
+      addKeyValue("Session Status", selectedRunMeta?.session_status || "-");
+      yPos += 2;
+
+      // Current Status
+      if (telemetryPayload.status) {
+        addSection("Current Status");
+        addKeyValue("Stage", telemetryPayload.status.stage || "-");
+        addKeyValue("Step", telemetryPayload.status.currentStep ? `${telemetryPayload.status.currentStep.toLocaleString()} / ${telemetryPayload.status.maxSteps ? telemetryPayload.status.maxSteps.toLocaleString() : "?"}` : "-");
+        addKeyValue("Current Loss", typeof telemetryPayload.status.current_loss === "number" ? telemetryPayload.status.current_loss.toFixed(6) : "-");
+        addKeyValue("Message", telemetryPayload.status.message || "-");
+        yPos += 2;
+      }
+
+      // Latest Eval
+      if (telemetryPayload.latest_eval) {
+        const latestEval = telemetryPayload.latest_eval;
+        addSection("Latest Evaluation Metrics");
+        addKeyValue("Eval Step", latestEval.step ? latestEval.step.toLocaleString() : "-");
+        addKeyValue("PSNR", typeof latestEval.psnr === "number" ? latestEval.psnr.toFixed(4) : "-");
+        addKeyValue("LPIPS", typeof latestEval.lpips === "number" ? latestEval.lpips.toFixed(4) : "-");
+        addKeyValue("SSIM", typeof latestEval.ssim === "number" ? latestEval.ssim.toFixed(4) : "-");
+        addKeyValue("Gaussians", latestEval.num_gaussians ? latestEval.num_gaussians.toLocaleString() : "-");
+        yPos += 2;
+      }
+
+      // Events
+      if (telemetryPayload.event_rows && telemetryPayload.event_rows.length > 0) {
+        addSection("Important Events");
+        const eventRows = telemetryPayload.event_rows;
+        pdf.setFontSize(8);
+        const eventData = eventRows.map((row) => [
+          row.timestamp ? row.timestamp.substring(0, 19) : "-",
+          row.type || "-",
+          row.step ? String(row.step) : "-",
+          row.summary ? (row.summary.length > 120 ? row.summary.substring(0, 117) + "..." : row.summary) : "-",
+        ]);
+        autoTable(pdf, {
+          startY: yPos,
+          margin: { left: margin, right: margin, top: margin, bottom: margin },
+          head: [["Time", "Type", "Step", "Summary"]],
+          body: eventData,
+          columnStyles: {
+            0: { cellWidth: 24 },
+            1: { cellWidth: 18 },
+            2: { cellWidth: 10 },
+            3: { cellWidth: contentWidth - 52 },
+          },
+          headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120] },
+          bodyStyles: { fontSize: 7 },
+        });
+        yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 5;
+      }
+
+      // Training Rows
+      if (telemetryPayload.training_rows && telemetryPayload.training_rows.length > 0) {
+        addSection("Training Log");
+        const trainingRows = telemetryPayload.training_rows;
+        pdf.setFontSize(8);
+        const trainingData = trainingRows.map((row) => [
+          row.timestamp ? row.timestamp.substring(0, 19) : "-",
+          row.step ? String(row.step) : "-",
+          row.max_steps ? `${row.step}/${row.max_steps}` : "-",
+          typeof row.loss === "number" ? row.loss.toFixed(6) : "-",
+          typeof row.elapsed_seconds === "number" ? row.elapsed_seconds.toFixed(1) + "s" : "-",
+          row.eta || "-",
+          row.speed || "-",
+        ]);
+        autoTable(pdf, {
+          startY: yPos,
+          margin: { left: margin, right: margin, top: margin, bottom: margin },
+          head: [["Time", "Step", "Progress", "Loss", "Elapsed", "ETA", "Speed"]],
+          body: trainingData,
+          columnStyles: {
+            0: { cellWidth: 25 },
+            1: { cellWidth: 12 },
+            2: { cellWidth: 15 },
+            3: { cellWidth: 16 },
+            4: { cellWidth: 14 },
+            5: { cellWidth: 14 },
+            6: { cellWidth: 12 },
+          },
+          headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120] },
+          bodyStyles: { fontSize: 7 },
+        });
+        yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 5;
+      }
+
+      // Eval Rows
+      if (telemetryPayload.eval_rows && telemetryPayload.eval_rows.length > 0) {
+        addSection("Evaluation Metrics (All)");
+        pdf.setFontSize(8);
+        const evalData = telemetryPayload.eval_rows.map((row) => [
+          row.step ? String(row.step) : "-",
+          typeof row.psnr === "number" ? row.psnr.toFixed(4) : "-",
+          typeof row.lpips === "number" ? row.lpips.toFixed(4) : "-",
+          typeof row.ssim === "number" ? row.ssim.toFixed(4) : "-",
+          row.num_gaussians ? String(row.num_gaussians.toLocaleString()) : "-",
+        ]);
+        autoTable(pdf, {
+          startY: yPos,
+          margin: { left: margin, right: margin, top: margin, bottom: margin },
+          head: [["Step", "PSNR", "LPIPS", "SSIM", "Gaussians"]],
+          body: evalData,
+          columnStyles: {
+            0: { cellWidth: 20 },
+            1: { cellWidth: 25 },
+            2: { cellWidth: 25 },
+            3: { cellWidth: 25 },
+            4: { cellWidth: contentWidth - 95 },
+          },
+          headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120] },
+          bodyStyles: { fontSize: 7 },
+        });
+      }
+
+      // Save PDF
+      const projectToken = sanitizeFilenameToken(projectName) || "project";
+      const runToken = sanitizeFilenameToken(runIdForTelemetry) || "run";
+      const stamp = exportedAt.replace(/[:.]/g, "-").substring(0, 15);
+      const filename = `${projectToken}_${runToken}_log_${stamp}.pdf`;
+
+      pdf.save(filename);
+    } catch (err) {
+      setTelemetryError(err instanceof Error ? err.message : "Failed to download telemetry PDF");
+    } finally {
+      setTelemetryDownloadBusy(false);
+    }
+  }, [telemetryData?.run_id, processingRunId, selectedRunId, projectId, projectDisplayName, selectedRunMeta]);
+
   useEffect(() => {
     if (!showTelemetryModal) return;
     void fetchTelemetry();
+    if (telemetryDownloadBusy) return;
     const pollId = setInterval(() => {
       void fetchTelemetry();
     }, 3000);
     return () => clearInterval(pollId);
-  }, [showTelemetryModal, fetchTelemetry]);
+  }, [showTelemetryModal, fetchTelemetry, telemetryDownloadBusy]);
 
   const engineOptions = Object.values(engineOutputMap).filter((bundle) => bundle.hasModel);
   const hasEngineOutputs = Object.keys(engineOutputMap).length > 0;
@@ -3786,7 +4092,29 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                   <h3 className="text-base font-bold text-slate-900">Training Telemetry</h3>
                   <p className="text-xs text-slate-500">Run: {telemetryData?.run_id || processingRunId || selectedRunId || "-"}</p>
                 </div>
-                <button className="text-sm text-slate-600" onClick={() => setShowTelemetryModal(false)}>Close</button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={(e) => void handleDownloadTelemetryJson(e)}
+                    disabled={telemetryDownloadBusy || telemetryLoading}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Download full telemetry as JSON"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    {telemetryDownloadBusy ? "Preparing..." : "Download JSON"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => void handleDownloadTelemetryPdf(e)}
+                    disabled={telemetryDownloadBusy || telemetryLoading}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Download full telemetry as PDF"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    {telemetryDownloadBusy ? "Preparing..." : "Download PDF"}
+                  </button>
+                  <button type="button" className="text-sm text-slate-600" onClick={() => setShowTelemetryModal(false)}>Close</button>
+                </div>
               </div>
 
               <div className="p-4 overflow-auto max-h-[84vh] space-y-4 text-sm">

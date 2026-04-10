@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Download } from "lucide-react";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 import { api } from "../../api/client";
 
 interface ComparisonTabProps {
@@ -123,6 +126,12 @@ function fmt(v: unknown): string {
   return v.toPrecision(4);
 }
 
+function fmtTickLabel(v: number): string {
+  if (!Number.isFinite(v)) return "0";
+  if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString();
+  return v.toFixed(3).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
 function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "-";
   const rounded = Math.round(seconds);
@@ -164,7 +173,12 @@ function extractStepFromPreviewName(name: string): number | null {
 }
 
 function getLossSeriesPoints(summary: SummaryPayload | null | undefined, source: "log" | "eval"): GraphPoint[] {
-  const sourceSeries = source === "log" ? (summary?.log_loss_series ?? []) : (summary?.eval_series ?? []);
+  const sourceSeries =
+    source === "log"
+      ? ((summary?.log_loss_series && summary.log_loss_series.length > 0)
+          ? summary.log_loss_series
+          : (summary?.eval_series ?? []))
+      : (summary?.eval_series ?? []);
   return sourceSeries
     .map((item) => {
       if (!item || typeof item.step !== "number" || typeof item.loss !== "number") return null;
@@ -176,7 +190,12 @@ function getLossSeriesPoints(summary: SummaryPayload | null | undefined, source:
 }
 
 function getTimeSeriesPoints(summary: SummaryPayload | null | undefined, source: "log" | "eval"): GraphPoint[] {
-  const sourceSeries = source === "log" ? (summary?.log_time_series ?? []) : (summary?.eval_time_series ?? []);
+  const sourceSeries =
+    source === "log"
+      ? ((summary?.log_time_series && summary.log_time_series.length > 0)
+          ? summary.log_time_series
+          : (summary?.eval_time_series ?? []))
+      : (summary?.eval_time_series ?? []);
   return sourceSeries
     .map((item) => {
       if (!item || typeof item.step !== "number" || typeof item.elapsed_seconds !== "number") return null;
@@ -339,6 +358,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const [hoverStep, setHoverStep] = useState<number | null>(null);
   const [isViewSwitching, setIsViewSwitching] = useState(false);
   const [contentHoldHeight, setContentHoldHeight] = useState<number>(0);
+  const [comparisonPdfBusy, setComparisonPdfBusy] = useState<boolean>(false);
   const comparisonContentRef = useRef<HTMLDivElement | null>(null);
   const swipeAreaRef = useRef<HTMLDivElement | null>(null);
 
@@ -598,6 +618,10 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
 
   const leftHistory = leftSummary?.tuning?.history ?? [];
   const rightHistory = rightSummary?.tuning?.history ?? [];
+  const leftSelectedRun = useMemo(() => leftRuns.find((run) => run.run_id === leftRunId) || null, [leftRuns, leftRunId]);
+  const rightSelectedRun = useMemo(() => rightRuns.find((run) => run.run_id === rightRunId) || null, [rightRuns, rightRunId]);
+  const leftIsBase = Boolean(leftSelectedRun?.is_base);
+  const rightIsBase = Boolean(rightSelectedRun?.is_base);
   const leftHasSummaryData = (leftSummary?.eval_points ?? 0) > 0;
   const rightHasSummaryData = (rightSummary?.eval_points ?? 0) > 0;
   const selectedGraphRow = graphMetricRows.find((row) => row.key === selectedGraphMetric) ?? graphMetricRows[0];
@@ -727,6 +751,8 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const rightTuneEndStep = typeof rightSummary?.tuning?.end_step === "number" ? rightSummary.tuning.end_step : null;
   const leftTuneEndValue = leftTuneEndStep === null ? null : nearestPointValue(leftGraphPoints, leftTuneEndStep);
   const rightTuneEndValue = rightTuneEndStep === null ? null : nearestPointValue(rightGraphPoints, rightTuneEndStep);
+  const showLeftTuneEndMarker = showTuneEndMarkers && !leftIsBase && leftTuneEndStep !== null && leftTuneEndValue !== null;
+  const showRightTuneEndMarker = showTuneEndMarkers && !rightIsBase && rightTuneEndStep !== null && rightTuneEndValue !== null;
   const secondSwipeXPercent = bottomSwipePercent;
   const leftSessionLabel = leftSummary?.run_name || leftSummary?.run_id || "Left Session";
   const rightSessionLabel = rightSummary?.run_name || rightSummary?.run_id || "Right Session";
@@ -734,12 +760,434 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const middleLayerLabel = rightSessionLabel;
   const groundTruthLayerLabel = "Ground truth";
 
+  const downloadComparisonPdf = async () => {
+    if (!leftSummary || !rightSummary) return;
+
+    try {
+      setComparisonPdfBusy(true);
+      const pdf = new jsPDF({ format: "a4", compress: true });
+      pdf.setFont("helvetica", "normal");
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 12;
+      const contentWidth = pageWidth - margin * 2;
+      let yPos = 15;
+
+      const addHeading = (text: string, size = 14) => {
+        if (yPos > pageHeight - 20) {
+          pdf.addPage();
+          yPos = 15;
+        }
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(size);
+        pdf.text(text, margin, yPos);
+        pdf.setFont("helvetica", "normal");
+        yPos += size / 2.5 + 2;
+      };
+
+      const addLine = (text: string, size = 9) => {
+        pdf.setFontSize(size);
+        const lines = pdf.splitTextToSize(text, contentWidth);
+        pdf.text(lines, margin, yPos);
+        yPos += lines.length * 4 + 1;
+      };
+
+      const toDataUrl = async (url: string): Promise<string> => {
+        const res = await fetch(url);
+        if (!res.ok) {
+          throw new Error(`Failed to load image: ${res.status}`);
+        }
+        const blob = await res.blob();
+        const reader = new FileReader();
+        return await new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("Failed to read image blob"));
+          reader.readAsDataURL(blob);
+        });
+      };
+
+      const drawImageFit = (dataUrl: string, x: number, y: number, maxW: number, maxH: number) => {
+        const props = pdf.getImageProperties(dataUrl);
+        const srcW = Math.max(1, Number(props.width || 1));
+        const srcH = Math.max(1, Number(props.height || 1));
+        const scale = Math.min(maxW / srcW, maxH / srcH);
+        const drawW = srcW * scale;
+        const drawH = srcH * scale;
+        const dx = x + (maxW - drawW) / 2;
+        const dy = y + (maxH - drawH) / 2;
+        pdf.setDrawColor(226, 232, 240);
+        pdf.rect(x, y, maxW, maxH);
+        pdf.addImage(dataUrl, "PNG", dx, dy, drawW, drawH);
+      };
+
+      addHeading("Comparison Report", 17);
+      addLine(`Exported: ${new Date().toISOString()}`);
+      addLine(`Left: ${leftSummary.name || leftSummary.project_id} | Run: ${leftSummary.run_name || leftSummary.run_id || "latest"}`);
+      addLine(`Right: ${rightSummary.name || rightSummary.project_id} | Run: ${rightSummary.run_name || rightSummary.run_id || "latest"}`);
+      addLine(`Graph parameter: ${selectedGraphRow.label}`);
+      yPos += 2;
+
+      const majorParamRows = [
+        ["max_steps", "Configured max steps"],
+        ["total_steps_completed", "Total steps completed"],
+        ["densify_from_iter", "Start densification"],
+        ["densify_until_iter", "End densification"],
+        ["densification_interval", "Densification interval"],
+        ["eval_interval", "Eval interval"],
+        ["best_splat_interval", "Best splat interval"],
+        ["auto_early_stop", "Auto early stop"],
+        ["batch_size", "Batch size"],
+      ] as const;
+
+      addHeading("Major Params", 12);
+      autoTable(pdf, {
+        startY: yPos,
+        margin: { left: margin, right: margin, top: margin, bottom: margin },
+        head: [["Major Param", "Left", "Right"]],
+        body: majorParamRows.map(([key, label]) => [
+          label,
+          fmtMajorParamValue(leftSummary.major_params?.[key]),
+          fmtMajorParamValue(rightSummary.major_params?.[key]),
+        ]),
+        headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
+        bodyStyles: { fontSize: 7, font: "helvetica" },
+      });
+      yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+
+      addHeading("Metrics", 12);
+      autoTable(pdf, {
+        startY: yPos,
+        margin: { left: margin, right: margin, top: margin, bottom: margin },
+        head: [["Metric", "Left", "Right", "Delta (Right - Left)"]],
+        body: metricRows.map((row) => {
+          const leftVal = leftSummary.metrics?.[row.key] as number | undefined;
+          const rightVal = rightSummary.metrics?.[row.key] as number | undefined;
+          return [
+            row.label,
+            fmtMetricValue(row.key, leftVal),
+            fmtMetricValue(row.key, rightVal),
+            deltaText(leftVal, rightVal, row.lowerIsBetter),
+          ];
+        }),
+        headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
+        bodyStyles: { fontSize: 7, font: "helvetica" },
+      });
+      yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+
+      if (milestoneKeys.length > 0) {
+        addHeading("Loss Milestones", 12);
+        autoTable(pdf, {
+          startY: yPos,
+          margin: { left: margin, right: margin, top: margin, bottom: margin },
+          head: [["Milestone", "Left", "Right", "Delta"]],
+          body: milestoneKeys.map((key) => {
+            const leftVal = leftSummary.loss_milestones?.[key] as number | undefined;
+            const rightVal = rightSummary.loss_milestones?.[key] as number | undefined;
+            return [
+              `Loss @ ${key.replace("loss_at_", "")}`,
+              fmt(leftVal),
+              fmt(rightVal),
+              deltaText(leftVal, rightVal, true),
+            ];
+          }),
+          headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
+          bodyStyles: { fontSize: 7, font: "helvetica" },
+        });
+        yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+      }
+
+      const buildPdfTicks = (min: number, max: number, size: number, vertical = false) => {
+        const span = Math.max(max - min, 1e-12);
+        const minSpacing = vertical ? 16 : 42;
+        const targetCount = Math.max(4, Math.min(vertical ? 12 : 14, Math.floor(size / minSpacing) + 1));
+        const step = niceNumber(span / Math.max(targetCount - 1, 1));
+        const start = vertical ? Math.floor(min / step) * step : Math.ceil(min / step) * step;
+        const end = vertical ? Math.ceil(max / step) * step : Math.floor(max / step) * step;
+        const values: number[] = [];
+        for (let v = start; vertical ? v <= end + step * 0.5 : v <= end; v += step) {
+          values.push(v);
+          if (values.length > 18) break;
+        }
+        if (values.length < 2) {
+          return [min, max];
+        }
+        return values;
+      };
+
+      const niceNumber = (value: number): number => {
+        if (!Number.isFinite(value) || value <= 0) return 1;
+        const exponent = Math.floor(Math.log10(value));
+        const fraction = value / Math.pow(10, exponent);
+        let niceFraction = 1;
+        if (fraction <= 1) niceFraction = 1;
+        else if (fraction <= 2) niceFraction = 2;
+        else if (fraction <= 5) niceFraction = 5;
+        else niceFraction = 10;
+        return niceFraction * Math.pow(10, exponent);
+      };
+      const getPdfGraphPoints = (summary: SummaryPayload | null, row: (typeof graphMetricRows)[number]) => {
+        if (row.type === "loss_log") return getLossSeriesPoints(summary, "log");
+        if (row.type === "time_log") return getTimeSeriesPoints(summary, "log");
+        if (row.type === "loss_eval") return getLossSeriesPoints(summary, "eval");
+        if (row.type === "time_eval") return getTimeSeriesPoints(summary, "eval");
+        if (row.type === "psnr_eval") return getEvalMetricSeriesPoints(summary, "psnr");
+        if (row.type === "ssim_eval") return getEvalMetricSeriesPoints(summary, "ssim");
+        if (row.type === "lpips_eval") return getEvalMetricSeriesPoints(summary, "lpips");
+        if (row.type === "tuning") return getTuningSeriesPoints(summary, row.path);
+        return getMajorParamSeriesPoints(summary, row.key, graphXMax);
+      };
+
+      const renderPdfGraphPage = (row: (typeof graphMetricRows)[number]) => {
+        const leftPoints = getPdfGraphPoints(leftSummary, row);
+        const rightPoints = getPdfGraphPoints(rightSummary, row);
+        const allPoints = [...leftPoints, ...rightPoints];
+        if (!allPoints.length) return;
+
+        const forceZeroXStartRow =
+          row.type === "loss_log" ||
+          row.type === "time_log" ||
+          row.type === "loss_eval" ||
+          row.type === "time_eval" ||
+          row.type === "psnr_eval" ||
+          row.type === "ssim_eval" ||
+          row.type === "lpips_eval" ||
+          row.type === "major";
+        const graphXMinRow = forceZeroXStartRow ? 0 : Math.min(...allPoints.map((p) => p.x));
+        const graphXMaxRow = Math.max(...allPoints.map((p) => p.x));
+        const graphYMinRowRaw = Math.min(...allPoints.map((p) => p.y));
+        const graphYMaxRowRaw = Math.max(...allPoints.map((p) => p.y));
+        const graphYPadRow = graphYMaxRowRaw === graphYMinRowRaw ? Math.max(1, Math.abs(graphYMaxRowRaw) * 0.1 || 1) : (graphYMaxRowRaw - graphYMinRowRaw) * 0.08;
+        const graphYMinRow = graphYMinRowRaw - graphYPadRow;
+        const graphYMaxRow = graphYMaxRowRaw + graphYPadRow;
+        const leftChangeMarkers = row.type === "tuning"
+          ? getTuningChangeMarkers(leftSummary, row.path)
+          : getTuningChangeSteps(leftSummary)
+              .map((step) => {
+                const y = nearestPointValue(leftPoints, step);
+                if (y === null) return null;
+                return { x: step, y };
+              })
+              .filter((p): p is GraphPoint => p !== null);
+        const rightChangeMarkers = row.type === "tuning"
+          ? getTuningChangeMarkers(rightSummary, row.path)
+          : getTuningChangeSteps(rightSummary)
+              .map((step) => {
+                const y = nearestPointValue(rightPoints, step);
+                if (y === null) return null;
+                return { x: step, y };
+              })
+              .filter((p): p is GraphPoint => p !== null);
+        const leftEndValueRow = leftTuneEndStep === null ? null : nearestPointValue(leftPoints, leftTuneEndStep);
+        const rightEndValueRow = rightTuneEndStep === null ? null : nearestPointValue(rightPoints, rightTuneEndStep);
+        const showLeftEndRow = showTuneEndMarkers && !leftIsBase && leftTuneEndStep !== null && leftEndValueRow !== null;
+        const showRightEndRow = showTuneEndMarkers && !rightIsBase && rightTuneEndStep !== null && rightEndValueRow !== null;
+
+        pdf.addPage();
+        yPos = 15;
+        addHeading("Comparison Graph", 14);
+        addLine(`Parameter: ${row.label}`);
+
+        const chartTopRow = yPos + 4;
+        const chartLeftRow = margin;
+        const chartWidthRow = contentWidth;
+        const chartHeightRow = 124;
+        const chartPadLeftRow = 12;
+        const chartPadRightRow = 8;
+        const chartPadTopRow = 10;
+        const chartPadBottomRow = 22;
+        const plotLeftRow = chartLeftRow + chartPadLeftRow;
+        const plotTopRow = chartTopRow + chartPadTopRow;
+        const plotWidthRow = chartWidthRow - chartPadLeftRow - chartPadRightRow;
+        const plotHeightRow = chartHeightRow - chartPadTopRow - chartPadBottomRow;
+
+        pdf.setDrawColor(226, 232, 240);
+        pdf.rect(chartLeftRow, chartTopRow, chartWidthRow, chartHeightRow);
+
+        const yTicksRow = buildPdfTicks(graphYMinRow, graphYMaxRow, plotHeightRow, true);
+        for (const value of yTicksRow) {
+          const ratio = (graphYMaxRow - value) / (graphYMaxRow - graphYMinRow || 1);
+          const y = plotTopRow + ratio * plotHeightRow;
+          pdf.setDrawColor(203, 213, 225);
+          pdf.line(plotLeftRow, y, plotLeftRow + plotWidthRow, y);
+          pdf.setDrawColor(148, 163, 184);
+          pdf.line(plotLeftRow - 4, y, plotLeftRow, y);
+          pdf.setFontSize(7);
+          pdf.setTextColor(100, 116, 139);
+          pdf.text(fmtTickLabel(value), chartLeftRow - 1, y + 1);
+        }
+
+        const xTicksRow = buildPdfTicks(graphXMinRow, graphXMaxRow, plotWidthRow, false);
+        for (let i = 0; i < xTicksRow.length; i += 1) {
+          const tick = xTicksRow[i];
+          const x = plotLeftRow + ((tick - graphXMinRow) / (graphXMaxRow - graphXMinRow || 1)) * plotWidthRow;
+          pdf.setDrawColor(241, 245, 249);
+          pdf.line(x, plotTopRow, x, plotTopRow + plotHeightRow);
+          pdf.setDrawColor(148, 163, 184);
+          pdf.line(x, plotTopRow + plotHeightRow, x, plotTopRow + plotHeightRow + 3);
+          pdf.setFontSize(7);
+          pdf.setTextColor(100, 116, 139);
+          pdf.text(fmtTickLabel(tick), x - 5, plotTopRow + plotHeightRow + 7);
+        }
+
+        pdf.setDrawColor(148, 163, 184);
+        pdf.line(plotLeftRow, plotTopRow + plotHeightRow, plotLeftRow + plotWidthRow, plotTopRow + plotHeightRow);
+        pdf.line(plotLeftRow, plotTopRow, plotLeftRow, plotTopRow + plotHeightRow);
+
+        const mapXRow = (x: number) => plotLeftRow + ((x - graphXMinRow) / (graphXMaxRow - graphXMinRow || 1)) * plotWidthRow;
+        const mapYRow = (y: number) => plotTopRow + plotHeightRow - ((y - graphYMinRow) / (graphYMaxRow - graphYMinRow || 1)) * plotHeightRow;
+
+        if (graphYMinRow < 0 && graphYMaxRow > 0) {
+          const zeroY = mapYRow(0);
+          pdf.setDrawColor(203, 213, 225);
+          pdf.line(plotLeftRow, zeroY, plotLeftRow + plotWidthRow, zeroY);
+        }
+
+        if (leftPoints.length > 1) {
+          pdf.setDrawColor(14, 165, 233);
+          for (let i = 1; i < leftPoints.length; i += 1) {
+            pdf.line(mapXRow(leftPoints[i - 1].x), mapYRow(leftPoints[i - 1].y), mapXRow(leftPoints[i].x), mapYRow(leftPoints[i].y));
+          }
+        }
+        if (rightPoints.length > 1) {
+          pdf.setDrawColor(244, 63, 94);
+          for (let i = 1; i < rightPoints.length; i += 1) {
+            pdf.line(mapXRow(rightPoints[i - 1].x), mapYRow(rightPoints[i - 1].y), mapXRow(rightPoints[i].x), mapYRow(rightPoints[i].y));
+          }
+        }
+
+        for (const p of leftPoints) {
+          pdf.setFillColor(14, 165, 233);
+          pdf.circle(mapXRow(p.x), mapYRow(p.y), 0.45, "F");
+        }
+        for (const p of rightPoints) {
+          pdf.setFillColor(244, 63, 94);
+          pdf.circle(mapXRow(p.x), mapYRow(p.y), 0.45, "F");
+        }
+
+        if (showTunerChangedMarkers) {
+          for (const p of leftChangeMarkers) {
+            pdf.setDrawColor(14, 165, 233);
+            pdf.circle(mapXRow(p.x), mapYRow(p.y), 1.0, "S");
+          }
+          for (const p of rightChangeMarkers) {
+            pdf.setDrawColor(244, 63, 94);
+            pdf.circle(mapXRow(p.x), mapYRow(p.y), 1.0, "S");
+          }
+        }
+
+        if (showTuneEndMarkers) {
+          if (showLeftSeries && showLeftEndRow) {
+            const x = mapXRow(leftTuneEndStep) - 1;
+            const y = mapYRow(leftEndValueRow as number);
+            pdf.setDrawColor(139, 92, 246);
+            pdf.line(x, y - 6, x, y + 6);
+          }
+          if (showRightSeries && showRightEndRow) {
+            const x = mapXRow(rightTuneEndStep) + 1;
+            const y = mapYRow(rightEndValueRow as number);
+            pdf.setDrawColor(139, 92, 246);
+            pdf.line(x, y - 6, x, y + 6);
+          }
+        }
+
+        pdf.setTextColor(15, 23, 42);
+        pdf.setFontSize(9);
+        pdf.text(`Step`, plotLeftRow + plotWidthRow / 2, plotTopRow + plotHeightRow + 16, { align: "center" });
+        pdf.text(row.label, chartLeftRow + 1, plotTopRow + plotHeightRow / 2, { angle: 90, align: "center" });
+        pdf.text(`Left: ${leftSessionLabel}`, margin, chartTopRow + chartHeightRow + 7);
+        pdf.text(`Right: ${rightSessionLabel}`, margin + 65, chartTopRow + chartHeightRow + 7);
+        pdf.setFontSize(8);
+        pdf.setTextColor(71, 85, 105);
+        pdf.text(`Blue = left series`, margin, chartTopRow + chartHeightRow + 13);
+        pdf.text(`Red = right series`, margin + 58, chartTopRow + chartHeightRow + 13);
+        pdf.text(`Hollow dots = tuner changed`, margin + 112, chartTopRow + chartHeightRow + 13);
+        if (showLeftEndRow || showRightEndRow) {
+          pdf.text(`Purple bars = tune end`, margin + 187, chartTopRow + chartHeightRow + 13);
+        }
+      };
+
+      renderPdfGraphPage(selectedGraphRow);
+      for (const row of graphMetricRows) {
+        if (row.key === selectedGraphRow.key) continue;
+        renderPdfGraphPage(row);
+      }
+
+      // Eval Image Comparison snapshot page
+      pdf.addPage();
+      yPos = 15;
+      addHeading("Eval Image Comparison Snapshot", 14);
+      addLine(`Eval step: ${selectedEvalStep === null ? "-" : fmt(selectedEvalStep)}`);
+      addLine(`Top layer: ${topLayerLabel} | Middle layer: ${middleLayerLabel}`);
+      if (showGroundTruthCompare) {
+        addLine(`Ground truth layer: ${groundTruthLayerLabel}`);
+      }
+
+      if (leftSelectedPreview && rightSelectedPreview) {
+        const [leftImg, rightImg, gtImg] = await Promise.all([
+          toDataUrl(leftSelectedPreview),
+          toDataUrl(rightSelectedPreview),
+          showGroundTruthCompare && fixedGroundTruthPreview ? toDataUrl(fixedGroundTruthPreview) : Promise.resolve<string>(""),
+        ]);
+
+        if (showGroundTruthCompare && gtImg) {
+          pdf.setFont("helvetica", "bold");
+          pdf.setFontSize(9);
+          pdf.text(`1. ${groundTruthLayerLabel}`, margin, yPos);
+          yPos += 3;
+          drawImageFit(gtImg, margin, yPos, contentWidth, 68);
+          yPos += 73;
+          pdf.setFont("helvetica", "normal");
+        }
+
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        pdf.text(`2. ${topLayerLabel}`, margin, yPos);
+        yPos += 3;
+        pdf.setFont("helvetica", "normal");
+
+        drawImageFit(leftImg, margin, yPos, contentWidth, 72);
+        yPos += 77;
+
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        pdf.text(`3. ${middleLayerLabel}`, margin, yPos);
+        yPos += 3;
+        pdf.setFont("helvetica", "normal");
+
+        drawImageFit(rightImg, margin, yPos, contentWidth, 72);
+      } else {
+        addLine("No matching eval step snapshots are available for both projects.");
+      }
+
+      const leftToken = (leftSummary.name || leftSummary.project_id || "left").replace(/[^a-zA-Z0-9_-]+/g, "-");
+      const rightToken = (rightSummary.name || rightSummary.project_id || "right").replace(/[^a-zA-Z0-9_-]+/g, "-");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      pdf.save(`comparison_${leftToken}_vs_${rightToken}_${stamp}.pdf`);
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Failed to generate comparison PDF"));
+    } finally {
+      setComparisonPdfBusy(false);
+    }
+  };
+
   return (
-    <div className="space-y-4">
-      <div className="bg-white rounded-lg border border-slate-200 p-4">
-        <h3 className="text-lg font-semibold text-slate-900 mb-3">Run Comparison</h3>
-        <p className="text-sm text-slate-600 mb-4">Pick two projects and compare metrics, tuning values, and preview snapshots side-by-side.</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div className="space-y-3">
+      <div className="bg-white rounded-lg border border-slate-200 p-3">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <h3 className="text-base font-semibold text-slate-900">Run Comparison</h3>
+          <button
+            type="button"
+            onClick={downloadComparisonPdf}
+            disabled={comparisonPdfBusy || loading || !leftSummary || !rightSummary}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4" />
+            {comparisonPdfBusy ? "Preparing PDF..." : "Download Comparison PDF"}
+          </button>
+        </div>
+        <p className="text-sm text-slate-600 mb-3">Pick two projects and compare metrics, tuning values, and preview snapshots side-by-side.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1">Left project</label>
             <select
@@ -748,7 +1196,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                 beginRefreshWithStableLayout();
                 setLeftId(e.target.value);
               }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg"
             >
               {options.map((option) => (
                 <option key={`left-${option.value}`} value={option.value}>{option.label}</option>
@@ -761,7 +1209,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                 beginRefreshWithStableLayout();
                 setLeftRunId(e.target.value);
               }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg"
             >
               {leftRuns.length === 0 ? (
                 <option value="">No completed sessions</option>
@@ -782,7 +1230,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                 beginRefreshWithStableLayout();
                 setRightId(e.target.value);
               }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg"
             >
               <option value="">Select project</option>
               {options.map((option) => (
@@ -796,7 +1244,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                 beginRefreshWithStableLayout();
                 setRightRunId(e.target.value);
               }}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+              className="w-full px-3 py-1.5 border border-slate-300 rounded-lg"
             >
               {rightRuns.length === 0 ? (
                 <option value="">No completed sessions</option>
@@ -823,8 +1271,8 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
 
       {!loading && !isViewSwitching && leftSummary && rightSummary && (
         <div ref={comparisonContentRef}>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="bg-white rounded-lg border border-slate-200 p-3">
               <p className="text-sm font-semibold text-slate-800">{leftSummary.name || leftSummary.project_id}</p>
               <p className="text-xs text-slate-500">run: {leftSummary.run_name || leftSummary.run_id || "latest"}</p>
               <p className="text-xs text-slate-500">mode: {leftSummary.mode || "-"} | engine: {leftSummary.engine || "-"}</p>
@@ -834,7 +1282,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                 <p className="text-xs text-amber-700 mt-1">No completed summary yet for this project.</p>
               )}
             </div>
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
+            <div className="bg-white rounded-lg border border-slate-200 p-3">
               <p className="text-sm font-semibold text-slate-800">{rightSummary.name || rightSummary.project_id}</p>
               <p className="text-xs text-slate-500">run: {rightSummary.run_name || rightSummary.run_id || "latest"}</p>
               <p className="text-xs text-slate-500">mode: {rightSummary.mode || "-"} | engine: {rightSummary.engine || "-"}</p>
@@ -850,9 +1298,9 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-700">
                 <tr>
-                  <th className="text-left px-4 py-3">Major Param</th>
-                  <th className="text-left px-4 py-3">Left</th>
-                  <th className="text-left px-4 py-3">Right</th>
+                  <th className="text-left px-3 py-2">Major Param</th>
+                  <th className="text-left px-3 py-2">Left</th>
+                  <th className="text-left px-3 py-2">Right</th>
                 </tr>
               </thead>
               <tbody>
@@ -865,20 +1313,12 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                   ["eval_interval", "Eval interval"],
                   ["best_splat_interval", "Best splat interval"],
                   ["auto_early_stop", "Auto early stop"],
-                  ["early_stop_monitor_interval", "Early-stop monitor interval"],
-                  ["early_stop_decision_points", "Early-stop decision points"],
-                  ["early_stop_min_eval_points", "Early-stop min eval points"],
-                  ["early_stop_min_step_ratio", "Early-stop min step ratio"],
-                  ["early_stop_monitor_min_relative_improvement", "Early-stop monitor min relative improvement"],
-                  ["early_stop_eval_min_relative_improvement", "Early-stop eval min relative improvement"],
-                  ["early_stop_max_volatility_ratio", "Early-stop max volatility ratio"],
-                  ["early_stop_ema_alpha", "Early-stop EMA alpha"],
                   ["batch_size", "Batch size"],
                 ].map(([key, label]) => (
                   <tr key={key} className="border-t border-slate-100">
-                    <td className="px-4 py-2 text-slate-700">{label}</td>
-                    <td className="px-4 py-2 text-slate-900">{fmtMajorParamValue(leftSummary.major_params?.[key])}</td>
-                    <td className="px-4 py-2 text-slate-900">{fmtMajorParamValue(rightSummary.major_params?.[key])}</td>
+                    <td className="px-3 py-1.5 text-slate-700">{label}</td>
+                    <td className="px-3 py-1.5 text-slate-900">{fmtMajorParamValue(leftSummary.major_params?.[key])}</td>
+                    <td className="px-3 py-1.5 text-slate-900">{fmtMajorParamValue(rightSummary.major_params?.[key])}</td>
                   </tr>
                 ))}
               </tbody>
@@ -889,10 +1329,10 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-slate-700">
                 <tr>
-                  <th className="text-left px-4 py-3">Metric</th>
-                  <th className="text-left px-4 py-3">Left</th>
-                  <th className="text-left px-4 py-3">Right</th>
-                  <th className="text-left px-4 py-3">Delta (Right - Left)</th>
+                  <th className="text-left px-3 py-2">Metric</th>
+                  <th className="text-left px-3 py-2">Left</th>
+                  <th className="text-left px-3 py-2">Right</th>
+                  <th className="text-left px-3 py-2">Delta (Right - Left)</th>
                 </tr>
               </thead>
               <tbody>
@@ -901,10 +1341,10 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                   const rightVal = rightSummary.metrics?.[row.key] as number | undefined;
                   return (
                     <tr key={row.key} className="border-t border-slate-100">
-                      <td className="px-4 py-2 text-slate-700">{row.label}</td>
-                      <td className="px-4 py-2 text-slate-900">{fmtMetricValue(row.key, leftVal)}</td>
-                      <td className="px-4 py-2 text-slate-900">{fmtMetricValue(row.key, rightVal)}</td>
-                      <td className="px-4 py-2 text-slate-600">{deltaText(leftVal, rightVal, row.lowerIsBetter)}</td>
+                      <td className="px-3 py-1.5 text-slate-700">{row.label}</td>
+                      <td className="px-3 py-1.5 text-slate-900">{fmtMetricValue(row.key, leftVal)}</td>
+                      <td className="px-3 py-1.5 text-slate-900">{fmtMetricValue(row.key, rightVal)}</td>
+                      <td className="px-3 py-1.5 text-slate-600">{deltaText(leftVal, rightVal, row.lowerIsBetter)}</td>
                     </tr>
                   );
                 })}
@@ -917,10 +1357,10 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-slate-700">
                   <tr>
-                    <th className="text-left px-4 py-3">Loss Milestone (500-step)</th>
-                    <th className="text-left px-4 py-3">Left</th>
-                    <th className="text-left px-4 py-3">Right</th>
-                    <th className="text-left px-4 py-3">Delta (Right - Left)</th>
+                    <th className="text-left px-3 py-2">Loss Milestone (500-step)</th>
+                    <th className="text-left px-3 py-2">Left</th>
+                    <th className="text-left px-3 py-2">Right</th>
+                    <th className="text-left px-3 py-2">Delta (Right - Left)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -930,10 +1370,10 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                     const stepLabel = key.replace("loss_at_", "");
                     return (
                       <tr key={key} className="border-t border-slate-100">
-                        <td className="px-4 py-2 text-slate-700">Loss @ {stepLabel}</td>
-                        <td className="px-4 py-2 text-slate-900">{fmt(leftVal)}</td>
-                        <td className="px-4 py-2 text-slate-900">{fmt(rightVal)}</td>
-                        <td className="px-4 py-2 text-slate-600">{deltaText(leftVal, rightVal, true)}</td>
+                        <td className="px-3 py-1.5 text-slate-700">Loss @ {stepLabel}</td>
+                        <td className="px-3 py-1.5 text-slate-900">{fmt(leftVal)}</td>
+                        <td className="px-3 py-1.5 text-slate-900">{fmt(rightVal)}</td>
+                        <td className="px-3 py-1.5 text-slate-600">{deltaText(leftVal, rightVal, true)}</td>
                       </tr>
                     );
                   })}
@@ -942,13 +1382,13 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
             </div>
           )}
 
-          <div className="bg-white rounded-lg border border-slate-200 p-4">
-            <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+          <div className="bg-white rounded-lg border border-slate-200 p-3">
+            <div className="flex flex-wrap items-end justify-between gap-2 mb-2">
               <div>
                 <p className="text-sm font-semibold text-slate-800">Comparison Line Graph</p>
                 <p className="text-xs text-slate-500">Select loss, tuning, or major params from dropdown. (X: Step, Y: Value). For tuning params, outlined points mark exact tuner-change steps.</p>
               </div>
-              <div className="flex flex-wrap items-end gap-3">
+              <div className="flex flex-wrap items-end gap-2">
                 <div className="min-w-[220px]">
                   <label className="block text-xs font-semibold text-slate-600 mb-1">Graph parameter</label>
                   <select
@@ -964,7 +1404,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                     ))}
                   </select>
                 </div>
-                <div className="flex items-center gap-2.5 text-[10px] leading-tight pb-1">
+                <div className="flex items-center gap-2 text-[10px] leading-tight pb-1">
                   <button
                     type="button"
                     onClick={() => setShowLeftSeries((prev) => !prev)}
@@ -1046,9 +1486,24 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                     const value = graphYMax - (graphYMax - graphYMin) * ratio;
                     return (
                       <g key={`grid-${i}`}>
-                        <line x1={graphPad} y1={y} x2={graphWidth - graphPad} y2={y} stroke="#e2e8f0" strokeWidth="1" />
-                        <text x={8} y={y + 4} fill="#64748b" fontSize="11">{fmt(value)}</text>
+                        <line x1={graphPad} y1={y} x2={graphWidth - graphPad} y2={y} stroke="#cbd5e1" strokeWidth="1.1" />
+                        <line x1={graphPad - 4} y1={y} x2={graphPad} y2={y} stroke="#94a3b8" strokeWidth="1.1" />
+                        <text x={graphPad - 8} y={y + 4} fill="#64748b" fontSize="11" textAnchor="end">{fmt(value)}</text>
                       </g>
+                    );
+                  })}
+                  {graphXTicks.map((tick, idx) => {
+                    const x = stepToSvgX(tick, graphXMin, graphXMaxUsed, graphWidth, graphPad);
+                    return (
+                      <line
+                        key={`xgrid-${idx}`}
+                        x1={x}
+                        y1={graphPad}
+                        x2={x}
+                        y2={graphHeight - graphPad}
+                        stroke="#d1d5db"
+                        strokeWidth="1.1"
+                      />
                     );
                   })}
                   <line x1={graphPad} y1={graphHeight - graphPad} x2={graphWidth - graphPad} y2={graphHeight - graphPad} stroke="#94a3b8" strokeWidth="1.2" />
@@ -1059,7 +1514,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                     return (
                       <g key={`xtick-${idx}`}>
                         <line x1={x} y1={graphHeight - graphPad} x2={x} y2={graphHeight - graphPad + 6} stroke="#94a3b8" strokeWidth="1" />
-                        <text x={x - 18} y={graphHeight - graphPad + 18} fill="#64748b" fontSize="11">{fmt(Math.round(tick))}</text>
+                        <text x={x} y={graphHeight - graphPad + 18} fill="#64748b" fontSize="11" textAnchor="middle">{fmtTickLabel(tick)}</text>
                       </g>
                     );
                   })}
@@ -1100,7 +1555,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                     />
                   ))}
 
-                  {showTuneEndMarkers && showLeftSeries && leftTuneEndStep !== null && leftTuneEndValue !== null && (
+                  {showLeftTuneEndMarker && showLeftSeries && (
                     <line
                       x1={stepToSvgX(leftTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) - 1}
                       y1={valueToSvgY(leftTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) - 7}
@@ -1111,7 +1566,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
                       strokeLinecap="round"
                     />
                   )}
-                  {showTuneEndMarkers && showRightSeries && rightTuneEndStep !== null && rightTuneEndValue !== null && (
+                  {showRightTuneEndMarker && showRightSeries && (
                     <line
                       x1={stepToSvgX(rightTuneEndStep, graphXMin, graphXMaxUsed, graphWidth, graphPad) + 1}
                       y1={valueToSvgY(rightTuneEndValue, graphYMin, graphYMax, graphHeight, graphPad) - 7}
