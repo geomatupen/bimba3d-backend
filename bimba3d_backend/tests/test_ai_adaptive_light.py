@@ -9,6 +9,7 @@ from bimba3d_backend.worker.ai_adaptive_light import (
     ACTION_DENSIFY_UP,
     ACTION_KEEP,
     ACTION_LR_UP,
+    ACTION_PRUNE_DOWN,
     ACTIONS,
     CoreAIAdaptiveController,
 )
@@ -145,6 +146,24 @@ class CoreAIAdaptiveControllerTests(unittest.TestCase):
 
             self.assertEqual(decision.action, ACTION_LR_UP)
             self.assertEqual(decision.reason, "late_phase_gate_allow")
+
+    def test_prune_down_action_reduces_prune_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = self._controller(Path(tmp))
+            runner = make_runner()
+
+            def fake_forward(_x):
+                logits = np.zeros((len(ACTIONS),), dtype=np.float64)
+                logits[ACTIONS.index(ACTION_PRUNE_DOWN)] = 5.0
+                return np.zeros((64,), dtype=np.float64), np.zeros((64,), dtype=np.float64), logits
+
+            controller.model.forward = fake_forward  # type: ignore[assignment]
+
+            controller.decide_and_apply(step=500, loss=1.0, runner_obj=runner, apply_lr=True, apply_strategy=True)
+            decision = controller.decide_and_apply(step=600, loss=1.05, runner_obj=runner, apply_lr=True, apply_strategy=True)
+
+            self.assertEqual(decision.action, ACTION_PRUNE_DOWN)
+            self.assertLess(runner.cfg.strategy.prune_opa, 5e-3)
 
 
 if __name__ == "__main__":

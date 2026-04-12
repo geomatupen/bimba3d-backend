@@ -323,6 +323,8 @@ def run_training(
             strategy_end_step=strategy_tune_end_step,
             base_min_improvement=bounded_min_improve,
             decision_interval=bounded_interval,
+            reward_step_weight=0.90,
+            reward_trend_weight=0.10,
             trend_scope=trend_scope,
         )
     runner_ref: dict[str, object] = {"runner": None}

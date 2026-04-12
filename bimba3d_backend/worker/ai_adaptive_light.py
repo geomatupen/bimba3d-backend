@@ -14,11 +14,12 @@ import numpy as np
 # Action space used by the lightweight controller.
 # Keep actions are intentionally explicit to simplify event logs and analysis.
 ACTION_KEEP = "keep"
-ACTION_LR_UP = "lr_up_3pct"
-ACTION_LR_DOWN = "lr_down_3pct"
+ACTION_LR_UP = "lr_up_5pct"
+ACTION_LR_DOWN = "lr_down_5pct"
 ACTION_DENSIFY_UP = "densify_thresh_up_small"
 ACTION_DENSIFY_DOWN = "densify_thresh_down_small"
 ACTION_PRUNE_UP = "prune_aggr_up_small"
+ACTION_PRUNE_DOWN = "prune_aggr_down_small"
 
 ACTIONS = [
     ACTION_KEEP,
@@ -27,6 +28,7 @@ ACTIONS = [
     ACTION_DENSIFY_UP,
     ACTION_DENSIFY_DOWN,
     ACTION_PRUNE_UP,
+    ACTION_PRUNE_DOWN,
 ]
 
 
@@ -141,8 +143,8 @@ class CoreAIAdaptiveController:
         strategy_end_step: int,
         base_min_improvement: float,
         decision_interval: int,
-        reward_step_weight: float = 0.65,
-        reward_trend_weight: float = 0.35,
+        reward_step_weight: float = 0.90,
+        reward_trend_weight: float = 0.10,
         trend_scope: str = "run",
     ):
         self.project_dir = Path(project_dir)
@@ -172,6 +174,7 @@ class CoreAIAdaptiveController:
             ACTION_LR_UP,
             ACTION_DENSIFY_UP,
             ACTION_DENSIFY_DOWN,
+            ACTION_PRUNE_UP,
         }
 
         self.loss_history: deque[float] = deque(maxlen=16)
@@ -484,6 +487,8 @@ class CoreAIAdaptiveController:
             return apply_lr
         if action in {ACTION_DENSIFY_UP, ACTION_DENSIFY_DOWN, ACTION_PRUNE_UP}:
             return apply_strategy
+        if action == ACTION_PRUNE_DOWN:
+            return apply_strategy
         return False
 
     def _apply_action(self, runner_obj: Any, action: str, *, apply_lr: bool, apply_strategy: bool) -> tuple[dict[str, float], dict[str, float]]:
@@ -497,7 +502,7 @@ class CoreAIAdaptiveController:
         strategy = getattr(getattr(runner_obj, "cfg", None), "strategy", None)
 
         if action in {ACTION_LR_UP, ACTION_LR_DOWN} and apply_lr:
-            mult = 1.03 if action == ACTION_LR_UP else 0.97
+            mult = 1.05 if action == ACTION_LR_UP else 0.95
             for key in ("means", "opacities", "scales", "quats", "sh0", "shN"):
                 optimizer = optimizers.get(key)
                 if optimizer is None or not getattr(optimizer, "param_groups", None):
@@ -518,6 +523,10 @@ class CoreAIAdaptiveController:
                 prune_before = float(getattr(strategy, "prune_opa", 0.0))
                 strategy_before["prune_opa"] = prune_before
                 strategy.prune_opa = self._clamp(prune_before * 1.01, 1e-4, 5e-2)
+            elif action == ACTION_PRUNE_DOWN:
+                prune_before = float(getattr(strategy, "prune_opa", 0.0))
+                strategy_before["prune_opa"] = prune_before
+                strategy.prune_opa = self._clamp(prune_before * 0.99, 1e-4, 5e-2)
 
         return lrs_before, strategy_before
 
