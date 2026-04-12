@@ -5,9 +5,49 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_ACTIVE_LOCAL_WORKERS: dict[str, subprocess.Popen] = {}
+_ACTIVE_LOCAL_WORKERS_LOCK = threading.Lock()
+
+
+def _register_local_worker_process(project_id: str, proc: subprocess.Popen) -> None:
+    with _ACTIVE_LOCAL_WORKERS_LOCK:
+        _ACTIVE_LOCAL_WORKERS[project_id] = proc
+
+
+def _pop_local_worker_process(project_id: str) -> subprocess.Popen | None:
+    with _ACTIVE_LOCAL_WORKERS_LOCK:
+        return _ACTIVE_LOCAL_WORKERS.pop(project_id, None)
+
+
+def stop_local_worker_process(project_id: str, timeout_seconds: float = 2.0) -> bool:
+    """Terminate an active local worker process for the project, if present."""
+    proc = _pop_local_worker_process(project_id)
+    if proc is None:
+        return False
+
+    try:
+        if proc.poll() is not None:
+            return False
+    except Exception:
+        return False
+
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout_seconds)
+        return True
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=timeout_seconds)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to terminate local worker for project %s: %s", project_id, exc)
+            return False
 
 _COLMAP_CAMERA_MODELS = {
     "SIMPLE_PINHOLE",
@@ -255,6 +295,7 @@ def run_worker_local(project_id: str, params: dict = None) -> None:
             env=child_env,
             creationflags=creationflags,
         )
+        _register_local_worker_process(project_id, proc)
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip("\n")
@@ -270,6 +311,8 @@ def run_worker_local(project_id: str, params: dict = None) -> None:
     except subprocess.CalledProcessError as e:
         logger.error("Local worker failed: returncode=%s", getattr(e, "returncode", None))
         raise
+    finally:
+        _pop_local_worker_process(project_id)
 
 
 def _run_cmd_with_retry(cmd: list[str], retries: int = 3, delay_sec: float = 2.0):

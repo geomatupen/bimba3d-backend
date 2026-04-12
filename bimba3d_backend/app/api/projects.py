@@ -48,7 +48,6 @@ BEST_SPARSE_META = ".best_sparse_selection.json"
 SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
 SHARED_CONFIG_FILE = "shared_config.json"
 BATCH_LINEAGE_FILE = ".batch_lineage_latest.json"
-DELETED_RUNS_IGNORE_FILE = ".deleted_runs_ignore.json"
 RUN_CONFIG_HISTORY_KEEP = 5
 GSPLAT_SNAPSHOT_RE = re.compile(
     r"\[GSPLAT SNAPSHOT\]\s+step=(?P<step>\d+)/(?:\s*)?(?P<max_steps>\d+).*?loss=(?P<loss>[0-9.eE+-]+).*?elapsed=(?P<elapsed>[0-9.eE+-]+)s.*?eta=(?P<eta>[^\s]+).*?speed=(?P<speed>[^\s]+)",
@@ -83,30 +82,6 @@ RULE_UPDATE_RE = re.compile(
 
 def _get_project_shared_config_path(project_dir: Path) -> Path:
     return project_dir / SHARED_CONFIG_FILE
-
-
-def _get_deleted_runs_ignore_path(project_dir: Path) -> Path:
-    return project_dir / DELETED_RUNS_IGNORE_FILE
-
-
-def _read_deleted_runs_ignore(project_dir: Path) -> set[str]:
-    path = _get_deleted_runs_ignore_path(project_dir)
-    if not path.exists():
-        return set()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(payload, list):
-            return {str(item).strip() for item in payload if isinstance(item, str) and str(item).strip()}
-    except Exception:
-        return set()
-    return set()
-
-
-def _write_deleted_runs_ignore(project_dir: Path, ignored: set[str]) -> None:
-    path = _get_deleted_runs_ignore_path(project_dir)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(sorted(ignored), indent=2), encoding="utf-8")
-    tmp.replace(path)
 
 
 def _extract_shared_config_from_params(params: dict | None) -> dict:
@@ -321,28 +296,6 @@ def _delete_path_strict(path: Path) -> None:
         return
 
     shutil.rmtree(path, onerror=_remove_readonly_then_retry)
-
-
-def _quarantine_run_dir(project_dir: Path, run_dir: Path) -> Path:
-    """Move a problematic run folder out of runs/ into a quarantine area."""
-    quarantine_root = project_dir / "_quarantined_runs"
-    quarantine_root.mkdir(parents=True, exist_ok=True)
-
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    base_name = f"{run_dir.name}__{stamp}"
-    target = quarantine_root / base_name
-    suffix = 1
-    while target.exists():
-        suffix += 1
-        target = quarantine_root / f"{base_name}_{suffix}"
-
-    try:
-        run_dir.rename(target)
-    except Exception:
-        # Fallback to shutil.move for edge cases where rename alone fails.
-        shutil.move(str(run_dir), str(target))
-
-    return target
 
 
 def _clear_restart_artifacts(
@@ -2290,15 +2243,9 @@ def list_project_runs(project_id: str):
         active_sparse_version = shared_doc.get("active_sparse_version") if isinstance(shared_doc.get("active_sparse_version"), int) else None
 
         runs: list[dict] = []
-        hidden_runs = _read_deleted_runs_ignore(project_dir)
         for run_dir in sorted((p for p in runs_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
             run_id = run_dir.name
-            if run_id in hidden_runs:
-                continue
             run_config_path = run_dir / "run_config.json"
-            if not run_config_path.exists():
-                logger.warning("Skipping broken run folder without run_config.json: %s/%s", project_id, run_id)
-                continue
             run_config = _read_json_if_exists(run_config_path)
             saved_at = run_config.get("saved_at") if isinstance(run_config, dict) else None
             resolved = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
@@ -2918,33 +2865,22 @@ def delete_project_run(project_id: str, run_id: str):
             status.update_status(project_id, "stopped", current_run_id=None, stop_requested=True)
             current_status = status.get_status(project_id)
 
-        quarantined_path: Path | None = None
-        hidden_due_lock = False
         try:
             _delete_path_strict(target_dir)
         except PermissionError as exc:
-            logger.warning("Delete blocked by permissions for %s/%s; attempting quarantine: %s", project_id, run_id, exc)
-            try:
-                quarantined_path = _quarantine_run_dir(project_dir, target_dir)
-            except Exception as q_exc:
-                logger.warning("Quarantine fallback failed for %s/%s: %s", project_id, run_id, q_exc)
-                ignored = _read_deleted_runs_ignore(project_dir)
-                ignored.add(run_id)
-                _write_deleted_runs_ignore(project_dir, ignored)
-                hidden_due_lock = True
+            logger.warning("Delete blocked by permissions for %s/%s: %s", project_id, run_id, exc)
+            raise HTTPException(
+                status_code=423,
+                detail="Cannot delete session because files are locked or access is denied. Close open previews/File Explorer handles and retry.",
+            )
         except OSError as exc:
             if getattr(exc, "winerror", None) in {5, 32}:
-                logger.warning("Delete blocked by Windows file lock for %s/%s; attempting quarantine: %s", project_id, run_id, exc)
-                try:
-                    quarantined_path = _quarantine_run_dir(project_dir, target_dir)
-                except Exception as q_exc:
-                    logger.warning("Quarantine fallback failed for %s/%s: %s", project_id, run_id, q_exc)
-                    ignored = _read_deleted_runs_ignore(project_dir)
-                    ignored.add(run_id)
-                    _write_deleted_runs_ignore(project_dir, ignored)
-                    hidden_due_lock = True
-            else:
-                raise
+                logger.warning("Delete blocked by Windows file lock for %s/%s: %s", project_id, run_id, exc)
+                raise HTTPException(
+                    status_code=423,
+                    detail="Cannot delete session because files are locked by another process. Close apps using the session files and retry.",
+                )
+            raise
 
         base_session_id = current_status.get("base_session_id") if isinstance(current_status, dict) else None
         deleted_was_base = base_session_id == run_id
@@ -2966,101 +2902,12 @@ def delete_project_run(project_id: str, run_id: str):
         if isinstance(current_status, dict) and current_status.get("current_run_id") == run_id:
             status.update_status(project_id, current_status.get("status", "pending"), current_run_id=None)
 
-        return {
-            "status": "quarantined" if quarantined_path is not None else ("hidden" if hidden_due_lock else "deleted"),
-            "run_id": run_id,
-            "base_session_id": new_base_session_id,
-            "quarantined_path": str(quarantined_path) if quarantined_path is not None else None,
-            "hidden_due_lock": hidden_due_lock,
-        }
+        return {"status": "deleted", "run_id": run_id, "base_session_id": new_base_session_id}
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("Error deleting run %s/%s: %s", project_id, run_id, exc)
         raise HTTPException(status_code=500, detail="Failed to delete run")
-
-
-@router.post("/{project_id}/runs/{run_id}/force-quarantine")
-def force_quarantine_project_run(project_id: str, run_id: str):
-    """Force-move a problematic run session out of runs/ into _quarantined_runs/."""
-    try:
-        project_dir = DATA_DIR / project_id
-        if not project_dir.exists():
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        runs_root = project_dir / "runs"
-        target_dir = runs_root / run_id
-        if not target_dir.exists() or not target_dir.is_dir():
-            raise HTTPException(status_code=404, detail="Run not found")
-
-        current_status = status.get_status(project_id)
-        if (
-            isinstance(current_status, dict)
-            and current_status.get("status") in {"processing", "stopping"}
-            and current_status.get("current_run_id") == run_id
-        ):
-            worker_mode = str(current_status.get("worker_mode") or "")
-            is_actively_running = False
-            try:
-                resolved_mode = resolve_worker_mode(worker_mode)
-                if resolved_mode == "docker":
-                    is_actively_running = bool(colmap.get_project_worker_container_ids(project_id))
-                else:
-                    is_actively_running = bool(pipeline.is_local_project_active(project_id))
-            except Exception:
-                is_actively_running = True
-
-            if is_actively_running:
-                raise HTTPException(status_code=409, detail="Cannot quarantine an active run")
-
-            status.update_status(project_id, "stopped", current_run_id=None, stop_requested=True)
-            current_status = status.get_status(project_id)
-
-        try:
-            quarantined_path = _quarantine_run_dir(project_dir, target_dir)
-        except PermissionError as exc:
-            logger.warning("Quarantine blocked by permissions for %s/%s: %s", project_id, run_id, exc)
-            raise HTTPException(
-                status_code=423,
-                detail="Cannot quarantine session because files are locked or access is denied.",
-            )
-        except OSError as exc:
-            if getattr(exc, "winerror", None) in {5, 32}:
-                logger.warning("Quarantine blocked by Windows file lock for %s/%s: %s", project_id, run_id, exc)
-                raise HTTPException(
-                    status_code=423,
-                    detail="Cannot quarantine session because files are locked by another process.",
-                )
-            raise
-
-        base_session_id = current_status.get("base_session_id") if isinstance(current_status, dict) else None
-        moved_was_base = base_session_id == run_id
-        new_base_session_id = base_session_id
-        remaining = sorted((p for p in runs_root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True) if runs_root.exists() else []
-        if moved_was_base:
-            new_base_session_id = remaining[0].name if remaining else None
-            status.update_base_session_id(project_id, new_base_session_id)
-            try:
-                shared_doc = _read_project_shared_config(project_dir, new_base_session_id)
-                shared_doc["base_run_id"] = new_base_session_id
-                _write_project_shared_config(project_dir, shared_doc)
-            except Exception as exc:
-                logger.warning("Failed to update shared config base run after quarantine for %s: %s", project_id, exc)
-
-        if isinstance(current_status, dict) and current_status.get("current_run_id") == run_id:
-            status.update_status(project_id, current_status.get("status", "pending"), current_run_id=None)
-
-        return {
-            "status": "quarantined",
-            "run_id": run_id,
-            "quarantined_path": str(quarantined_path),
-            "base_session_id": new_base_session_id,
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("Error quarantining run %s/%s: %s", project_id, run_id, exc)
-        raise HTTPException(status_code=500, detail="Failed to quarantine run")
 
 
 @router.get("/{project_id}/shared-config")
