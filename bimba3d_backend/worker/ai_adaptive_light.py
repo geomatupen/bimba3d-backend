@@ -14,8 +14,8 @@ import numpy as np
 # Action space used by the lightweight controller.
 # Keep actions are intentionally explicit to simplify event logs and analysis.
 ACTION_KEEP = "keep"
-ACTION_LR_UP = "lr_up_5pct"
-ACTION_LR_DOWN = "lr_down_5pct"
+ACTION_LR_UP = "lr_up_15pct"
+ACTION_LR_DOWN = "lr_down_15pct"
 ACTION_DENSIFY_UP = "densify_thresh_up_small"
 ACTION_DENSIFY_DOWN = "densify_thresh_down_small"
 ACTION_PRUNE_UP = "prune_aggr_up_small"
@@ -43,6 +43,7 @@ class AdaptiveDecision:
     reward_from_previous: float | None
     features: list[float]
     action_scores: list[float]
+    action_adjustment_tag: str
 
 
 class TinyMLP:
@@ -143,9 +144,14 @@ class CoreAIAdaptiveController:
         strategy_end_step: int,
         base_min_improvement: float,
         decision_interval: int,
-        reward_step_weight: float = 0.90,
-        reward_trend_weight: float = 0.10,
+        reward_step_weight: float = 0.70,
+        reward_trend_weight: float = 0.30,
         trend_scope: str = "run",
+        lr_up_multiplier: float = 1.30,
+        lr_down_multiplier: float = 0.90,
+        gate_alpha: float = 0.30,
+        cooldown_intervals: int = 2,
+        small_change_band: float = 0.015,
     ):
         self.project_dir = Path(project_dir)
         self.run_id = str(run_id)
@@ -163,11 +169,13 @@ class CoreAIAdaptiveController:
             self.trend_scope = "run"
 
         # Policy safety and stability knobs.
-        self.cooldown_intervals = 2
+        self.cooldown_intervals = max(0, int(cooldown_intervals))
         self.cooldown_left = 0
-        self.gate_alpha = 0.6
+        self.gate_alpha = self._clamp(float(gate_alpha), 0.05, 1.0)
         self.learning_rate = 0.001
-        self.small_change_band = 0.015
+        self.small_change_band = self._clamp(float(small_change_band), 0.0005, 0.05)
+        self.lr_up_multiplier = self._clamp(float(lr_up_multiplier), 1.01, 2.0)
+        self.lr_down_multiplier = self._clamp(float(lr_down_multiplier), 0.25, 0.99)
         self.quality_priority_start_step = max(self.tune_start_step, int(self.max_steps * 0.7))
         self.quality_priority_gate_multiplier = 2.0
         self.quality_priority_risky_actions = {
@@ -491,6 +499,15 @@ class CoreAIAdaptiveController:
             return apply_strategy
         return False
 
+    def action_adjustment_tag(self, action: str) -> str:
+        if action == ACTION_LR_UP:
+            pct = int(round((self.lr_up_multiplier - 1.0) * 100.0))
+            return f"lr_up_{pct}pct"
+        if action == ACTION_LR_DOWN:
+            pct = int(round((1.0 - self.lr_down_multiplier) * 100.0))
+            return f"lr_down_{pct}pct"
+        return action
+
     def _apply_action(self, runner_obj: Any, action: str, *, apply_lr: bool, apply_strategy: bool) -> tuple[dict[str, float], dict[str, float]]:
         # Apply bounded multiplicative edits to avoid destructive jumps.
         lrs_before: dict[str, float] = {}
@@ -502,7 +519,7 @@ class CoreAIAdaptiveController:
         strategy = getattr(getattr(runner_obj, "cfg", None), "strategy", None)
 
         if action in {ACTION_LR_UP, ACTION_LR_DOWN} and apply_lr:
-            mult = 1.05 if action == ACTION_LR_UP else 0.95
+            mult = self.lr_up_multiplier if action == ACTION_LR_UP else self.lr_down_multiplier
             for key in ("means", "opacities", "scales", "quats", "sh0", "shN"):
                 optimizer = optimizers.get(key)
                 if optimizer is None or not getattr(optimizer, "param_groups", None):
@@ -690,6 +707,11 @@ class CoreAIAdaptiveController:
             "reward_step_weight": float(self._normalized_reward_weights()[0]),
             "reward_trend_weight": float(self._normalized_reward_weights()[1]),
             "trend_scope": self.trend_scope,
+            "lr_up_multiplier": float(self.lr_up_multiplier),
+            "lr_down_multiplier": float(self.lr_down_multiplier),
+            "cooldown_intervals": int(self.cooldown_intervals),
+            "gate_alpha": float(self.gate_alpha),
+            "small_change_band": float(self.small_change_band),
             "trained_transition": trained_transition,
             "apply_lr": bool(apply_lr),
             "apply_strategy": bool(apply_strategy),
@@ -710,4 +732,5 @@ class CoreAIAdaptiveController:
             reward_from_previous=float(reward_from_previous) if reward_from_previous is not None else None,
             features=[float(v) for v in features],
             action_scores=[float(v) for v in scores.tolist()],
+            action_adjustment_tag=self.action_adjustment_tag(action),
         )

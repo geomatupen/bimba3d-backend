@@ -435,7 +435,7 @@ def _read_text_lines(path: Path, max_lines: int, from_start: bool = False) -> li
         return []
 
 
-def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]]:
+def _extract_training_rows(lines: list[str], row_limit: int, from_start: bool = False) -> list[dict[str, Any]]:
     snapshot_rows: list[dict[str, Any]] = []
     step_rows: list[dict[str, Any]] = []
     for line in lines:
@@ -489,12 +489,101 @@ def _extract_training_rows(lines: list[str], row_limit: int) -> list[dict[str, A
                 }
             )
 
-    # Prefer explicit [GSPLAT SNAPSHOT] rows (configured log_interval cadence).
-    # Fallback to generic "Training step" rows only when snapshots are absent.
+    # Show log-interval snapshots in the modal. If snapshots are absent, fallback to step rows.
     rows = snapshot_rows if snapshot_rows else step_rows
+
+    # Deduplicate by step while preserving first-seen order from the selected source.
+    deduped: list[dict[str, Any]] = []
+    seen_steps: set[int] = set()
+    for row in rows:
+        step = row.get("step")
+        if isinstance(step, int):
+            if step in seen_steps:
+                continue
+            seen_steps.add(step)
+        deduped.append(row)
+
+    rows = deduped
     if row_limit > 0 and len(rows) > row_limit:
-        rows = rows[-row_limit:]
+        rows = rows[:row_limit] if from_start else rows[-row_limit:]
     return rows
+
+
+def _parse_log_timestamp_to_epoch(raw: Any) -> float | None:
+    if not isinstance(raw, str):
+        return None
+    token = raw.strip()
+    if not token:
+        return None
+    # Common logger format: "YYYY-MM-DD HH:MM:SS,mmm"
+    for fmt in ("%Y-%m-%d %H:%M:%S,%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(token, fmt).timestamp()
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(token.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _build_training_summary(training_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not training_rows:
+        return {
+            "first_step": None,
+            "last_step": None,
+            "start_timestamp": None,
+            "end_timestamp": None,
+            "total_elapsed_seconds": None,
+            "row_count": 0,
+        }
+
+    first_step = None
+    last_step = None
+    start_timestamp = None
+    end_timestamp = None
+    first_epoch = None
+    last_epoch = None
+    max_elapsed = None
+
+    for row in training_rows:
+        step = row.get("step")
+        if isinstance(step, int):
+            if first_step is None or step < first_step:
+                first_step = step
+            if last_step is None or step > last_step:
+                last_step = step
+
+        ts = row.get("timestamp")
+        epoch = _parse_log_timestamp_to_epoch(ts)
+        if epoch is not None:
+            if first_epoch is None or epoch < first_epoch:
+                first_epoch = epoch
+                start_timestamp = ts
+            if last_epoch is None or epoch > last_epoch:
+                last_epoch = epoch
+                end_timestamp = ts
+
+        elapsed = row.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            elapsed_val = float(elapsed)
+            if max_elapsed is None or elapsed_val > max_elapsed:
+                max_elapsed = elapsed_val
+
+    total_elapsed_seconds = None
+    if max_elapsed is not None:
+        total_elapsed_seconds = max_elapsed
+    elif first_epoch is not None and last_epoch is not None and last_epoch >= first_epoch:
+        total_elapsed_seconds = float(last_epoch - first_epoch)
+
+    return {
+        "first_step": first_step,
+        "last_step": last_step,
+        "start_timestamp": start_timestamp,
+        "end_timestamp": end_timestamp,
+        "total_elapsed_seconds": total_elapsed_seconds,
+        "row_count": len(training_rows),
+    }
 
 
 def _extract_eval_rows(stats_dir: Path, eval_limit: int) -> list[dict[str, Any]]:
@@ -2094,7 +2183,7 @@ def get_status_endpoint(project_id: str):
 def get_project_telemetry(
     project_id: str,
     run_id: Optional[str] = Query(default=None),
-    log_limit: int = Query(default=150, ge=20, le=500),
+    log_limit: int = Query(default=150, ge=20, le=5000),
     eval_limit: int = Query(default=20, ge=1, le=100),
     from_start: int = Query(default=0, ge=0, le=1),
 ):
@@ -2123,6 +2212,7 @@ def get_project_telemetry(
                 "event_rows": [],
                 "eval_rows": [],
                 "latest_eval": None,
+                "training_summary": _build_training_summary([]),
                 "status": {
                     "stage": project_status.get("stage"),
                     "message": project_status.get("message"),
@@ -2137,9 +2227,10 @@ def get_project_telemetry(
         stats_dir = run_dir / "outputs" / "engines" / "gsplat" / "stats"
 
         text_lines = _read_text_lines(run_log_path, max_lines=log_limit, from_start=bool(from_start))
-        training_rows = _extract_training_rows(text_lines, row_limit=log_limit)
+        training_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
         event_rows = _extract_event_rows(text_lines, row_limit=max(10, min(100, log_limit)))
         eval_rows = _extract_eval_rows(stats_dir, eval_limit=eval_limit)
+        training_summary = _build_training_summary(training_rows)
 
         return {
             "project_id": project_id,
@@ -2150,6 +2241,7 @@ def get_project_telemetry(
             "event_rows": event_rows,
             "eval_rows": eval_rows,
             "latest_eval": eval_rows[-1] if eval_rows else None,
+            "training_summary": training_summary,
             "status": {
                 "stage": project_status.get("stage"),
                 "message": project_status.get("message"),

@@ -313,6 +313,49 @@ def run_training(
             "trend_scope": trend_scope,
         }
 
+        # Extract AI tunable parameters from request payload with defaults matching CoreAIAdaptiveController signature.
+        ai_reward_step_weight = p.get("ai_reward_step_weight", 0.70)
+        try:
+            ai_reward_step_weight = max(0.0, float(ai_reward_step_weight))
+        except Exception:
+            ai_reward_step_weight = 0.70
+
+        ai_reward_trend_weight = p.get("ai_reward_trend_weight", 0.30)
+        try:
+            ai_reward_trend_weight = max(0.0, float(ai_reward_trend_weight))
+        except Exception:
+            ai_reward_trend_weight = 0.30
+
+        ai_lr_up_multiplier = p.get("ai_lr_up_multiplier", 1.30)
+        try:
+            ai_lr_up_multiplier = float(ai_lr_up_multiplier)
+        except Exception:
+            ai_lr_up_multiplier = 1.30
+
+        ai_lr_down_multiplier = p.get("ai_lr_down_multiplier", 0.90)
+        try:
+            ai_lr_down_multiplier = float(ai_lr_down_multiplier)
+        except Exception:
+            ai_lr_down_multiplier = 0.90
+
+        ai_gate_alpha = p.get("ai_gate_alpha", 0.30)
+        try:
+            ai_gate_alpha = float(ai_gate_alpha)
+        except Exception:
+            ai_gate_alpha = 0.30
+
+        ai_cooldown_intervals = p.get("ai_cooldown_intervals", 2)
+        try:
+            ai_cooldown_intervals = int(ai_cooldown_intervals)
+        except Exception:
+            ai_cooldown_intervals = 2
+
+        ai_small_change_band = p.get("ai_small_change_band", 0.015)
+        try:
+            ai_small_change_band = float(ai_small_change_band)
+        except Exception:
+            ai_small_change_band = 0.015
+
         core_ai_controller = CoreAIAdaptiveController(
             project_dir=project_dir,
             run_id=run_session_id,
@@ -323,9 +366,14 @@ def run_training(
             strategy_end_step=strategy_tune_end_step,
             base_min_improvement=bounded_min_improve,
             decision_interval=bounded_interval,
-            reward_step_weight=0.90,
-            reward_trend_weight=0.10,
+            reward_step_weight=ai_reward_step_weight,
+            reward_trend_weight=ai_reward_trend_weight,
             trend_scope=trend_scope,
+            lr_up_multiplier=ai_lr_up_multiplier,
+            lr_down_multiplier=ai_lr_down_multiplier,
+            gate_alpha=ai_gate_alpha,
+            cooldown_intervals=ai_cooldown_intervals,
+            small_change_band=ai_small_change_band,
         )
     runner_ref: dict[str, object] = {"runner": None}
     last_snapshot_step: dict[str, int] = {"value": -1}
@@ -538,6 +586,7 @@ def run_training(
                     apply_strategy=bool(apply_strategy),
                 )
                 event = {
+                    "action_adjustment_tag": decision.action_adjustment_tag,
                     "step": int(step),
                     "loss": loss_value,
                     "previous_loss": float(previous_loss) if previous_loss is not None else None,
@@ -555,7 +604,7 @@ def run_training(
                     "scope": tune_scope,
                     "rule_multipliers": {},
                     "scope_multipliers": {},
-                    "adjustments": [f"ai_action_{decision.action}"],
+                    "adjustments": [f"ai_action_{decision.action_adjustment_tag}"],
                     "lr_changes": {},
                     "params": {
                         "learning_rates": {},
@@ -567,6 +616,7 @@ def run_training(
                     },
                     "ai_decision": {
                         "action": decision.action,
+                        "action_adjustment_tag": decision.action_adjustment_tag,
                         "reason": decision.reason,
                         "gate_threshold": decision.gate_threshold,
                         "reward_from_previous": decision.reward_from_previous,
@@ -893,15 +943,8 @@ def run_training(
             if mode == "modified" and not tuning_state.get("phase_complete_logged") and step == tune_end_for_phase + 1:
                 tuning_state["phase_complete_logged"] = True
         apply_modified_rules(step, loss)
-        requested_stop = stop_checker()
-        status_text = "stopping" if requested_stop else "processing"
         progress_fraction = 0.0 if max_steps_local <= 0 else float(step) / float(max_steps_local)
         progress_fraction = max(0.0, min(1.0, progress_fraction))
-        message = (
-            f"⏸️ Stopping after step {step}/{max_steps_local} completes (loss: {loss:.6f})..."
-            if requested_stop
-            else f"🎯 Training step {step}/{max_steps_local} (loss: {loss:.6f})"
-        )
 
         now = time.time()
         elapsed = now - gsplat_start
@@ -960,6 +1003,8 @@ def run_training(
         tuning_state["last_callback_step"] = int(step)
         tuning_state["last_callback_elapsed"] = float(elapsed)
 
+        requested_stop = stop_checker()
+
         eta = (
             (elapsed / progress_fraction) * (1 - progress_fraction)
             if progress_fraction > 0
@@ -969,9 +1014,15 @@ def run_training(
         if eta is not None:
             timing["eta"] = eta
 
+        message = (
+            f"⏸️ Stopping after step {step}/{max_steps_local} completes (loss: {loss:.6f})..."
+            if requested_stop
+            else f"🎯 Training step {step}/{max_steps_local} (loss: {loss:.6f})"
+        )
+
         update_status(
             project_dir,
-            status_text,
+            "stopping" if requested_stop else "processing",
             progress=60 + int(progress_fraction * 35),
             mode=mode,
             tuning_active=(mode == "modified" and step <= max(tune_end_for_phase, strategy_tune_end_step)),
@@ -1258,16 +1309,23 @@ def run_training(
     gsplat_end = time.time()
     early_stop_state = tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else {}
     early_stop_triggered = bool(isinstance(early_stop_state, dict) and early_stop_state.get("triggered"))
+    stop_flag_reason = None
+    if stop_flag.exists():
+        try:
+            stop_flag_reason = stop_flag.read_text(encoding="utf-8").strip() or None
+        except Exception:
+            stop_flag_reason = None
 
-    if stop_reason is not None or stop_flag.exists():
+    if stop_reason is not None or stop_flag_reason:
         if not early_stop_triggered:
-            logger.info("Training stopped by user, skipping export and completion status.")
+            stop_message = "⏸️ Training stopped by user."
+            logger.info("Training stopped before export; reason=%s", stop_flag_reason or stop_reason)
             update_status(
                 project_dir,
                 "stopped",
                 progress=60,
                 stage="training",
-                message="⏸️ Training stopped by user.",
+                message=stop_message,
                 stopped_stage="training",
                 stopped_step=stop_reason if isinstance(stop_reason, int) else None,
             )
@@ -1404,6 +1462,7 @@ def run_training(
         metadata["tune_scope"] = tune_scope if mode == "modified" else None
         metadata["best_splat"] = tuning_state.get("best_splat")
         metadata["early_stop"] = tuning_state.get("early_stop")
+        metadata["stop_reason"] = stop_flag_reason or (f"runner_stop_step={stop_reason}" if isinstance(stop_reason, int) else None)
         write_json_atomic(metadata_path, metadata)
 
         loss_milestones: dict[str, float] = {}
@@ -1595,6 +1654,28 @@ def run_training(
                 shutil.copy2(run_cfg_source, comparison_dir / "run_config.json")
             except Exception as exc:
                 logger.warning("Failed to copy run_config.json into comparison folder: %s", exc)
+
+    # Persist durable training timing into metadata.json so total elapsed survives log rotation.
+    training_time_payload = {
+        "start_unix": float(gsplat_start),
+        "end_unix": float(gsplat_end),
+        "total_elapsed_seconds": max(0.0, float(gsplat_end - gsplat_start)),
+        "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(gsplat_start)),
+        "end_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(gsplat_end)),
+    }
+    metadata_path = engine_output_dir / "metadata.json"
+    metadata_timing = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                metadata_timing = json.load(handle)
+        except Exception:
+            metadata_timing = {}
+    if not isinstance(metadata_timing, dict):
+        metadata_timing = {}
+    metadata_timing["training_time"] = training_time_payload
+    metadata_timing["total_time_seconds"] = float(training_time_payload["total_elapsed_seconds"])
+    write_json_atomic(metadata_path, metadata_timing)
 
     if stop_flag.exists():
         stop_flag.unlink()

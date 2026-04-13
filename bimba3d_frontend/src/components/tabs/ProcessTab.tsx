@@ -81,6 +81,14 @@ interface TelemetryPayload {
   event_rows?: TelemetryEventRow[];
   eval_rows?: TelemetryEvalRow[];
   latest_eval?: TelemetryEvalRow | null;
+  training_summary?: {
+    first_step?: number | null;
+    last_step?: number | null;
+    start_timestamp?: string | null;
+    end_timestamp?: string | null;
+    total_elapsed_seconds?: number | null;
+    row_count?: number | null;
+  };
   status?: {
     stage?: string | null;
     message?: string | null;
@@ -184,6 +192,17 @@ const sanitizeFilenameToken = (value: string): string =>
     .replace(/-+/g, "-")
     .replace(/^[-_]+|[-_]+$/g, "")
     .slice(0, 80);
+
+const formatDurationCompact = (seconds?: number | null): string => {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "-";
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+};
 
 const buildDefaultModelName = (
   projectLabel: string | null | undefined,
@@ -3000,8 +3019,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       const res = await api.get(`/projects/${projectId}/telemetry`, {
         params: {
           run_id: runIdForTelemetry,
-          log_limit: 120,
+          log_limit: 5000,
           eval_limit: 20,
+          from_start: 1,
         },
       });
       if (
@@ -4091,6 +4111,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 <div>
                   <h3 className="text-base font-bold text-slate-900">Training Telemetry</h3>
                   <p className="text-xs text-slate-500">Run: {telemetryData?.run_id || processingRunId || selectedRunId || "-"}</p>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Total elapsed: <span className="font-semibold">{formatDurationCompact(telemetryData?.training_summary?.total_elapsed_seconds)}</span>
+                    {typeof telemetryData?.training_summary?.first_step === "number" && typeof telemetryData?.training_summary?.last_step === "number"
+                      ? ` • Steps ${telemetryData.training_summary.first_step.toLocaleString()} to ${telemetryData.training_summary.last_step.toLocaleString()}`
+                      : ""}
+                  </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
