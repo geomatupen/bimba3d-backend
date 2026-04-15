@@ -3,6 +3,7 @@ import logging
 import shutil
 import json
 import time
+import random
 import re
 import os
 import stat
@@ -361,15 +362,66 @@ def _clear_restart_artifacts(
             logger.warning("Failed to clear restart artifact %s: %s", target, exc)
 
 
-def _apply_run_jitter(params: dict, run_index: int, jitter_factor: float) -> dict:
-    """Apply per-run multiplicative jitter to selected learning-rate parameters."""
-    if jitter_factor <= 0:
-        jitter_factor = 1.0
-    if abs(jitter_factor - 1.0) < 1e-9:
-        return dict(params)
+def _normalize_jitter_mode(raw_mode: Any) -> str:
+    candidate = str(raw_mode or "fixed").strip().lower()
+    return candidate if candidate in {"fixed", "random"} else "fixed"
 
+
+def _parse_jitter_value(raw_value: Any, default_value: float) -> float:
+    try:
+        value = float(raw_value)
+    except Exception:
+        value = float(default_value)
+    return max(1e-6, value)
+
+
+def _resolve_jitter_settings(params: dict) -> tuple[str, float, float, float]:
+    mode = _normalize_jitter_mode(params.get("run_jitter_mode"))
+    factor = _parse_jitter_value(params.get("run_jitter_factor"), 1.0)
+
+    default_min = min(1.0, factor)
+    default_max = max(1.0, factor)
+    jitter_min = _parse_jitter_value(params.get("run_jitter_min"), default_min)
+    jitter_max = _parse_jitter_value(params.get("run_jitter_max"), default_max)
+    if jitter_min > jitter_max:
+        jitter_min, jitter_max = jitter_max, jitter_min
+
+    return mode, factor, jitter_min, jitter_max
+
+
+def _apply_run_jitter(
+    params: dict,
+    run_index: int,
+    jitter_factor: float,
+    *,
+    jitter_mode: str = "fixed",
+    jitter_min: float = 1.0,
+    jitter_max: float = 1.0,
+) -> dict:
+    """Apply per-run multiplicative jitter to selected learning-rate parameters.
+
+    Run index is zero-based; run 1 (index 0) is intentionally left unchanged.
+    """
     out = dict(params)
-    multiplier = float(jitter_factor) ** int(run_index)
+
+    idx = int(run_index)
+    if idx <= 0:
+        out["run_jitter_multiplier"] = 1.0
+        return out
+
+    if _normalize_jitter_mode(jitter_mode) == "random":
+        lo = _parse_jitter_value(jitter_min, 1.0)
+        hi = _parse_jitter_value(jitter_max, 1.0)
+        if lo > hi:
+            lo, hi = hi, lo
+        multiplier = random.uniform(lo, hi)
+    else:
+        factor = _parse_jitter_value(jitter_factor, 1.0)
+        if abs(factor - 1.0) < 1e-9:
+            out["run_jitter_multiplier"] = 1.0
+            return out
+        multiplier = float(factor) ** idx
+
     lr_defaults = {
         "feature_lr": 2.5e-3,
         "opacity_lr": 5.0e-2,
@@ -382,6 +434,7 @@ def _apply_run_jitter(params: dict, run_index: int, jitter_factor: float) -> dic
         base_val = out.get(key, default_val)
         if isinstance(base_val, (int, float)):
             out[key] = float(base_val) * multiplier
+    out["run_jitter_multiplier"] = float(multiplier)
     return out
 
 
@@ -489,6 +542,11 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
         "tune_end_step",
         "tune_interval",
         "tune_min_improvement",
+        "run_jitter_mode",
+        "run_jitter_factor",
+        "run_jitter_min",
+        "run_jitter_max",
+        "run_jitter_multiplier",
         "trend_scope",
         "feature_lr",
         "opacity_lr",
@@ -1035,6 +1093,9 @@ def _run_batch_process(
     base_params: dict,
     run_count: int,
     jitter_factor: float,
+    jitter_mode: str,
+    jitter_min: float,
+    jitter_max: float,
     continue_on_failure: bool,
     start_index: int = 1,
     initial_previous_success_run_id: str | None = None,
@@ -1095,7 +1156,14 @@ def _run_batch_process(
             else:
                 run_params["run_name"] = _build_followup_run_name(seed_run_name, idx + 1)
 
-            run_params = _apply_run_jitter(run_params, idx, jitter_factor)
+            run_params = _apply_run_jitter(
+                run_params,
+                idx,
+                jitter_factor,
+                jitter_mode=jitter_mode,
+                jitter_min=jitter_min,
+                jitter_max=jitter_max,
+            )
             logger.info("Batch %s/%s starting for %s (run_name=%s)", idx + 1, run_count_int, project_id, run_params.get("run_name"))
 
             response = process_project(project_id, ProcessParams(**run_params))
@@ -2266,10 +2334,14 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 raise HTTPException(status_code=400, detail="Batch resume is not supported. Use Batch Continue from a fresh start.")
 
             jitter_factor = float(requested_params.get("run_jitter_factor") or 1.0)
+            jitter_mode, jitter_factor, jitter_min, jitter_max = _resolve_jitter_settings(requested_params)
             continue_on_failure = bool(requested_params.get("continue_on_failure", True))
             batch_plan_id = f"batch_{uuid.uuid4().hex[:12]}"
 
-            batch_message = f"Batch queued: {run_count} runs (jitter={jitter_factor})."
+            if jitter_mode == "random":
+                batch_message = f"Batch queued: {run_count} runs (random jitter {jitter_min} to {jitter_max}, starts from run 2)."
+            else:
+                batch_message = f"Batch queued: {run_count} runs (fixed jitter={jitter_factor}, starts from run 2)."
             seed_run_raw = str(requested_params.get("run_name") or "").strip()
             seed_run_id = _sanitize_run_token(seed_run_raw)
             seed_action_note = (
@@ -2318,6 +2390,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             batch_seed_params = dict(requested_params)
             batch_seed_params["run_count"] = 1
             batch_seed_params["run_jitter_factor"] = jitter_factor
+            batch_seed_params["run_jitter_mode"] = jitter_mode
+            batch_seed_params["run_jitter_min"] = jitter_min
+            batch_seed_params["run_jitter_max"] = jitter_max
             batch_seed_params["continue_on_failure"] = continue_on_failure
             batch_seed_params["batch_plan_id"] = batch_plan_id
             batch_seed_params["batch_total"] = int(run_count)
@@ -2327,7 +2402,16 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
 
             thread = threading.Thread(
                 target=_run_batch_process,
-                args=(project_id, batch_seed_params, run_count, jitter_factor, continue_on_failure),
+                args=(
+                    project_id,
+                    batch_seed_params,
+                    run_count,
+                    jitter_factor,
+                    jitter_mode,
+                    jitter_min,
+                    jitter_max,
+                    continue_on_failure,
+                ),
                 daemon=True,
             )
             thread.start()
@@ -2338,6 +2422,9 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 "batch_plan_id": batch_plan_id,
                 "run_count": run_count,
                 "jitter_factor": jitter_factor,
+                "jitter_mode": jitter_mode,
+                "jitter_min": jitter_min,
+                "jitter_max": jitter_max,
                 "continue_on_failure": continue_on_failure,
                 "seed_action_note": seed_action_note or None,
             }
@@ -3087,7 +3174,12 @@ def continue_batch_from_run(
             resolved.get("batch_continue_on_failure", requested.get("batch_continue_on_failure", resolved.get("continue_on_failure", requested.get("continue_on_failure", True))))
         )
         batch_connect_runs = bool(resolved.get("batch_connect_runs", requested.get("batch_connect_runs", True)))
-        jitter_factor = float(resolved.get("run_jitter_factor", requested.get("run_jitter_factor", 1.0)) or 1.0)
+        jitter_mode, jitter_factor, jitter_min, jitter_max = _resolve_jitter_settings({
+            "run_jitter_mode": resolved.get("run_jitter_mode", requested.get("run_jitter_mode", "fixed")),
+            "run_jitter_factor": resolved.get("run_jitter_factor", requested.get("run_jitter_factor", 1.0)),
+            "run_jitter_min": resolved.get("run_jitter_min", requested.get("run_jitter_min")),
+            "run_jitter_max": resolved.get("run_jitter_max", requested.get("run_jitter_max")),
+        })
         batch_plan_id = str(resolved.get("batch_plan_id") or requested.get("batch_plan_id") or f"batch_{uuid.uuid4().hex[:12]}")
 
         restart_current = bool(payload.restart_current if payload is not None else True)
@@ -3100,6 +3192,9 @@ def continue_batch_from_run(
         base_params["continue_on_failure"] = continue_on_failure
         base_params["batch_connect_runs"] = batch_connect_runs
         base_params["run_jitter_factor"] = jitter_factor
+        base_params["run_jitter_mode"] = jitter_mode
+        base_params["run_jitter_min"] = jitter_min
+        base_params["run_jitter_max"] = jitter_max
         base_params["batch_plan_id"] = batch_plan_id
         base_params["batch_total"] = batch_total
         base_params["batch_index"] = batch_index
@@ -3167,6 +3262,9 @@ def continue_batch_from_run(
                 base_params,
                 batch_total,
                 jitter_factor,
+                jitter_mode,
+                jitter_min,
+                jitter_max,
                 continue_on_failure,
                 next_index,
                 previous_success_run_id,

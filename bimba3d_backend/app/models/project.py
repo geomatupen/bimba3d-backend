@@ -92,6 +92,10 @@ class ProcessParams(BaseModel):
     run_count: Optional[int] = None
     run_name_prefix: Optional[str] = None
     run_jitter_factor: Optional[float] = None
+    run_jitter_mode: Optional[str] = None  # "fixed" | "random"
+    run_jitter_min: Optional[float] = None
+    run_jitter_max: Optional[float] = None
+    run_jitter_multiplier: Optional[float] = None
     continue_on_failure: Optional[bool] = None
     batch_connect_runs: Optional[bool] = None
     # Internal batch chain metadata (persisted in run configs)

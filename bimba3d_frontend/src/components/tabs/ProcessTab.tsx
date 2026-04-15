@@ -173,6 +173,7 @@ type TrainingEngine = "gsplat" | "litegs";
 type TuneScope = "core_individual" | "core_only" | "core_ai_optimization" | "core_individual_plus_strategy";
 type TrendScope = "run" | "phase";
 type AiInputMode = "" | "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external";
+type RunJitterMode = "fixed" | "random";
 type TuneScopeDropdownValue =
   | TuneScope
   | "core_ai_optimization__exif_only"
@@ -357,7 +358,10 @@ const getDefaultProcessConfig = () => ({
   ai_input_mode: "" as AiInputMode,
   baseline_session_id: "",
   run_count: 1,
+  run_jitter_mode: "fixed" as RunJitterMode,
   run_jitter_factor: 1,
+  run_jitter_min: 0.85,
+  run_jitter_max: 1.15,
   continue_on_failure: true,
   start_model_mode: "scratch" as StartModelMode,
   source_model_id: "",
@@ -488,7 +492,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   );
   const [baselineSessionIdForAi, setBaselineSessionIdForAi] = useState<string>(cfg.baseline_session_id ?? "");
   const [runCount, setRunCount] = useState<number>(cfg.run_count ?? 1);
+  const [runJitterMode, setRunJitterMode] = useState<RunJitterMode>(cfg.run_jitter_mode === "random" ? "random" : "fixed");
   const [runJitterFactor, setRunJitterFactor] = useState<number>(cfg.run_jitter_factor ?? 1);
+  const [runJitterMin, setRunJitterMin] = useState<number>(cfg.run_jitter_min ?? 0.85);
+  const [runJitterMax, setRunJitterMax] = useState<number>(cfg.run_jitter_max ?? 1.15);
   const [continueOnFailure, setContinueOnFailure] = useState<boolean>(cfg.continue_on_failure ?? true);
   const [startModelMode, setStartModelMode] = useState<StartModelMode>(cfg.start_model_mode === "reuse" ? "reuse" : "scratch");
   const [sourceModelId, setSourceModelId] = useState<string>(cfg.source_model_id ?? "");
@@ -603,7 +610,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     ai_input_mode: 'Initial preset mode for Core AI optimization. Leave empty to use the legacy controller-only flow. EXIF only uses image metadata, EXIF + flight plan adds sequence-derived flight features, and + external adds cheap image-derived scene features (no manual external inputs).',
     baseline_session_id: 'Completed baseline gsplat session used as reference for baseline-relative scoring in Core AI optimization modes.',
     run_count: 'Total sessions in this batch, including the selected session as run 1. Default 1 keeps manual behavior.',
-    run_jitter_factor: 'Per-run multiplier for LR-related params. 1 means no jitter across runs.',
+    run_jitter_mode: 'Jitter behavior for batch runs starting from run 2. Fixed uses deterministic multiplier growth; Random samples a new multiplier per run within min/max bounds. Bounds: fixed factor >= 0.1 (frontend), random min/max >= 0.000001.',
+    run_jitter_factor: 'Fixed mode only: per-run deterministic multiplier for LR-related params (applied from run 2 onward). Bounds: minimum 0.1, no frontend hard max; 1 means no fixed jitter.',
+    run_jitter_min: 'Random mode only: lower bound for per-run random jitter multiplier (applied from run 2 onward). Bounds: minimum 0.000001, no frontend hard max. If min > max, backend auto-swaps.',
+    run_jitter_max: 'Random mode only: upper bound for per-run random jitter multiplier (applied from run 2 onward). Bounds: minimum 0.000001, no frontend hard max. If max < min, backend auto-swaps.',
     continue_on_failure: 'If enabled, remaining runs continue even when one run fails/stops.',
     start_model_mode: 'Choose training initialization mode. Scratch starts a fresh run; Reuse warm-starts from a selected elevated model.',
     source_model_id: 'Reusable model used for warm-start. Available models come from elevated gsplat sessions.',
@@ -778,7 +788,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setAiInputMode(defaults.ai_input_mode ?? "");
     setBaselineSessionIdForAi(defaults.baseline_session_id ?? "");
     setRunCount(defaults.run_count ?? 1);
+    setRunJitterMode(defaults.run_jitter_mode === "random" ? "random" : "fixed");
     setRunJitterFactor(defaults.run_jitter_factor ?? 1);
+    setRunJitterMin(defaults.run_jitter_min ?? 0.85);
+    setRunJitterMax(defaults.run_jitter_max ?? 1.15);
     setContinueOnFailure(defaults.continue_on_failure ?? true);
     setStartModelMode(defaults.start_model_mode ?? "scratch");
     setSourceModelId(defaults.source_model_id ?? "");
@@ -857,7 +870,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       }
       if (typeof resolved.baseline_session_id === "string") setBaselineSessionIdForAi(resolved.baseline_session_id);
       if (typeof resolved.run_count === "number") setRunCount(Math.max(1, Math.floor(resolved.run_count)));
+      if (resolved.run_jitter_mode === "fixed" || resolved.run_jitter_mode === "random") {
+        setRunJitterMode(resolved.run_jitter_mode as RunJitterMode);
+      }
       if (typeof resolved.run_jitter_factor === "number") setRunJitterFactor(Math.max(0.1, resolved.run_jitter_factor));
+      if (typeof resolved.run_jitter_min === "number") setRunJitterMin(Math.max(1e-6, resolved.run_jitter_min));
+      if (typeof resolved.run_jitter_max === "number") setRunJitterMax(Math.max(1e-6, resolved.run_jitter_max));
       if (typeof resolved.continue_on_failure === "boolean") setContinueOnFailure(resolved.continue_on_failure);
       if (resolved.start_model_mode === "scratch" || resolved.start_model_mode === "reuse") setStartModelMode(resolved.start_model_mode);
       if (typeof resolved.source_model_id === "string") setSourceModelId(resolved.source_model_id);
@@ -988,7 +1006,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       ai_input_mode: aiInputMode,
       baseline_session_id: baselineSessionIdForAi,
       run_count: runCount,
+      run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
+      run_jitter_min: runJitterMin,
+      run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
       source_model_id: sourceModelId,
@@ -2586,7 +2607,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             ? (baselineSessionIdForAi || undefined)
             : undefined,
         run_count: includeBatchControls ? runCount : 1,
+        run_jitter_mode: includeBatchControls ? runJitterMode : undefined,
         run_jitter_factor: includeBatchControls ? runJitterFactor : undefined,
+        run_jitter_min: includeBatchControls ? runJitterMin : undefined,
+        run_jitter_max: includeBatchControls ? runJitterMax : undefined,
         continue_on_failure: includeBatchControls ? continueOnFailure : undefined,
         start_model_mode: includeSessionControls ? startModelMode : undefined,
         source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
@@ -2739,7 +2763,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             ? (baselineSessionIdForAi || undefined)
             : undefined,
         run_count: includeSessionControls ? runCount : undefined,
+        run_jitter_mode: includeSessionControls ? runJitterMode : undefined,
         run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
+        run_jitter_min: includeSessionControls ? runJitterMin : undefined,
+        run_jitter_max: includeSessionControls ? runJitterMax : undefined,
         continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
         start_model_mode: includeSessionControls ? startModelMode : undefined,
         source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
@@ -2915,7 +2942,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       run_count: runCount,
+      run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
+      run_jitter_min: runJitterMin,
+      run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
       source_model_id: sourceModelId || undefined,
@@ -2965,7 +2995,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       run_count: runCount,
+      run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
+      run_jitter_min: runJitterMin,
+      run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
       source_model_id: sourceModelId,
@@ -3143,7 +3176,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
               ? (defaults.baseline_session_id || undefined)
               : undefined,
           run_count: includeSessionControls ? defaults.run_count : undefined,
+          run_jitter_mode: includeSessionControls ? defaults.run_jitter_mode : undefined,
           run_jitter_factor: includeSessionControls ? defaults.run_jitter_factor : undefined,
+          run_jitter_min: includeSessionControls ? defaults.run_jitter_min : undefined,
+          run_jitter_max: includeSessionControls ? defaults.run_jitter_max : undefined,
           continue_on_failure: includeSessionControls ? defaults.continue_on_failure : undefined,
           start_model_mode: includeSessionControls ? defaults.start_model_mode : undefined,
           source_model_id:
@@ -4958,7 +4994,22 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                       </div>
                                       <div>
                                         <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
-                                          <span>Jitter factor</span>
+                                          <span>Jitter mode</span>
+                                          <button onClick={() => setSelectedInfoKey("run_jitter_mode")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                        </label>
+                                        <select
+                                          value={runJitterMode}
+                                          onChange={(e) => setRunJitterMode((e.target.value as RunJitterMode) === "random" ? "random" : "fixed")}
+                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        >
+                                          <option value="fixed">Fixed (deterministic)</option>
+                                          <option value="random">Random (bounded)</option>
+                                        </select>
+                                        <p className="mt-1 text-[10px] text-slate-500">Applied from run 2 onward. Run 1 uses the base values.</p>
+                                      </div>
+                                      <div>
+                                        <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                          <span>Jitter factor (fixed mode)</span>
                                           <button onClick={() => setSelectedInfoKey("run_jitter_factor")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
                                         </label>
                                         <input
@@ -4966,13 +5017,54 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                           min={0.1}
                                           step={0.01}
                                           value={runJitterFactor}
+                                          disabled={runJitterMode !== "fixed"}
                                           onChange={(e) => {
                                             const value = parseFloat(e.target.value);
                                             if (Number.isFinite(value)) {
                                               setRunJitterFactor(Math.max(0.1, value));
                                             }
                                           }}
-                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100 disabled:text-slate-500"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                          <span>Random jitter min</span>
+                                          <button onClick={() => setSelectedInfoKey("run_jitter_min")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                        </label>
+                                        <input
+                                          type="number"
+                                          min={0.000001}
+                                          step={0.01}
+                                          value={runJitterMin}
+                                          disabled={runJitterMode !== "random"}
+                                          onChange={(e) => {
+                                            const value = parseFloat(e.target.value);
+                                            if (Number.isFinite(value)) {
+                                              setRunJitterMin(Math.max(1e-6, value));
+                                            }
+                                          }}
+                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100 disabled:text-slate-500"
+                                        />
+                                      </div>
+                                      <div>
+                                        <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                          <span>Random jitter max</span>
+                                          <button onClick={() => setSelectedInfoKey("run_jitter_max")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                        </label>
+                                        <input
+                                          type="number"
+                                          min={0.000001}
+                                          step={0.01}
+                                          value={runJitterMax}
+                                          disabled={runJitterMode !== "random"}
+                                          onChange={(e) => {
+                                            const value = parseFloat(e.target.value);
+                                            if (Number.isFinite(value)) {
+                                              setRunJitterMax(Math.max(1e-6, value));
+                                            }
+                                          }}
+                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100 disabled:text-slate-500"
                                         />
                                       </div>
                                       <div className="md:col-span-2">
