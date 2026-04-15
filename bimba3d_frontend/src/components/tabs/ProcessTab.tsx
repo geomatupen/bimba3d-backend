@@ -333,6 +333,29 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     (runId?: string) => `processTrainingConfig_${projectId}_${(runId || "__default").trim() || "__default"}`,
     [projectId],
   );
+  const getApiErrorMessage = useCallback((err: unknown, fallback: string): string => {
+    const anyErr = err as any;
+    const detail = anyErr?.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) {
+      return detail.trim();
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+      const joined = detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item?.msg === "string") return item.msg;
+          return "";
+        })
+        .filter(Boolean)
+        .join("; ");
+      if (joined) return joined;
+    }
+    const message = anyErr?.message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+    return fallback;
+  }, []);
 
   // Load config from localStorage or use defaults
   const loadConfig = () => {
@@ -604,6 +627,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [processingRunId, setProcessingRunId] = useState<string>("");
   const [startRequestAtMs, setStartRequestAtMs] = useState<number>(0);
   const [selectedRunId, setSelectedRunId] = useState<string>("");
+  const selectedRunIdRef = useRef<string>("");
   const [baseSessionId, setBaseSessionId] = useState<string>("");
   const [projectDisplayName, setProjectDisplayName] = useState<string>(projectId);
   const [newRunName, setNewRunName] = useState<string>(buildDefaultRunName(projectId, projectId, projectRuns));
@@ -634,20 +658,22 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     () => projectRuns.find((r) => r.run_id === selectedRunId) || null,
     [projectRuns, selectedRunId],
   );
-  const baselineCandidateRuns = useMemo(
-    () => projectRuns.filter((r) => {
-      const modeVal = String(r.mode || "").trim().toLowerCase();
+  const baselineCandidateRuns = useMemo(() => {
+    return projectRuns.filter((r) => {
       const statusVal = String(r.session_status || "").trim().toLowerCase();
       const engineVal = String(r.engine || "").trim().toLowerCase();
+      const modeVal = String(r.mode || "").trim().toLowerCase();
       const completed = statusVal === "completed" || statusVal === "succeeded";
-      const baselineMode = modeVal === "baseline" || (r.is_base === true && !modeVal);
-      return completed && baselineMode && (!engineVal || engineVal === "gsplat");
-    }),
-    [projectRuns],
-  );
+      return completed && modeVal === "baseline" && (!engineVal || engineVal === "gsplat");
+    });
+  }, [projectRuns]);
   const selectedRunIsProcessing = Boolean(processingRunId) && selectedRunId === processingRunId;
   const canManageColmapImages = !selectedRunId || selectedRunMeta?.is_base === true;
   const selectedRunSharedOutdated = Boolean(!canManageColmapImages && selectedRunMeta?.shared_outdated);
+
+  useEffect(() => {
+    selectedRunIdRef.current = (selectedRunId || "").trim();
+  }, [selectedRunId]);
 
   useEffect(() => {
     if (!hasAiInputModeFlow) return;
@@ -1470,7 +1496,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             (typeof status?.batch_current_index === "number" && status.batch_current_index > 0)) &&
           (status?.status === "processing" || status?.status === "stopping"),
         );
-        const statusContextActive = selectedRunIsActive || batchRunIsActive;
+        const anyRunIsActiveFromStatus = Boolean(
+          typeof status?.current_run_id === "string" &&
+          status.current_run_id.trim() &&
+          (status?.status === "processing" || status?.status === "stopping"),
+        );
+        const statusContextActive = selectedRunIsActive || batchRunIsActive || anyRunIsActiveFromStatus;
         
         // Store training telemetry only for the actively running session.
         setTrainingCurrentStep(statusContextActive ? resolvedCurrentStep : undefined);
@@ -2379,25 +2410,33 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   };
 
   const handleProcess = async (skipRestartConfirm = false) => {
+    const selectedRunIdAtStart = selectedRunIdRef.current || (selectedRunId || "").trim();
+    const selectedRunExists = projectRuns.some((r) => r.run_id === selectedRunIdAtStart);
     const effectiveModeForIntent = engine === "gsplat" ? mode : "baseline";
     const includeSessionControlsForIntent =
       engine === "gsplat" && effectiveModeForIntent === "modified" && tuneScope === "core_ai_optimization";
     const wantsBatchStart = includeSessionControlsForIntent && runCount > 1;
-    const isRestart = !wantsBatchStart && Boolean(selectedRunId);
-    const shouldReuseSelectedSession = Boolean(selectedRunId) && !wantsBatchStart;
+    const isRestart = !wantsBatchStart && Boolean(selectedRunIdAtStart);
+    const shouldReuseSelectedSession = Boolean(selectedRunIdAtStart) && !wantsBatchStart;
+    const batchSeedRunId = wantsBatchStart && selectedRunExists ? selectedRunIdAtStart : "";
     if (isRestart && !skipRestartConfirm) {
       setShowRestartConfirmModal(true);
       return;
     }
 
-    if (isRestart && !selectedRunId) {
+    if (isRestart && !selectedRunIdAtStart) {
       setError("Select a session to restart.");
       return;
     }
 
+    if (wantsBatchStart && !batchSeedRunId) {
+      setError("Select the target session from Active Session Output before starting batch.");
+      return;
+    }
+
     const runNameForRequest = shouldReuseSelectedSession
-      ? selectedRunId
-      : (newRunName.trim() || buildDefaultRunName(projectDisplayName, projectId, projectRuns));
+      ? selectedRunIdAtStart
+      : ((batchSeedRunId || newRunName.trim()) || buildDefaultRunName(projectDisplayName, projectId, projectRuns));
 
     setProcessing(true);
     setError(null);
@@ -2531,7 +2570,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         }, 9000);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start processing");
+      setError(getApiErrorMessage(err, "Failed to start processing"));
       setProcessing(false);
     }
   };
@@ -2553,7 +2592,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         restart_current: true,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to continue batch chain");
+      setError(getApiErrorMessage(err, "Failed to continue batch chain"));
       setProcessing(false);
     }
   };
@@ -2670,7 +2709,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         }
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to resume processing");
+      setError(getApiErrorMessage(err, "Failed to resume processing"));
       setProcessing(false);
     }
   };
@@ -3669,6 +3708,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                           key={run.run_id}
                           type="button"
                           onClick={(event) => {
+                            selectedRunIdRef.current = run.run_id;
                             setSelectedRunId(run.run_id);
                             const detailsEl = event.currentTarget.closest("details") as HTMLDetailsElement | null;
                             if (detailsEl) detailsEl.open = false;
