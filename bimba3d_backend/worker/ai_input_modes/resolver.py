@@ -88,6 +88,100 @@ def normalize_ai_input_mode(value: Any) -> str:
     return ""
 
 
+def _count_supported_images(image_dir: Path) -> int:
+    exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+    try:
+        return sum(1 for p in Path(image_dir).glob("*") if p.is_file() and p.suffix.lower() in exts)
+    except Exception:
+        return 0
+
+
+def _build_feature_log_details(mode: str, features: dict[str, Any], image_count: int) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "image_count": int(image_count),
+    }
+
+    exif_fields = [
+        "camera_make",
+        "camera_model",
+        "focal_length_mm",
+        "focal_missing",
+        "aperture_f",
+        "aperture_missing",
+        "iso",
+        "iso_missing",
+        "gps_missing",
+        "timestamp_mode",
+        "timestamp_missing",
+        "img_width_median",
+        "img_height_median",
+        "img_size_missing",
+    ]
+    for key in exif_fields:
+        if key in features:
+            details[key] = features.get(key)
+
+    if mode in {"exif_plus_flight_plan", "exif_plus_flight_plan_plus_external"}:
+        flight_fields = [
+            "flight_type",
+            "flight_type_missing",
+            "heading_consistency",
+            "heading_missing",
+            "coverage_spread",
+            "coverage_missing",
+            "overlap_proxy",
+            "overlap_missing",
+            "camera_angle_profile",
+            "angle_profile_missing",
+        ]
+        for key in flight_fields:
+            if key in features:
+                details[key] = features.get(key)
+
+    if mode == "exif_plus_flight_plan_plus_external":
+        external_fields = [
+            "vegetation_cover_percentage",
+            "green_area_missing",
+            "terrain_roughness_proxy",
+            "roughness_missing",
+            "texture_density",
+            "texture_missing",
+            "blur_motion_risk",
+            "blur_missing",
+        ]
+        for key in external_fields:
+            if key in features:
+                details[key] = features.get(key)
+
+    return details
+
+
+def _build_initial_params_log(params: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "tune_start_step",
+        "tune_end_step",
+        "tune_interval",
+        "tune_min_improvement",
+        "trend_scope",
+        "feature_lr",
+        "opacity_lr",
+        "scaling_lr",
+        "rotation_lr",
+        "position_lr_init",
+        "position_lr_final",
+        "densification_interval",
+        "densify_grad_threshold",
+        "opacity_threshold",
+        "lambda_dssim",
+    ]
+    details: dict[str, Any] = {}
+    for key in keys:
+        value = params.get(key)
+        if value is not None:
+            details[key] = value
+    return details
+
+
 def apply_initial_preset(
     params: dict[str, Any],
     *,
@@ -156,6 +250,25 @@ def apply_initial_preset(
         if key == "preset_name":
             continue
         params[key] = value
+
+    feature_details = _build_feature_log_details(mode, result_features, _count_supported_images(Path(image_dir)))
+    logger.info(
+        "AI_INPUT_MODE_FEATURES mode=%s details=%s",
+        mode,
+        json.dumps(feature_details, sort_keys=True),
+    )
+    logger.info(
+        "AI_INPUT_MODE_PRESET mode=%s heuristic=%s selected=%s cache_used=%s",
+        mode,
+        heuristic_preset,
+        selected_preset,
+        str(bool(cache_used)).lower(),
+    )
+    logger.info(
+        "AI_INPUT_MODE_INITIAL_PARAMS mode=%s params=%s",
+        mode,
+        json.dumps(_build_initial_params_log(params), sort_keys=True),
+    )
 
     logger.info(
         "AI input preset applied mode=%s selected_preset=%s cache_used=%s updates=%s features=%s",

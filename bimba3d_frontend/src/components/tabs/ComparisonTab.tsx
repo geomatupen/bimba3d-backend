@@ -33,6 +33,18 @@ interface SummaryPayload {
   engine?: string | null;
   metrics?: Record<string, number | null | undefined>;
   major_params?: Record<string, number | boolean | null | undefined>;
+  ai_insights?: {
+    ai_input_mode?: string | null;
+    baseline_session_id?: string | null;
+    selected_preset?: string | null;
+    heuristic_preset?: string | null;
+    cache_used?: boolean | null;
+    reward?: number | null;
+    reward_positive?: boolean | null;
+    reward_label?: string | null;
+    initial_params?: Record<string, unknown>;
+    missing_flags?: Record<string, unknown>;
+  };
   tuning?: {
     initial?: Record<string, number | null | undefined>;
     final?: Record<string, number | null | undefined>;
@@ -152,6 +164,13 @@ function fmtMetricValue(key: string, v: unknown): string {
 function fmtMajorParamValue(v: unknown): string {
   if (typeof v === "boolean") return v ? "Enabled" : "Disabled";
   return fmt(v);
+}
+
+function fmtLooseValue(v: unknown): string {
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "string") return v.trim() ? v : "-";
+  if (typeof v === "number") return fmt(v);
+  return "-";
 }
 
 function deltaText(left?: number | null, right?: number | null, lowerIsBetter?: boolean): string {
@@ -622,6 +641,31 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
   const rightSelectedRun = useMemo(() => rightRuns.find((run) => run.run_id === rightRunId) || null, [rightRuns, rightRunId]);
   const leftIsBase = Boolean(leftSelectedRun?.is_base);
   const rightIsBase = Boolean(rightSelectedRun?.is_base);
+  const aiInitialParamKeys = useMemo(() => {
+    const keys = new Set<string>();
+    Object.keys(leftSummary?.ai_insights?.initial_params || {}).forEach((k) => keys.add(k));
+    Object.keys(rightSummary?.ai_insights?.initial_params || {}).forEach((k) => keys.add(k));
+    const preferredOrder = [
+      "tune_start_step",
+      "tune_end_step",
+      "tune_interval",
+      "tune_min_improvement",
+      "trend_scope",
+      "feature_lr",
+      "opacity_lr",
+      "scaling_lr",
+      "rotation_lr",
+      "position_lr_init",
+      "position_lr_final",
+      "densification_interval",
+      "densify_grad_threshold",
+      "opacity_threshold",
+      "lambda_dssim",
+    ];
+    const ordered = preferredOrder.filter((k) => keys.has(k));
+    const extras = Array.from(keys).filter((k) => !preferredOrder.includes(k)).sort();
+    return [...ordered, ...extras];
+  }, [leftSummary?.ai_insights?.initial_params, rightSummary?.ai_insights?.initial_params]);
   const leftHasSummaryData = (leftSummary?.eval_points ?? 0) > 0;
   const rightHasSummaryData = (rightSummary?.eval_points ?? 0) > 0;
   const selectedGraphRow = graphMetricRows.find((row) => row.key === selectedGraphMetric) ?? graphMetricRows[0];
@@ -1293,6 +1337,66 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
               )}
             </div>
           </div>
+
+          <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-700">
+                <tr>
+                  <th className="text-left px-3 py-2">AI Setting</th>
+                  <th className="text-left px-3 py-2">Left</th>
+                  <th className="text-left px-3 py-2">Right</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  ["ai_input_mode", "AI input mode"],
+                  ["baseline_session_id", "Baseline session"],
+                  ["selected_preset", "Selected preset"],
+                  ["heuristic_preset", "Heuristic preset"],
+                  ["cache_used", "Feature cache used"],
+                  ["reward", "End-of-run reward"],
+                  ["reward_label", "Reward outcome"],
+                ].map(([key, label]) => {
+                  const leftVal = leftSummary.ai_insights?.[key as keyof NonNullable<SummaryPayload["ai_insights"]>];
+                  const rightVal = rightSummary.ai_insights?.[key as keyof NonNullable<SummaryPayload["ai_insights"]>];
+                  return (
+                    <tr key={key} className="border-t border-slate-100">
+                      <td className="px-3 py-1.5 text-slate-700">{label}</td>
+                      <td className="px-3 py-1.5 text-slate-900">{fmtLooseValue(leftVal)}</td>
+                      <td className="px-3 py-1.5 text-slate-900">{fmtLooseValue(rightVal)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {aiInitialParamKeys.length > 0 && (
+            <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-700">
+                  <tr>
+                    <th className="text-left px-3 py-2">AI Initial Parameter</th>
+                    <th className="text-left px-3 py-2">Left</th>
+                    <th className="text-left px-3 py-2">Right</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {aiInitialParamKeys.map((key) => {
+                    const leftVal = leftSummary.ai_insights?.initial_params?.[key];
+                    const rightVal = rightSummary.ai_insights?.initial_params?.[key];
+                    return (
+                      <tr key={key} className="border-t border-slate-100">
+                        <td className="px-3 py-1.5 text-slate-700">{key}</td>
+                        <td className="px-3 py-1.5 text-slate-900">{fmtLooseValue(leftVal)}</td>
+                        <td className="px-3 py-1.5 text-slate-900">{fmtLooseValue(rightVal)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
             <table className="w-full text-sm">

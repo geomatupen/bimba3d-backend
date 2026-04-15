@@ -78,6 +78,26 @@ RULE_UPDATE_RE = re.compile(
     r"Modified rule update applied at step\s+(?P<step>\d+)",
     re.IGNORECASE,
 )
+AI_INPUT_MODE_PRESET_RE = re.compile(
+    r"AI_INPUT_MODE_PRESET\s+mode=(?P<mode>[^\s]+)\s+heuristic=(?P<heuristic>[^\s]+)\s+selected=(?P<selected>[^\s]+)\s+cache_used=(?P<cache>[^\s]+)",
+    re.IGNORECASE,
+)
+AI_INPUT_MODE_FEATURES_RE = re.compile(
+    r"AI_INPUT_MODE_FEATURES\s+mode=(?P<mode>[^\s]+)\s+details=(?P<details>\{.*\})",
+    re.IGNORECASE,
+)
+AI_INPUT_MODE_LEARN_RE = re.compile(
+    r"AI_INPUT_MODE_LEARN\s+mode=(?P<mode>[^\s]+)\s+preset=(?P<preset>[^\s]+)\s+s_best=(?P<s_best>[0-9.eE+-]+)\s+s_end=(?P<s_end>[0-9.eE+-]+)\s+s_run=(?P<s_run>[0-9.eE+-]+)\s+reward=(?P<reward>[0-9.eE+-]+)",
+    re.IGNORECASE,
+)
+AI_INPUT_MODE_INITIAL_PARAMS_RE = re.compile(
+    r"AI_INPUT_MODE_INITIAL_PARAMS\s+mode=(?P<mode>[^\s]+)\s+params=(?P<params>\{.*\})",
+    re.IGNORECASE,
+)
+AI_INPUT_MODE_REWARD_OUTCOME_RE = re.compile(
+    r"AI_INPUT_MODE_REWARD_OUTCOME\s+mode=(?P<mode>[^\s]+)\s+preset=(?P<preset>[^\s]+)\s+reward=(?P<reward>[0-9.eE+-]+)\s+rewarded=(?P<rewarded>true|false)",
+    re.IGNORECASE,
+)
 
 
 def _get_project_shared_config_path(project_dir: Path) -> Path:
@@ -435,6 +455,174 @@ def _read_text_lines(path: Path, max_lines: int, from_start: bool = False) -> li
         return []
 
 
+def _parse_optional_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    token = str(raw).strip().lower()
+    if token in {"", "n/a", "na", "none", "null"}:
+        return None
+    try:
+        return float(token)
+    except Exception:
+        return None
+
+
+def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> dict[str, Any] | None:
+    if not isinstance(run_config, dict):
+        return None
+
+    resolved_cfg = run_config.get("resolved_params") if isinstance(run_config.get("resolved_params"), dict) else {}
+    requested_cfg = run_config.get("requested_params") if isinstance(run_config.get("requested_params"), dict) else {}
+
+    ai_mode = str(resolved_cfg.get("ai_input_mode") or requested_cfg.get("ai_input_mode") or "").strip().lower()
+    if not ai_mode:
+        return None
+
+    baseline_session_id = str(
+        resolved_cfg.get("baseline_session_id")
+        or requested_cfg.get("baseline_session_id")
+        or ""
+    ).strip() or None
+
+    initial_param_keys = [
+        "tune_start_step",
+        "tune_end_step",
+        "tune_interval",
+        "tune_min_improvement",
+        "trend_scope",
+        "feature_lr",
+        "opacity_lr",
+        "scaling_lr",
+        "rotation_lr",
+        "position_lr_init",
+        "position_lr_final",
+        "densification_interval",
+        "densify_grad_threshold",
+        "opacity_threshold",
+        "lambda_dssim",
+    ]
+
+    initial_params: dict[str, Any] = {}
+    for key in initial_param_keys:
+        if key in resolved_cfg and resolved_cfg.get(key) is not None:
+            initial_params[key] = resolved_cfg.get(key)
+        elif key in requested_cfg and requested_cfg.get(key) is not None:
+            initial_params[key] = requested_cfg.get(key)
+
+    features_details: dict[str, Any] = {}
+    features_from_log = False
+    initial_params_from_log: dict[str, Any] = {}
+    selected_preset: str | None = None
+    heuristic_preset: str | None = None
+    cache_used: bool | None = None
+    reward_value: float | None = None
+    reward_positive: bool | None = None
+    reward_mode: str | None = None
+    reward_preset: str | None = None
+    learn_snapshot: dict[str, Any] = {}
+
+    cache_features: dict[str, Any] = {}
+
+    if isinstance(run_dir, Path):
+        log_path = run_dir / "processing.log"
+        lines = _read_text_lines(log_path, max_lines=5000)
+
+        for line in lines:
+            features_match = AI_INPUT_MODE_FEATURES_RE.search(line)
+            if features_match:
+                details_raw = str(features_match.group("details") or "{}").strip()
+                try:
+                    parsed = json.loads(details_raw)
+                    if isinstance(parsed, dict):
+                        features_details = parsed
+                        features_from_log = True
+                except Exception:
+                    pass
+
+            preset_match = AI_INPUT_MODE_PRESET_RE.search(line)
+            if preset_match:
+                selected_preset = str(preset_match.group("selected") or "").strip() or selected_preset
+                heuristic_preset = str(preset_match.group("heuristic") or "").strip() or heuristic_preset
+                cache_token = str(preset_match.group("cache") or "").strip().lower()
+                if cache_token in {"true", "false"}:
+                    cache_used = cache_token == "true"
+
+            init_params_match = AI_INPUT_MODE_INITIAL_PARAMS_RE.search(line)
+            if init_params_match:
+                params_raw = str(init_params_match.group("params") or "{}").strip()
+                try:
+                    parsed = json.loads(params_raw)
+                    if isinstance(parsed, dict):
+                        initial_params_from_log = parsed
+                except Exception:
+                    pass
+
+            learn_match = AI_INPUT_MODE_LEARN_RE.search(line)
+            if learn_match:
+                reward_value = _parse_optional_float(learn_match.group("reward"))
+                learn_snapshot = {
+                    "s_best": _parse_optional_float(learn_match.group("s_best")),
+                    "s_end": _parse_optional_float(learn_match.group("s_end")),
+                    "s_run": _parse_optional_float(learn_match.group("s_run")),
+                }
+                reward_mode = str(learn_match.group("mode") or "").strip() or reward_mode
+                reward_preset = str(learn_match.group("preset") or "").strip() or reward_preset
+                if reward_value is not None:
+                    reward_positive = reward_value > 0
+
+            reward_outcome_match = AI_INPUT_MODE_REWARD_OUTCOME_RE.search(line)
+            if reward_outcome_match:
+                reward_value = _parse_optional_float(reward_outcome_match.group("reward"))
+                rewarded_token = str(reward_outcome_match.group("rewarded") or "").strip().lower()
+                if rewarded_token in {"true", "false"}:
+                    reward_positive = rewarded_token == "true"
+                reward_mode = str(reward_outcome_match.group("mode") or "").strip() or reward_mode
+                reward_preset = str(reward_outcome_match.group("preset") or "").strip() or reward_preset
+
+        cache_path = run_dir.parent.parent / "outputs" / "ai_input_modes" / f"{ai_mode}.json"
+        cache_payload = _read_json_if_exists(cache_path)
+        if isinstance(cache_payload, dict):
+            raw_features = cache_payload.get("features")
+            if isinstance(raw_features, dict):
+                cache_features = raw_features
+
+    if isinstance(initial_params_from_log, dict) and initial_params_from_log:
+        initial_params.update(initial_params_from_log)
+
+    if not features_details and cache_features:
+        features_details = dict(cache_features)
+
+    missing_flags = {
+        key: value
+        for key, value in features_details.items()
+        if isinstance(key, str) and key.endswith("_missing")
+    }
+
+    reward_label = "unknown"
+    if reward_positive is True:
+        reward_label = "rewarded"
+    elif reward_positive is False:
+        reward_label = "penalized_or_neutral"
+
+    return {
+        "ai_input_mode": ai_mode,
+        "baseline_session_id": baseline_session_id,
+        "selected_preset": selected_preset,
+        "heuristic_preset": heuristic_preset,
+        "cache_used": cache_used,
+        "initial_params": initial_params,
+        "feature_details": features_details,
+        "missing_flags": missing_flags,
+        "reward": reward_value,
+        "reward_positive": reward_positive,
+        "reward_label": reward_label,
+        "learn_snapshot": learn_snapshot,
+        "reward_mode": reward_mode,
+        "reward_preset": reward_preset,
+        "feature_source": "log" if features_from_log else ("cache" if features_details else "none"),
+    }
+
+
 def _extract_training_rows(lines: list[str], row_limit: int, from_start: bool = False) -> list[dict[str, Any]]:
     snapshot_rows: list[dict[str, Any]] = []
     step_rows: list[dict[str, Any]] = []
@@ -711,6 +899,131 @@ def _extract_event_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]
                 "step": step,
                 "summary": f"Rule update applied at step {step:,}",
             })
+            continue
+
+        preset_match = AI_INPUT_MODE_PRESET_RE.search(line)
+        if preset_match:
+            mode = str(preset_match.group("mode") or "")
+            selected = str(preset_match.group("selected") or "")
+            heuristic = str(preset_match.group("heuristic") or "")
+            cache_used = str(preset_match.group("cache") or "")
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "type": "ai_input_mode_preset",
+                    "step": None,
+                    "summary": (
+                        f"AI mode {mode}: selected preset {selected} "
+                        f"(heuristic {heuristic}, cache_used={cache_used})"
+                    ),
+                    "mode": mode,
+                    "selected_preset": selected,
+                    "heuristic_preset": heuristic,
+                    "cache_used": cache_used,
+                }
+            )
+            continue
+
+        features_match = AI_INPUT_MODE_FEATURES_RE.search(line)
+        if features_match:
+            mode = str(features_match.group("mode") or "")
+            details_raw = str(features_match.group("details") or "{}").strip()
+            details = {}
+            try:
+                parsed = json.loads(details_raw)
+                if isinstance(parsed, dict):
+                    details = parsed
+            except Exception:
+                details = {}
+
+            missing_bits = []
+            for key in sorted(details.keys()):
+                if key.endswith("_missing"):
+                    missing_bits.append(f"{key}={details.get(key)}")
+            missing_text = ", ".join(missing_bits[:6]) if missing_bits else "none"
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "type": "ai_input_mode_features",
+                    "step": None,
+                    "summary": f"AI mode {mode}: extracted input features (missing/default flags: {missing_text})",
+                    "mode": mode,
+                    "details": details,
+                }
+            )
+            continue
+
+        initial_match = AI_INPUT_MODE_INITIAL_PARAMS_RE.search(line)
+        if initial_match:
+            mode = str(initial_match.group("mode") or "")
+            params_raw = str(initial_match.group("params") or "{}").strip()
+            params_payload = {}
+            try:
+                parsed = json.loads(params_raw)
+                if isinstance(parsed, dict):
+                    params_payload = parsed
+            except Exception:
+                params_payload = {}
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "type": "ai_input_mode_initial_params",
+                    "step": None,
+                    "summary": f"AI mode {mode}: initial parameter set applied",
+                    "mode": mode,
+                    "params": params_payload,
+                }
+            )
+            continue
+
+        learn_match = AI_INPUT_MODE_LEARN_RE.search(line)
+        if learn_match:
+            mode = str(learn_match.group("mode") or "")
+            preset = str(learn_match.group("preset") or "")
+            s_run = _parse_optional_float(learn_match.group("s_run"))
+            reward = _parse_optional_float(learn_match.group("reward"))
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "type": "ai_input_mode_learn",
+                    "step": None,
+                    "summary": (
+                        f"AI mode learner update ({mode}): preset {preset}, "
+                        f"s_run={s_run if s_run is not None else 'n/a'}, reward={reward if reward is not None else 'n/a'}"
+                    ),
+                    "mode": mode,
+                    "selected_preset": preset,
+                    "s_best": _parse_optional_float(learn_match.group("s_best")),
+                    "s_end": _parse_optional_float(learn_match.group("s_end")),
+                    "s_run": s_run,
+                    "reward": reward,
+                }
+            )
+            continue
+
+        reward_outcome_match = AI_INPUT_MODE_REWARD_OUTCOME_RE.search(line)
+        if reward_outcome_match:
+            mode = str(reward_outcome_match.group("mode") or "")
+            preset = str(reward_outcome_match.group("preset") or "")
+            reward = _parse_optional_float(reward_outcome_match.group("reward"))
+            rewarded_token = str(reward_outcome_match.group("rewarded") or "").strip().lower()
+            rewarded = rewarded_token == "true"
+            rows.append(
+                {
+                    "timestamp": timestamp,
+                    "type": "ai_input_mode_reward_outcome",
+                    "step": None,
+                    "summary": (
+                        f"AI mode reward outcome ({mode}): preset {preset}, "
+                        f"reward={reward if reward is not None else 'n/a'}, rewarded={rewarded}"
+                    ),
+                    "mode": mode,
+                    "selected_preset": preset,
+                    "reward": reward,
+                    "rewarded": rewarded,
+                }
+            )
+            continue
 
     if row_limit > 0 and len(rows) > row_limit:
         rows = rows[-row_limit:]
@@ -2303,6 +2616,7 @@ def get_project_telemetry(
                 "run_shared_config_version": None,
                 "shared_outdated": None,
                 "base_session_id": None,
+                "ai_insights": None,
                 "status": {
                     "stage": project_status.get("stage"),
                     "message": project_status.get("message"),
@@ -2325,6 +2639,7 @@ def get_project_telemetry(
         run_config = _read_json_if_exists(run_config_path)
         if not isinstance(run_config, dict):
             run_config = None
+        ai_insights = _extract_ai_run_insights(run_dir, run_config)
 
         project_base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
         shared_doc = _read_project_shared_config(project_dir, str(project_base_session_id) if project_base_session_id else None)
@@ -2367,6 +2682,7 @@ def get_project_telemetry(
             "run_shared_config_version": run_shared_version,
             "shared_outdated": shared_outdated,
             "base_session_id": project_base_session_id,
+            "ai_insights": ai_insights,
             "status": {
                 "stage": project_status.get("stage"),
                 "message": project_status.get("message"),
@@ -2402,13 +2718,36 @@ def request_stop(project_id: str):
         except Exception as exc:
             logger.warning("Failed to force-stop worker container for %s: %s", project_id, exc)
 
-        # Mark status so the UI can reflect stopping state
-        status.update_status(
-            project_id,
-            "stopping",
-            progress=status.get_status(project_id).get("progress", 0),
-            stop_requested=True,
-        )
+        current_status = status.get_status(project_id)
+        worker_mode = resolve_worker_mode(str(current_status.get("worker_mode") or ""))
+        is_active = False
+        try:
+            if worker_mode == "docker":
+                is_active = bool(colmap.get_project_worker_container_ids(project_id))
+            else:
+                is_active = bool(pipeline.is_local_project_active(project_id))
+        except Exception as exc:
+            logger.warning("Failed to probe active worker while stopping %s: %s", project_id, exc)
+
+        if is_active:
+            # Worker is still shutting down; keep transient stopping state.
+            status.update_status(
+                project_id,
+                "stopping",
+                progress=current_status.get("progress", 0),
+                stop_requested=True,
+                message="Will stop after current step completes...",
+            )
+        else:
+            # No worker remains; finalize stop immediately so frontend exits processing state.
+            status.update_status(
+                project_id,
+                "stopped",
+                progress=current_status.get("progress", 0),
+                current_run_id=None,
+                stop_requested=True,
+                message="Stopped by user.",
+            )
 
         logger.info(f"Stop requested for project: {project_id}")
         return {"status": "stop_requested"}
@@ -2500,6 +2839,16 @@ def list_project_runs(project_id: str):
                             adaptive_events += sum(1 for _ in f)
                     except Exception:
                         continue
+
+                run_log_path = run_dir / "processing.log"
+                if run_log_path.exists():
+                    try:
+                        with run_log_path.open("r", encoding="utf-8") as f:
+                            for line in f:
+                                if CORE_AI_DECISION_RE.search(line) or "AI_INPUT_MODE_" in line:
+                                    adaptive_events += 1
+                    except Exception:
+                        pass
             except Exception as exc:
                 logger.warning("Skipping adaptive logs for run %s due to access error: %s", run_id, exc)
 
@@ -4671,6 +5020,7 @@ def get_experiment_summary(
             run_cfg = _read_json_if_exists(run_dir / "run_config.json")
             resolved_cfg = run_cfg.get("resolved_params") if isinstance(run_cfg, dict) and isinstance(run_cfg.get("resolved_params"), dict) else {}
             requested_cfg = run_cfg.get("requested_params") if isinstance(run_cfg, dict) and isinstance(run_cfg.get("requested_params"), dict) else {}
+            ai_insights = _extract_ai_run_insights(run_dir, run_cfg)
             major_keys = [
                 "max_steps",
                 "densify_from_iter",
@@ -4704,6 +5054,9 @@ def get_experiment_summary(
 
             if summary_major:
                 response_payload["major_params"] = summary_major
+
+            if ai_insights:
+                response_payload["ai_insights"] = ai_insights
 
             if (
                 response_payload.get("eval_psnr_series") is None
@@ -4778,6 +5131,18 @@ def get_experiment_summary(
         )
         tuning_results = _read_json_if_exists(tuning_results_path)
         run_config = _read_json_if_exists(run_config_path)
+
+        resolved_run_dir = run_dir
+        if resolved_run_dir is None and isinstance(run_config, dict):
+            resolved_candidate = str(
+                run_config.get("run_id")
+                or (run_config.get("resolved_params") or {}).get("run_id")
+                or ""
+            ).strip()
+            if resolved_candidate:
+                candidate_dir = project_dir / "runs" / resolved_candidate
+                if candidate_dir.exists() and candidate_dir.is_dir():
+                    resolved_run_dir = candidate_dir
 
         latest_eval = eval_history_sorted[-1] if eval_history_sorted else {}
         first_eval = eval_history_sorted[0] if eval_history_sorted else {}
@@ -4999,6 +5364,7 @@ def get_experiment_summary(
             "preview_url": preview_url,
             "eval_points": len(eval_history) if isinstance(eval_history, list) else 0,
             "early_stop": metadata.get("early_stop") if isinstance(metadata, dict) else None,
+            "ai_insights": _extract_ai_run_insights(resolved_run_dir, run_config),
         }
 
     except HTTPException:

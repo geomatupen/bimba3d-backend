@@ -272,6 +272,22 @@ def update_from_run(
     _save_model(project_dir, model)
 
     logger.info(
+        "AI_INPUT_MODE_LEARN mode=%s preset=%s s_best=%.4f s_end=%.4f s_run=%.4f reward=%.4f",
+        mode,
+        selected_preset,
+        s_best,
+        s_end,
+        s_run,
+        reward_signal,
+    )
+    logger.info(
+        "AI_INPUT_MODE_REWARD_OUTCOME mode=%s preset=%s reward=%.4f rewarded=%s",
+        mode,
+        selected_preset,
+        reward_signal,
+        str(reward_signal > 0.0).lower(),
+    )
+    logger.info(
         "Input-mode selector updated run_id=%s mode=%s preset=%s s_best=%.4f s_end=%.4f s_run=%.4f",
         run_id,
         mode,

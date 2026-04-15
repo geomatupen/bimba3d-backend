@@ -1108,13 +1108,22 @@ def run_training(
         update_status(project_dir, "stopped", progress=55, stage="training", message="⏸️ Processing stopped before gsplat training.", stop_requested=True, stopped_stage="training")
         return 0
 
+    ai_mode_name = str((preset_summary or {}).get("mode") or "")
+    ai_selected_preset = str((preset_summary or {}).get("selected_preset") or "")
+    init_message = f"🚀 Initializing upstream simple_trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'})..."
+    if use_html_input_mode_flow and ai_mode_name and ai_selected_preset:
+        init_message = (
+            f"🚀 Initializing upstream simple_trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'})... "
+            f"AI mode {ai_mode_name}: preset {ai_selected_preset}."
+        )
+
     update_status(
         project_dir,
         "processing",
         progress=55,
         stage="training",
         stage_progress=0,
-        message=f"🚀 Initializing upstream simple_trainer ({'GPU ⚡' if device == 'cuda' else 'CPU'})...",
+        message=init_message,
         mode=mode,
         timing={"start": gsplat_start},
     )
@@ -1533,6 +1542,17 @@ def run_training(
                         engine_output_dir / "input_mode_learning_results.json",
                         input_mode_learning_payload,
                     )
+                    if isinstance(input_mode_learning_payload, dict) and input_mode_learning_payload.get("updated"):
+                        update_status(
+                            project_dir,
+                            "processing",
+                            stage="training",
+                            stage_progress=95,
+                            message=(
+                                "AI input-mode learner updated preset scores "
+                                f"(mode={mode_name}, preset={selected_preset})."
+                            ),
+                        )
                 except Exception as exc:
                     logger.warning("Failed input-mode learner update: %s", exc)
 

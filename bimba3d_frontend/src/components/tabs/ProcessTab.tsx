@@ -99,6 +99,23 @@ interface TelemetryPayload {
     base_session_id?: string | null;
     effective_shared_config?: Record<string, any> | null;
   } | null;
+  ai_insights?: {
+    ai_input_mode?: string | null;
+    baseline_session_id?: string | null;
+    selected_preset?: string | null;
+    heuristic_preset?: string | null;
+    cache_used?: boolean | null;
+    reward?: number | null;
+    reward_positive?: boolean | null;
+    reward_label?: string | null;
+    reward_mode?: string | null;
+    reward_preset?: string | null;
+    feature_source?: string | null;
+    initial_params?: Record<string, any>;
+    feature_details?: Record<string, any>;
+    missing_flags?: Record<string, any>;
+    learn_snapshot?: Record<string, any>;
+  } | null;
   status?: {
     stage?: string | null;
     message?: string | null;
@@ -218,6 +235,72 @@ const formatDurationCompact = (seconds?: number | null): string => {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+};
+
+const formatTelemetryScalar = (value: any): string => {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) return value.toLocaleString();
+    return value.toFixed(6).replace(/\.?0+$/, "");
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+};
+
+const formatTelemetryFieldLabel = (key: string): string =>
+  key
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const LEARNABLE_AI_PARAM_KEYS = new Set([
+  "feature_lr",
+  "opacity_lr",
+  "scaling_lr",
+  "rotation_lr",
+  "position_lr_init",
+]);
+
+const isMissingFlagField = (key: string): boolean => /_missing$/i.test(key);
+
+const parseMissingFlag = (value: any): boolean | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const token = value.trim().toLowerCase();
+    if (!token) return null;
+    if (["1", "true", "yes", "y", "missing"].includes(token)) return true;
+    if (["0", "false", "no", "n", "available", "present"].includes(token)) return false;
+  }
+  return null;
+};
+
+const featureMissingFlagKey = (key: string): string | null => {
+  const directMap: Record<string, string> = {
+    focal_length_mm: "focal_missing",
+    aperture_f: "aperture_missing",
+    iso: "iso_missing",
+    shutter_s: "shutter_missing",
+    gps_lat_mean: "gps_missing",
+    gps_lon_mean: "gps_missing",
+    gps_alt_mean: "gps_missing",
+    timestamp_mode: "timestamp_missing",
+    camera_make: "camera_meta_missing",
+    camera_model: "camera_meta_missing",
+    lens_model: "lens_missing",
+    camera_angle_bucket: "angle_missing",
+    img_orientation: "orientation_missing",
+    img_width_median: "img_size_missing",
+    img_height_median: "img_size_missing",
+  };
+  return directMap[key] || null;
 };
 
 const buildDefaultModelName = (
@@ -3408,8 +3491,33 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       }
 
       const runConfig = telemetryPayload.run_config;
+      const aiInsights = telemetryPayload.ai_insights;
       const resolvedConfig = runConfig?.resolved_params || {};
       const requestedConfig = runConfig?.requested_params || {};
+
+      if (aiInsights && aiInsights.ai_input_mode) {
+        addConfigTable("AI Input Insights", [
+          ["mode", aiInsights.ai_input_mode],
+          ["feature_source", aiInsights.feature_source],
+          ["baseline_session_id", aiInsights.baseline_session_id],
+          ["heuristic_preset", aiInsights.heuristic_preset],
+          ["selected_preset", aiInsights.selected_preset],
+          ["cache_used", aiInsights.cache_used],
+          ["reward", aiInsights.reward],
+          ["reward_positive", aiInsights.reward_positive],
+          ["reward_label", aiInsights.reward_label],
+          ["reward_mode", aiInsights.reward_mode],
+          ["reward_preset", aiInsights.reward_preset],
+        ]);
+        addConfigTable(
+          "AI Initial Parameters",
+          Object.entries(aiInsights.initial_params || {}).map(([key, value]) => [key, value])
+        );
+        addConfigTable(
+          "AI Extracted Features",
+          Object.entries(aiInsights.feature_details || {}).map(([key, value]) => [key, value])
+        );
+      }
 
       addConfigTable("Run Configuration (resolved)", [
         ["mode", resolvedConfig.mode],
@@ -4413,6 +4521,116 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                       <div>Loss: <span className="font-semibold">{typeof telemetryData.status.current_loss === "number" ? telemetryData.status.current_loss.toFixed(6) : "-"}</span></div>
                       <div>Best loss step: <span className="font-semibold">{typeof telemetryBestLoss.bestStep === "number" ? telemetryBestLoss.bestStep.toLocaleString() : "-"}</span></div>
                       <div>Best loss value: <span className="font-semibold">{typeof telemetryBestLoss.bestLoss === "number" ? telemetryBestLoss.bestLoss.toFixed(6) : "-"}</span></div>
+                    </div>
+                  </div>
+                )}
+
+                {telemetryData?.ai_insights?.ai_input_mode && (
+                  <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-3">
+                    <p className="text-xs font-semibold text-slate-700">AI mode extracted values</p>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-slate-700">
+                      <div>Mode: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.ai_input_mode)}</span></div>
+                      <div>Feature source: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.feature_source)}</span></div>
+                      <div>Cache used: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.cache_used)}</span></div>
+                      <div>Baseline session: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.baseline_session_id)}</span></div>
+                      <div>Heuristic preset: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.heuristic_preset)}</span></div>
+                      <div>Selected preset: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.selected_preset)}</span></div>
+                      <div>Reward value: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward)}</span></div>
+                      <div>Rewarded: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward_positive)}</span></div>
+                      <div>Reward label: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward_label)}</span></div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-semibold text-slate-700 mb-2">Initial parameters used</p>
+                      <div className="max-h-36 overflow-auto border border-slate-200 rounded-lg bg-white">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50 text-slate-700">
+                            <tr>
+                              <th className="text-left px-3 py-2">Field</th>
+                              <th className="text-left px-3 py-2">Value</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(telemetryData.ai_insights.initial_params || {}).length === 0 ? (
+                              <tr>
+                                <td className="px-3 py-2 text-slate-500" colSpan={2}>No initial parameters captured.</td>
+                              </tr>
+                            ) : (
+                              Object.entries(telemetryData.ai_insights.initial_params || {}).map(([key, value]) => (
+                                <tr key={`ai-init-${key}`} className="border-t border-slate-100">
+                                  <td className="px-3 py-2 text-slate-700">{formatTelemetryFieldLabel(key)}</td>
+                                  <td className="px-3 py-2 text-slate-900">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span>{formatTelemetryScalar(value)}</span>
+                                      {LEARNABLE_AI_PARAM_KEYS.has(key) && (
+                                        <span className="inline-flex items-center rounded-full bg-blue-100 text-blue-700 px-2 py-0.5 text-[10px] font-semibold">
+                                          Learned
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-xs font-semibold text-slate-700 mb-2">Extracted features and missing flags</p>
+                      <div className="max-h-44 overflow-auto border border-slate-200 rounded-lg bg-white">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50 text-slate-700">
+                            <tr>
+                              <th className="text-left px-3 py-2">Feature</th>
+                              <th className="text-left px-3 py-2">Value</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(telemetryData.ai_insights.feature_details || {}).length === 0 ? (
+                              <tr>
+                                <td className="px-3 py-2 text-slate-500" colSpan={2}>No extracted feature details captured.</td>
+                              </tr>
+                            ) : (
+                              Object.entries(telemetryData.ai_insights.feature_details || {}).map(([key, value]) => {
+                                const features = telemetryData.ai_insights?.feature_details || {};
+                                const missingForKey = featureMissingFlagKey(key);
+                                const missingValue = missingForKey ? parseMissingFlag(features[missingForKey]) : null;
+                                const currentMissingValue = isMissingFlagField(key) ? parseMissingFlag(value) : null;
+
+                                return (
+                                  <tr key={`ai-feature-${key}`} className="border-t border-slate-100">
+                                    <td className="px-3 py-2 text-slate-700">{formatTelemetryFieldLabel(key)}</td>
+                                    <td className="px-3 py-2 text-slate-900">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span>{formatTelemetryScalar(value)}</span>
+                                        <div className="flex items-center gap-1.5">
+                                          {isMissingFlagField(key) && currentMissingValue !== null && (
+                                            <span
+                                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${currentMissingValue
+                                                ? "bg-red-100 text-red-700"
+                                                : "bg-emerald-100 text-emerald-700"
+                                                }`}
+                                            >
+                                              {currentMissingValue ? "Missing" : "Available"}
+                                            </span>
+                                          )}
+                                          {!isMissingFlagField(key) && missingValue === true && (
+                                            <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-[10px] font-semibold">
+                                              Fallback default
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
                 )}
