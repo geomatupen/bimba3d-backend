@@ -10,7 +10,9 @@ import SparseViewer from "../SparseViewer.tsx";
 import ConfirmModal from "../ConfirmModal";
 
 // Small Info wrapper: render a smaller info icon throughout the modal
-const Info = (props: any) => <LucideInfo className={props.className ? props.className + " w-3 h-3" : "w-3 h-3"} {...props} />;
+const Info = (props: React.ComponentProps<typeof LucideInfo>) => (
+  <LucideInfo className={props.className ? props.className + " w-3 h-3" : "w-3 h-3"} {...props} />
+);
 
 // Fix for window.__bimba3dTrainingStart type error
 declare global {
@@ -92,14 +94,14 @@ interface TelemetryPayload {
     best_loss_step?: number | null;
   };
   run_config?: {
-    requested_params?: Record<string, any>;
-    resolved_params?: Record<string, any>;
+    requested_params?: Record<string, unknown>;
+    resolved_params?: Record<string, unknown>;
     shared_config_version?: number | null;
     active_sparse_shared_version?: number | null;
     run_shared_config_version?: number | null;
     shared_outdated?: boolean | null;
     base_session_id?: string | null;
-    effective_shared_config?: Record<string, any> | null;
+    effective_shared_config?: Record<string, unknown> | null;
   } | null;
   ai_insights?: {
     ai_input_mode?: string | null;
@@ -113,10 +115,10 @@ interface TelemetryPayload {
     reward_mode?: string | null;
     reward_preset?: string | null;
     feature_source?: string | null;
-    initial_params?: Record<string, any>;
-    feature_details?: Record<string, any>;
-    missing_flags?: Record<string, any>;
-    learn_snapshot?: Record<string, any>;
+    initial_params?: Record<string, unknown>;
+    feature_details?: Record<string, unknown>;
+    missing_flags?: Record<string, unknown>;
+    learn_snapshot?: Record<string, unknown>;
   } | null;
   status?: {
     stage?: string | null;
@@ -240,7 +242,7 @@ const formatDurationCompact = (seconds?: number | null): string => {
   return `${s}s`;
 };
 
-const formatTelemetryScalar = (value: any): string => {
+const formatTelemetryScalar = (value: unknown): string => {
   if (value === null || value === undefined || value === "") return "-";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") {
@@ -275,7 +277,7 @@ const LEARNABLE_AI_PARAM_KEYS = new Set([
 
 const isMissingFlagField = (key: string): boolean => /_missing$/i.test(key);
 
-const parseMissingFlag = (value: any): boolean | null => {
+const parseMissingFlag = (value: unknown): boolean | null => {
   if (value === null || value === undefined) return null;
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value !== 0;
@@ -427,8 +429,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     [projectId],
   );
   const getApiErrorMessage = useCallback((err: unknown, fallback: string): string => {
-    const anyErr = err as any;
-    const detail = anyErr?.response?.data?.detail;
+    const candidate = err as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = candidate?.response?.data?.detail;
     if (typeof detail === "string" && detail.trim()) {
       return detail.trim();
     }
@@ -443,7 +448,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         .join("; ");
       if (joined) return joined;
     }
-    const message = anyErr?.message;
+    const message = candidate?.message;
     if (typeof message === "string" && message.trim()) {
       return message.trim();
     }
@@ -468,7 +473,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           ...defaults.colmap,
           ...(sharedParsed?.colmap || {}),
         },
-      } as any;
+      } as ReturnType<typeof getDefaultProcessConfig>;
 
       return merged;
     } catch (e) {
@@ -482,6 +487,26 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   // Load persisted config and expose individual controls
   const cfg = loadConfig();
+  const cfgLegacy = cfg as Record<string, unknown>;
+  const cfgSplatExportInterval = typeof cfgLegacy["splat_export_interval"] === "number" ? cfgLegacy["splat_export_interval"] : undefined;
+  const cfgBestSplatInterval = typeof cfgLegacy["best_splat_interval"] === "number" ? cfgLegacy["best_splat_interval"] : undefined;
+  const cfgSaveBestSplat = typeof cfgLegacy["save_best_splat"] === "boolean" ? cfgLegacy["save_best_splat"] : undefined;
+  const cfgBestSplatStartStep = typeof cfgLegacy["best_splat_start_step"] === "number" ? cfgLegacy["best_splat_start_step"] : undefined;
+  const cfgEarlyStopMonitorInterval = typeof cfgLegacy["early_stop_monitor_interval"] === "number" ? cfgLegacy["early_stop_monitor_interval"] : undefined;
+  const cfgEarlyStopDecisionPoints = typeof cfgLegacy["early_stop_decision_points"] === "number" ? cfgLegacy["early_stop_decision_points"] : undefined;
+  const cfgEarlyStopMinEvalPoints = typeof cfgLegacy["early_stop_min_eval_points"] === "number" ? cfgLegacy["early_stop_min_eval_points"] : undefined;
+  const cfgEarlyStopMinStepRatio = typeof cfgLegacy["early_stop_min_step_ratio"] === "number" ? cfgLegacy["early_stop_min_step_ratio"] : undefined;
+  const cfgEarlyStopMonitorMinRelativeImprovement =
+    typeof cfgLegacy["early_stop_monitor_min_relative_improvement"] === "number"
+      ? cfgLegacy["early_stop_monitor_min_relative_improvement"]
+      : undefined;
+  const cfgEarlyStopEvalMinRelativeImprovement =
+    typeof cfgLegacy["early_stop_eval_min_relative_improvement"] === "number"
+      ? cfgLegacy["early_stop_eval_min_relative_improvement"]
+      : undefined;
+  const cfgEarlyStopMaxVolatilityRatio = typeof cfgLegacy["early_stop_max_volatility_ratio"] === "number" ? cfgLegacy["early_stop_max_volatility_ratio"] : undefined;
+  const cfgEarlyStopEmaAlpha = typeof cfgLegacy["early_stop_ema_alpha"] === "number" ? cfgLegacy["early_stop_ema_alpha"] : undefined;
+  const cfgSaveInterval = typeof cfgLegacy["save_interval"] === "number" ? cfgLegacy["save_interval"] : undefined;
   const [mode, setMode] = useState<"baseline" | "modified">(cfg.mode ?? "baseline");
   const [tuneStartStep, setTuneStartStep] = useState<number>(cfg.tune_start_step ?? 100);
   const [tuneMinImprovement, setTuneMinImprovement] = useState<number>(cfg.tune_min_improvement ?? 0.005);
@@ -512,25 +537,25 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [engine, setEngine] = useState<TrainingEngine>(cfg.engine ?? "gsplat");
   const [maxSteps, setMaxSteps] = useState<number>(cfg.maxSteps ?? 15000);
   const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
-  const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? cfg.splat_export_interval ?? 31000);
-  const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfg.best_splat_interval ?? 100);
-    const [saveBestSplat, setSaveBestSplat] = useState<boolean>(cfg.saveBestSplat ?? cfg.save_best_splat ?? false);
-  const [bestSplatStartStep, setBestSplatStartStep] = useState<number>(cfg.bestSplatStartStep ?? cfg.best_splat_start_step ?? 2000);
+  const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? cfgSplatExportInterval ?? 31000);
+  const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfgBestSplatInterval ?? 100);
+  const [saveBestSplat, setSaveBestSplat] = useState<boolean>(cfg.saveBestSplat ?? cfgSaveBestSplat ?? false);
+  const [bestSplatStartStep, setBestSplatStartStep] = useState<number>(cfg.bestSplatStartStep ?? cfgBestSplatStartStep ?? 2000);
   const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? false);
-  const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfg.early_stop_monitor_interval ?? 200);
-  const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfg.early_stop_decision_points ?? 10);
-  const [earlyStopMinEvalPoints, setEarlyStopMinEvalPoints] = useState<number>(cfg.earlyStopMinEvalPoints ?? cfg.early_stop_min_eval_points ?? 6);
-  const [earlyStopMinStepRatio, setEarlyStopMinStepRatio] = useState<number>(cfg.earlyStopMinStepRatio ?? cfg.early_stop_min_step_ratio ?? 0.25);
-  const [earlyStopMonitorMinRelativeImprovement, setEarlyStopMonitorMinRelativeImprovement] = useState<number>(cfg.earlyStopMonitorMinRelativeImprovement ?? cfg.early_stop_monitor_min_relative_improvement ?? 0.0015);
-  const [earlyStopEvalMinRelativeImprovement, setEarlyStopEvalMinRelativeImprovement] = useState<number>(cfg.earlyStopEvalMinRelativeImprovement ?? cfg.early_stop_eval_min_relative_improvement ?? 0.003);
-  const [earlyStopMaxVolatilityRatio, setEarlyStopMaxVolatilityRatio] = useState<number>(cfg.earlyStopMaxVolatilityRatio ?? cfg.early_stop_max_volatility_ratio ?? 0.01);
-  const [earlyStopEmaAlpha, setEarlyStopEmaAlpha] = useState<number>(cfg.earlyStopEmaAlpha ?? cfg.early_stop_ema_alpha ?? 0.1);
+  const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfgEarlyStopMonitorInterval ?? 200);
+  const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfgEarlyStopDecisionPoints ?? 10);
+  const [earlyStopMinEvalPoints, setEarlyStopMinEvalPoints] = useState<number>(cfg.earlyStopMinEvalPoints ?? cfgEarlyStopMinEvalPoints ?? 6);
+  const [earlyStopMinStepRatio, setEarlyStopMinStepRatio] = useState<number>(cfg.earlyStopMinStepRatio ?? cfgEarlyStopMinStepRatio ?? 0.25);
+  const [earlyStopMonitorMinRelativeImprovement, setEarlyStopMonitorMinRelativeImprovement] = useState<number>(cfg.earlyStopMonitorMinRelativeImprovement ?? cfgEarlyStopMonitorMinRelativeImprovement ?? 0.0015);
+  const [earlyStopEvalMinRelativeImprovement, setEarlyStopEvalMinRelativeImprovement] = useState<number>(cfg.earlyStopEvalMinRelativeImprovement ?? cfgEarlyStopEvalMinRelativeImprovement ?? 0.003);
+  const [earlyStopMaxVolatilityRatio, setEarlyStopMaxVolatilityRatio] = useState<number>(cfg.earlyStopMaxVolatilityRatio ?? cfgEarlyStopMaxVolatilityRatio ?? 0.01);
+  const [earlyStopEmaAlpha, setEarlyStopEmaAlpha] = useState<number>(cfg.earlyStopEmaAlpha ?? cfgEarlyStopEmaAlpha ?? 0.1);
   const [pngInterval, setPngInterval] = useState<number>(cfg.pngInterval ?? 50);
   const [evalInterval, setEvalInterval] = useState<number>(cfg.evalInterval ?? 1000);
-  const [saveInterval, setSaveInterval] = useState<number>(cfg.saveInterval ?? cfg.save_interval ?? 31000);
+  const [saveInterval, setSaveInterval] = useState<number>(cfg.saveInterval ?? cfgSaveInterval ?? 31000);
   const [imagesMaxSize, setImagesMaxSize] = useState<number | undefined>(cfg.images_max_size ?? 1600);
   const [imagesResizeEnabled, setImagesResizeEnabled] = useState<boolean>(cfg.images_resize_enabled ?? true);
-  const [, setShowAdvancedTraining] = useState<boolean>(cfg.showAdvancedTraining ?? false);
+  const [, setShowAdvancedTraining] = useState<boolean>(false);
 
   const [litegsTargetPrimitives, setLitegsTargetPrimitives] = useState<number>(cfg.litegs_target_primitives ?? 50000);
   const [litegsAlphaShrink, setLitegsAlphaShrink] = useState<number>(cfg.litegs_alpha_shrink ?? 0.95);
@@ -693,7 +718,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [selectedModelLayer, setSelectedModelLayer] = useState<"final" | "best">("final");
   const [basemap, setBasemap] = useState<"satellite" | "osm">("satellite");
   const [showImagesLayer, setShowImagesLayer] = useState(true);
-  const [_showSparseLayer, setShowSparseLayer] = useState(true);
+  const [, setShowSparseLayer] = useState(true);
   const [show3DModel, setShow3DModel] = useState(false);
   const [locations, setLocations] = useState<Array<{ name: string; lat: number; lon: number }>>([]);
   const [locLoading, setLocLoading] = useState(true);
@@ -856,7 +881,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   };
 
   const applyResolvedParamsToForm = (
-    resolved: Record<string, any>,
+    resolved: Record<string, unknown>,
     options: { includeTraining?: boolean; includeShared?: boolean } = {},
   ) => {
     const includeTraining = options.includeTraining !== false;
@@ -932,25 +957,25 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       }
     }
 
-    const colmap = resolved.colmap;
-    if (includeShared && colmap && typeof colmap === "object") {
-      if (typeof colmap.max_image_size === "number") setColmapMaxImageSize(colmap.max_image_size);
-      if (typeof colmap.peak_threshold === "number") setColmapPeakThreshold(colmap.peak_threshold);
-      if (typeof colmap.guided_matching === "boolean") setColmapGuidedMatching(colmap.guided_matching);
-      if (typeof colmap.camera_model === "string") setColmapCameraModel(colmap.camera_model);
-      if (typeof colmap.single_camera === "boolean") setColmapSingleCamera(colmap.single_camera);
-      if (typeof colmap.camera_params === "string") setColmapCameraParams(colmap.camera_params);
-      if (typeof colmap.matching_type === "string") setColmapMatchingType(colmap.matching_type);
-      if (typeof colmap.mapper_num_threads === "number") setColmapMapperThreads(colmap.mapper_num_threads);
-      if (typeof colmap.mapper_min_num_matches === "number") setColmapMapperMinNumMatches(colmap.mapper_min_num_matches);
-      if (typeof colmap.mapper_abs_pose_min_num_inliers === "number") setColmapMapperAbsPoseMinNumInliers(colmap.mapper_abs_pose_min_num_inliers);
-      if (typeof colmap.mapper_init_min_num_inliers === "number") setColmapMapperInitMinNumInliers(colmap.mapper_init_min_num_inliers);
-      if (typeof colmap.sift_matching_min_num_inliers === "number") setColmapSiftMatchingMinNumInliers(colmap.sift_matching_min_num_inliers);
-      if (typeof colmap.run_image_registrator === "boolean") setColmapRunImageRegistrator(colmap.run_image_registrator);
+    const colmap = (resolved.colmap && typeof resolved.colmap === "object") ? (resolved.colmap as Record<string, unknown>) : null;
+    if (includeShared && colmap) {
+      if (typeof colmap["max_image_size"] === "number") setColmapMaxImageSize(colmap["max_image_size"]);
+      if (typeof colmap["peak_threshold"] === "number") setColmapPeakThreshold(colmap["peak_threshold"]);
+      if (typeof colmap["guided_matching"] === "boolean") setColmapGuidedMatching(colmap["guided_matching"]);
+      if (typeof colmap["camera_model"] === "string") setColmapCameraModel(colmap["camera_model"]);
+      if (typeof colmap["single_camera"] === "boolean") setColmapSingleCamera(colmap["single_camera"]);
+      if (typeof colmap["camera_params"] === "string") setColmapCameraParams(colmap["camera_params"]);
+      if (typeof colmap["matching_type"] === "string") setColmapMatchingType(colmap["matching_type"]);
+      if (typeof colmap["mapper_num_threads"] === "number") setColmapMapperThreads(colmap["mapper_num_threads"]);
+      if (typeof colmap["mapper_min_num_matches"] === "number") setColmapMapperMinNumMatches(colmap["mapper_min_num_matches"]);
+      if (typeof colmap["mapper_abs_pose_min_num_inliers"] === "number") setColmapMapperAbsPoseMinNumInliers(colmap["mapper_abs_pose_min_num_inliers"]);
+      if (typeof colmap["mapper_init_min_num_inliers"] === "number") setColmapMapperInitMinNumInliers(colmap["mapper_init_min_num_inliers"]);
+      if (typeof colmap["sift_matching_min_num_inliers"] === "number") setColmapSiftMatchingMinNumInliers(colmap["sift_matching_min_num_inliers"]);
+      if (typeof colmap["run_image_registrator"] === "boolean") setColmapRunImageRegistrator(colmap["run_image_registrator"]);
     }
   };
 
-  const normalizeTrainingConfigForForm = (raw: Record<string, any>): Record<string, any> => {
+  const normalizeTrainingConfigForForm = (raw: Record<string, unknown>): Record<string, unknown> => {
     const normalized = { ...raw };
     if (typeof normalized.save_best_splat !== "boolean" && typeof raw.saveBestSplat === "boolean") {
       normalized.save_best_splat = raw.saveBestSplat;
@@ -1863,7 +1888,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     return `${order === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[order]}`;
   };
 
-  const [_mapViewState, setMapViewState] = useState<any | null>(null);
+  const [, setMapViewState] = useState<Record<string, number> | null>(null);
   const [hasAutoFitted, setHasAutoFitted] = useState(false);
   const mapRef = useRef<any | null>(null);
   const selectedEngineRef = useRef<string | null>(null);
@@ -2273,7 +2298,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           if (map.getSource && map.getSource(demSrc)) {
             map.removeSource(demSrc);
           }
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
@@ -2361,7 +2386,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             try {
               map.setLayoutProperty(layerId, 'visibility', showImagesLayer ? 'visible' : 'none');
               console.debug('image-locations: setLayoutProperty visibility', { layerId, visibility: showImagesLayer ? 'visible' : 'none' });
-            } catch (err) {
+            } catch {
               if (retries > 0) {
                 setTimeout(() => ensureVisibility(retries - 1), 200);
               }
@@ -2373,7 +2398,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           try {
             map.setLayoutProperty(layerId, 'visibility', showImagesLayer ? 'visible' : 'none');
             console.debug('image-locations: updated visibility', { layerId, visibility: showImagesLayer ? 'visible' : 'none' });
-          } catch (e) {
+          } catch {
             // ignore if setLayoutProperty fails on some styles
           }
         }
@@ -2408,7 +2433,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         if (map.getSource && map.getSource(srcId)) {
           map.removeSource(srcId);
         }
-      } catch (e) {
+      } catch {
         // ignore cleanup errors
       }
     };
@@ -2422,7 +2447,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     const layerId = 'image-locations-layer';
 
     if (!showImagesLayer) {
-      try { if (map.getLayer && map.getLayer(layerId)) map.setLayoutProperty(layerId, 'visibility', 'none'); } catch (e) {}
+      try { if (map.getLayer && map.getLayer(layerId)) map.setLayoutProperty(layerId, 'visibility', 'none'); } catch { /* ignore visibility update errors */ }
       return;
     }
 
@@ -2463,12 +2488,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       const ensureVisibility = (retries = 5) => {
         try {
           map.setLayoutProperty(layerId, 'visibility', 'visible');
-        } catch (err) {
+        } catch {
           if (retries > 0) setTimeout(() => ensureVisibility(retries - 1), 150);
         }
       };
       ensureVisibility();
-    } catch (err) {
+    } catch {
       // ignore
     }
   }, [mapRef, locations, showImagesLayer, topView]);
@@ -2496,7 +2521,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (map.getLayer && map.getLayer(layerId)) {
         try {
           map.setLayoutProperty(layerId, 'visibility', showImagesLayer ? 'visible' : 'none');
-        } catch (e) {
+        } catch {
           // ignore
         }
       } else if (showImagesLayer) {
@@ -2504,16 +2529,14 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         try {
           if (!map.getSource(srcId)) map.addSource(srcId, { type: 'geojson', data: buildGeo() });
           map.addLayer({ id: layerId, type: 'circle', source: srcId, paint: { 'circle-radius': 6, 'circle-color': '#10b981', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2, 'circle-opacity': 0.95 } });
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
-    } catch (err) {
+    } catch {
       // ignore
     }
   }, [topView, mapRef, locations, showImagesLayer]);
-
-  
 
   const handleEngineSelection = (engineName: string) => {
     if (!engineName || !engineOutputMap[engineName]) {
@@ -4146,7 +4169,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                       ) : stoppedStage ? (
                         <p className="text-xs text-orange-600 mt-1 font-semibold">Stopped during {stoppedStage.charAt(0).toUpperCase() + stoppedStage.slice(1)}</p>
                       ) : (
-                        <p className="text-xs text-orange-600 mt-1 font-semibold">Stopped at: {currentStage || (stageStatus && (Object.entries(stageStatus).find(([_, v]) => v === 'running') || [null])[0]) || 'Unknown'}</p>
+                        <p className="text-xs text-orange-600 mt-1 font-semibold">Stopped at: {currentStage || (stageStatus && (Object.entries(stageStatus).find(([, v]) => v === 'running') || [null])[0]) || 'Unknown'}</p>
                       )
                     ) : currentStage && (
                       <p className="text-xs text-indigo-600 mt-1">Current: {currentStage}</p>

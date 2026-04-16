@@ -4,6 +4,12 @@ import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import { api } from "../../api/client";
 
+type JsPdfWithAutoTable = jsPDF & { lastAutoTable?: { finalY?: number } };
+
+const getAutoTableFinalY = (pdf: jsPDF): number | undefined => {
+  return (pdf as JsPdfWithAutoTable).lastAutoTable?.finalY;
+};
+
 interface ComparisonTabProps {
   currentProjectId: string;
 }
@@ -897,7 +903,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
         headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
         bodyStyles: { fontSize: 7, font: "helvetica" },
       });
-      yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+      yPos = (getAutoTableFinalY(pdf) ?? yPos) + 6;
 
       addHeading("Metrics", 12);
       autoTable(pdf, {
@@ -917,7 +923,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
         headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
         bodyStyles: { fontSize: 7, font: "helvetica" },
       });
-      yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+      yPos = (getAutoTableFinalY(pdf) ?? yPos) + 6;
 
       if (milestoneKeys.length > 0) {
         addHeading("Loss Milestones", 12);
@@ -938,7 +944,7 @@ export default function ComparisonTab({ currentProjectId }: ComparisonTabProps) 
           headStyles: { fontSize: 8, textColor: [255, 255, 255], fillColor: [25, 55, 120], font: "helvetica", fontStyle: "bold" },
           bodyStyles: { fontSize: 7, font: "helvetica" },
         });
-        yPos = ((pdf as any).lastAutoTable?.finalY ?? yPos) + 6;
+        yPos = (getAutoTableFinalY(pdf) ?? yPos) + 6;
       }
 
       const buildPdfTicks = (min: number, max: number, size: number, vertical = false) => {
