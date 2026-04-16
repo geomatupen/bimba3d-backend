@@ -285,6 +285,7 @@
           <a href="#chapter-6">Chapter 6 - Implementation Summary</a>
           <a href="#chapter-7">Chapter 7 - Implementation Constraints</a>
           <a href="#chapter-8">Chapter 8 - Data Strategy</a>
+          <a href="#chapter-9">Chapter 9 - Initialization Warmup Behavior</a>
         </nav>
 
         <main>
@@ -1001,6 +1002,79 @@
 
               <div class="tip">
                 With a 10-project cap, prioritize diversity of camera profile, flight geometry, and scene type over project count.
+              </div>
+            </div>
+          </section>
+
+          <section id="chapter-9" class="chapter">
+            <div class="chapter-head">Chapter 9 - Initialization Warmup Behavior</div>
+            <div class="chapter-body">
+              <p>
+                Warmup is an optional startup policy for <code>gsplat + modified + core_ai_optimization</code>.
+                Its purpose is to improve early exploration before normal adaptive preset selection dominates.
+                When warmup is disabled, standard behavior remains unchanged.
+              </p>
+
+              <h3>9.1 Activation Rules</h3>
+              <ul>
+                <li>Warmup is enabled from the frontend warmup toggle.</li>
+                <li>The run count value from frontend is used as total warmup runs.</li>
+                <li>Frontend policy while warmup is enabled: default run count is set to 30 and minimum allowed value is 10.</li>
+                <li>When warmup is disabled, run count behavior returns to normal batch rules.</li>
+              </ul>
+
+              <h3>9.2 Phase Structure</h3>
+              <p>
+                Warmup uses three phases. The phase ratio is based on <code>16:8:12</code> and is scaled to the requested total run count.
+                Therefore, if total warmup runs are changed, each phase receives a proportional allocation.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Phase</th>
+                    <th>Preset policy</th>
+                    <th>Jitter policy</th>
+                    <th>Intent</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Phase A - Explore</td>
+                    <td>Forced rotating preset sequence: <code>balanced</code>, <code>conservative</code>, <code>geometry_fast</code>, <code>appearance_fast</code></td>
+                    <td>Random bounded jitter, wider range</td>
+                    <td>Guarantee preset coverage early and collect broad outcome signals</td>
+                  </tr>
+                  <tr>
+                    <td>Phase B - Stability</td>
+                    <td>Adaptive preset selection (no forced override)</td>
+                    <td>Random bounded jitter, tighter range</td>
+                    <td>Verify consistency around promising regions</td>
+                  </tr>
+                  <tr>
+                    <td>Phase C - Adaptive</td>
+                    <td>Adaptive preset selection (no forced override)</td>
+                    <td>Random bounded jitter, tighter range</td>
+                    <td>Consolidate learning under normal selector behavior</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h3>9.3 Base-Config Inheritance</h3>
+              <ul>
+                <li>Warmup derives seed parameters from the project base session run config.</li>
+                <li>Training horizon is inherited from base config, including <code>max_steps</code> and <code>densify_until_iter</code>.</li>
+                <li>This keeps warmup comparable to established project defaults (for example 5k steps with densification end at 4k).</li>
+              </ul>
+
+              <h3>9.4 Operational Notes</h3>
+              <ul>
+                <li>Warmup is orchestration-level behavior; it does not replace standard non-warmup processing.</li>
+                <li><code>restart_fresh</code> is not supported together with warmup start.</li>
+                <li>Preset forcing is applied only where valid for AI input-mode flow; outside that flow, normal selection is used.</li>
+              </ul>
+
+              <div class="tip">
+                Practical default: enable warmup with total runs at 30 for initialization, then continue with normal adaptive runs after warmup completes.
               </div>
             </div>
           </section>

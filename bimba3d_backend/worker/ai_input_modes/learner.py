@@ -80,10 +80,11 @@ def select_preset(
     for preset in PRESETS:
         base = float(bias.get(preset, 0.0) or 0.0)
         if preset == heuristic_preset:
-            base += 0.20
+            base += 0.03
         scores[preset] = base
 
     selected_preset = max(PRESETS, key=lambda p: scores.get(p, 0.0))
+
     updates = apply_preset_updates(params, selected_preset)
 
     return {
@@ -246,6 +247,7 @@ def update_from_run(
 
     bias = entry.get("bias", {})
     lr = 0.10
+
     for preset in PRESETS:
         cur = float(bias.get(preset, 0.0) or 0.0)
         if preset == selected_preset:

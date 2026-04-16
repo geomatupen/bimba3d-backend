@@ -96,6 +96,7 @@ class ProcessParams(BaseModel):
     run_jitter_min: Optional[float] = None
     run_jitter_max: Optional[float] = None
     run_jitter_multiplier: Optional[float] = None
+    warmup_at_start: Optional[bool] = None
     continue_on_failure: Optional[bool] = None
     batch_connect_runs: Optional[bool] = None
     # Internal batch chain metadata (persisted in run configs)
@@ -110,6 +111,7 @@ class ProcessParams(BaseModel):
     source_run_id: Optional[str] = None
     ai_input_mode: Optional[str] = None  # "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external"
     baseline_session_id: Optional[str] = None  # completed baseline gsplat session for comparison
+    ai_preset_override: Optional[str] = None  # optional forced preset for AI input mode selection
     # --- ORIGINAL KERBL PARAMETERS ---
     max_steps: Optional[int] = None  # [original]
     log_interval: Optional[int] = None  # [custom]

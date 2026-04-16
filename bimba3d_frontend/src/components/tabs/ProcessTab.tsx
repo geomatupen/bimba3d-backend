@@ -357,6 +357,7 @@ const getDefaultProcessConfig = () => ({
   trend_scope: "run" as TrendScope,
   ai_input_mode: "" as AiInputMode,
   baseline_session_id: "",
+  warmup_at_start: false,
   run_count: 1,
   run_jitter_mode: "fixed" as RunJitterMode,
   run_jitter_factor: 1,
@@ -491,6 +492,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       : ""
   );
   const [baselineSessionIdForAi, setBaselineSessionIdForAi] = useState<string>(cfg.baseline_session_id ?? "");
+  const [warmupAtStart, setWarmupAtStart] = useState<boolean>(cfg.warmup_at_start ?? false);
   const [runCount, setRunCount] = useState<number>(cfg.run_count ?? 1);
   const [runJitterMode, setRunJitterMode] = useState<RunJitterMode>(cfg.run_jitter_mode === "random" ? "random" : "fixed");
   const [runJitterFactor, setRunJitterFactor] = useState<number>(cfg.run_jitter_factor ?? 1);
@@ -552,7 +554,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const hasLegacyControllerFlow = showCoreAiSessionControls && !aiInputMode;
   const showManualModifiedTuneControls = engine === "gsplat" && mode === "modified" && !showCoreAiSessionControls;
   const showManualDensificationControls = engine === "gsplat" && !showCoreAiSessionControls;
-  const showBatchActions = showCoreAiSessionControls && runCount > 1;
+  const showBatchActions = showCoreAiSessionControls && !warmupAtStart && runCount > 1;
 
   const tuneScopeDropdownValue: TuneScopeDropdownValue =
     tuneScope === "core_ai_optimization"
@@ -609,6 +611,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     trend_scope: 'Core AI optimization trend scope setting retained for compatibility with existing payloads.',
     ai_input_mode: 'Initial preset mode for Core AI optimization. Leave empty to use the legacy controller-only flow. EXIF only uses image metadata, EXIF + flight plan adds sequence-derived flight features, and + external adds cheap image-derived scene features (no manual external inputs).',
     baseline_session_id: 'Completed baseline gsplat session used as reference for baseline-relative scoring in Core AI optimization modes.',
+    warmup_at_start: 'Runs an automatic 3-phase warmup from this project base-session config (keeps base max_steps and densify_until_iter). Phase A forces rotating presets (balanced, conservative, geometry_fast, appearance_fast) with wider random jitter; Phases B and C switch back to adaptive preset selection with tighter jitter. Manual batch jitter controls are ignored while enabled.',
     run_count: 'Total sessions in this batch, including the selected session as run 1. Default 1 keeps manual behavior.',
     run_jitter_mode: 'Jitter behavior for batch runs starting from run 2. Fixed uses deterministic multiplier growth; Random samples a new multiplier per run within min/max bounds. Bounds: fixed factor >= 0.1 (frontend), random min/max >= 0.000001.',
     run_jitter_factor: 'Fixed mode only: per-run deterministic multiplier for LR-related params (applied from run 2 onward). Bounds: minimum 0.1, no frontend hard max; 1 means no fixed jitter.',
@@ -787,6 +790,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setTrendScope(defaults.trend_scope === "phase" ? "phase" : "run");
     setAiInputMode(defaults.ai_input_mode ?? "");
     setBaselineSessionIdForAi(defaults.baseline_session_id ?? "");
+    setWarmupAtStart(defaults.warmup_at_start ?? false);
     setRunCount(defaults.run_count ?? 1);
     setRunJitterMode(defaults.run_jitter_mode === "random" ? "random" : "fixed");
     setRunJitterFactor(defaults.run_jitter_factor ?? 1);
@@ -869,6 +873,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setAiInputMode(resolved.ai_input_mode as AiInputMode);
       }
       if (typeof resolved.baseline_session_id === "string") setBaselineSessionIdForAi(resolved.baseline_session_id);
+      if (typeof resolved.warmup_at_start === "boolean") setWarmupAtStart(resolved.warmup_at_start);
       if (typeof resolved.run_count === "number") setRunCount(Math.max(1, Math.floor(resolved.run_count)));
       if (resolved.run_jitter_mode === "fixed" || resolved.run_jitter_mode === "random") {
         setRunJitterMode(resolved.run_jitter_mode as RunJitterMode);
@@ -1005,6 +1010,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       trend_scope: trendScope,
       ai_input_mode: aiInputMode,
       baseline_session_id: baselineSessionIdForAi,
+      warmup_at_start: warmupAtStart,
       run_count: runCount,
       run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
@@ -1044,7 +1050,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, trendScope, aiInputMode, baselineSessionIdForAi, runCount, runJitterFactor, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, saveBestSplat, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, trendScope, aiInputMode, baselineSessionIdForAi, warmupAtStart, runCount, runJitterMode, runJitterFactor, runJitterMin, runJitterMax, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, saveBestSplat, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1121,9 +1127,15 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
       try {
         const res = await api.get(`/projects/${projectId}/runs/${selectedRunId}/config`);
-        const resolved = res.data?.run_config?.resolved_params;
-        if (!cancelled && resolved && typeof resolved === "object") {
-          applyResolvedParamsToForm(resolved as Record<string, any>, { includeTraining: true, includeShared: false });
+        const runConfig = res.data?.run_config;
+        const resolved = runConfig?.resolved_params;
+        const requested = runConfig?.requested_params;
+        if (!cancelled && runConfig && typeof runConfig === "object") {
+          const hydrated = normalizeTrainingConfigForForm({
+            ...(requested && typeof requested === "object" ? (requested as Record<string, any>) : {}),
+            ...(resolved && typeof resolved === "object" ? (resolved as Record<string, any>) : {}),
+          });
+          applyResolvedParamsToForm(hydrated, { includeTraining: true, includeShared: false });
           hydratedTrainingRunIdRef.current = selectedRunId;
           return;
         }
@@ -2519,9 +2531,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     const effectiveModeForIntent = engine === "gsplat" ? mode : "baseline";
     const includeSessionControlsForIntent =
       engine === "gsplat" && effectiveModeForIntent === "modified" && tuneScope === "core_ai_optimization";
-    const wantsBatchStart = includeSessionControlsForIntent && runCount > 1;
-    const isRestart = !wantsBatchStart && Boolean(selectedRunIdAtStart);
-    const shouldReuseSelectedSession = Boolean(selectedRunIdAtStart) && !wantsBatchStart;
+    const isWarmupStart = includeSessionControlsForIntent && warmupAtStart;
+    const wantsBatchStart = includeSessionControlsForIntent && !warmupAtStart && runCount > 1;
+    const isRestart = !isWarmupStart && !wantsBatchStart && Boolean(selectedRunIdAtStart);
+    const shouldReuseSelectedSession = Boolean(selectedRunIdAtStart) && !wantsBatchStart && !isWarmupStart;
     const batchSeedRunId = wantsBatchStart && selectedRunExists ? selectedRunIdAtStart : "";
     if (isRestart && !skipRestartConfirm) {
       setShowRestartConfirmModal(true);
@@ -2584,7 +2597,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       const effectiveMode = engine === "gsplat" ? mode : "baseline";
       const includeSessionControls =
         engine === "gsplat" && effectiveMode === "modified" && tuneScope === "core_ai_optimization";
-      const includeBatchControls = includeSessionControls && runCount > 1;
+      const includeBatchControls = includeSessionControls && !warmupAtStart && runCount > 1;
+      const includeWarmupControls = includeSessionControls && warmupAtStart;
       const res = await api.post(`/projects/${projectId}/process`, {
         run_name: runNameForRequest,
         restart_fresh: isRestart,
@@ -2606,7 +2620,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? (baselineSessionIdForAi || undefined)
             : undefined,
-        run_count: includeBatchControls ? runCount : 1,
+        warmup_at_start: includeSessionControls ? warmupAtStart : undefined,
+        run_count: includeBatchControls || includeWarmupControls ? runCount : 1,
         run_jitter_mode: includeBatchControls ? runJitterMode : undefined,
         run_jitter_factor: includeBatchControls ? runJitterFactor : undefined,
         run_jitter_min: includeBatchControls ? runJitterMin : undefined,
@@ -2762,6 +2777,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? (baselineSessionIdForAi || undefined)
             : undefined,
+        warmup_at_start: includeSessionControls ? warmupAtStart : undefined,
         run_count: includeSessionControls ? runCount : undefined,
         run_jitter_mode: includeSessionControls ? runJitterMode : undefined,
         run_jitter_factor: includeSessionControls ? runJitterFactor : undefined,
@@ -2941,6 +2957,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
+      warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
       run_count: runCount,
       run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
@@ -2994,6 +3011,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
+      warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
       run_count: runCount,
       run_jitter_mode: runJitterMode,
       run_jitter_factor: runJitterFactor,
@@ -3175,6 +3193,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
             defaults.tune_scope === "core_ai_optimization" && defaults.ai_input_mode
               ? (defaults.baseline_session_id || undefined)
               : undefined,
+          warmup_at_start: includeSessionControls ? defaults.warmup_at_start : undefined,
           run_count: includeSessionControls ? defaults.run_count : undefined,
           run_jitter_mode: includeSessionControls ? defaults.run_jitter_mode : undefined,
           run_jitter_factor: includeSessionControls ? defaults.run_jitter_factor : undefined,
@@ -4024,8 +4043,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                     >
                       <Play className="w-4 h-4" />
                       {(pipelineDone || wasStopped)
-                        ? (showBatchActions ? "Batch Restart" : "Restart Processing")
-                        : (showBatchActions ? "Batch Start" : "Start Processing")}
+                        ? ((showBatchActions || warmupAtStart) ? "Batch Restart" : "Restart Processing")
+                        : ((showBatchActions || warmupAtStart) ? "Batch Start" : "Start Processing")}
                     </button>
                     {/* --- RESUME BUTTON LOGIC --- */}
                     {canResume && wasStopped ? (
@@ -4976,6 +4995,27 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                       <p className="mt-1 text-[10px] text-slate-500">Used as reference for baseline-relative scoring.</p>
                                     </div>
                                   )}
+                                  <div className="md:col-span-2">
+                                    <label className="inline-flex items-center gap-2 text-[11px] font-medium text-slate-700">
+                                      <input
+                                        type="checkbox"
+                                        className="w-4 h-4"
+                                        checked={warmupAtStart}
+                                        onChange={(e) => {
+                                          const enabled = e.target.checked;
+                                          setWarmupAtStart(enabled);
+                                          if (enabled) {
+                                            setRunCount(30);
+                                          }
+                                        }}
+                                      />
+                                      <span className="flex items-center gap-1">
+                                        Warmup at start (phased experiment)
+                                        <button type="button" onClick={() => setSelectedInfoKey("warmup_at_start")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </span>
+                                    </label>
+                                    <p className="mt-1 text-[10px] text-slate-500">Uses this project base session config and runs a fixed A/B/C warmup schedule.</p>
+                                  </div>
                                   <>
                                       <div>
                                         <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
@@ -4984,13 +5024,17 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                         </label>
                                         <input
                                           type="number"
-                                          min={1}
+                                          min={warmupAtStart ? 10 : 1}
                                           step={1}
                                           value={runCount}
-                                          onChange={(e) => setRunCount(Math.max(1, parseInt(e.target.value || "1") || 1))}
+                                          onChange={(e) => {
+                                            const parsed = parseInt(e.target.value || "1") || 1;
+                                            const minRuns = warmupAtStart ? 10 : 1;
+                                            setRunCount(Math.max(minRuns, parsed));
+                                          }}
                                           className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                         />
-                                        <p className="mt-1 text-[10px] text-slate-500">Includes selected session as run 1; creates {Math.max(0, runCount - 1)} additional sessions.</p>
+                                        <p className="mt-1 text-[10px] text-slate-500">{warmupAtStart ? `Total warmup runs across phases A/B/C: ${runCount} (minimum 10; default 30 when enabled).` : `Includes selected session as run 1; creates ${Math.max(0, runCount - 1)} additional sessions.`}</p>
                                       </div>
                                       <div>
                                         <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
@@ -4999,8 +5043,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                         </label>
                                         <select
                                           value={runJitterMode}
+                                          disabled={warmupAtStart}
                                           onChange={(e) => setRunJitterMode((e.target.value as RunJitterMode) === "random" ? "random" : "fixed")}
-                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                          className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-slate-100 disabled:text-slate-500"
                                         >
                                           <option value="fixed">Fixed (deterministic)</option>
                                           <option value="random">Random (bounded)</option>
@@ -5017,7 +5062,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                           min={0.1}
                                           step={0.01}
                                           value={runJitterFactor}
-                                          disabled={runJitterMode !== "fixed"}
+                                          disabled={warmupAtStart || runJitterMode !== "fixed"}
                                           onChange={(e) => {
                                             const value = parseFloat(e.target.value);
                                             if (Number.isFinite(value)) {
@@ -5037,7 +5082,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                           min={0.000001}
                                           step={0.01}
                                           value={runJitterMin}
-                                          disabled={runJitterMode !== "random"}
+                                          disabled={warmupAtStart || runJitterMode !== "random"}
                                           onChange={(e) => {
                                             const value = parseFloat(e.target.value);
                                             if (Number.isFinite(value)) {
@@ -5057,7 +5102,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                           min={0.000001}
                                           step={0.01}
                                           value={runJitterMax}
-                                          disabled={runJitterMode !== "random"}
+                                          disabled={warmupAtStart || runJitterMode !== "random"}
                                           onChange={(e) => {
                                             const value = parseFloat(e.target.value);
                                             if (Number.isFinite(value)) {
@@ -5073,6 +5118,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                             type="checkbox"
                                             className="w-4 h-4"
                                             checked={continueOnFailure}
+                                            disabled={warmupAtStart}
                                             onChange={(e) => setContinueOnFailure(e.target.checked)}
                                           />
                                           <span className="flex items-center gap-1">

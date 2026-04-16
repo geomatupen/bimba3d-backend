@@ -100,6 +100,73 @@ AI_INPUT_MODE_REWARD_OUTCOME_RE = re.compile(
     re.IGNORECASE,
 )
 
+WARMUP_PHASE_PLAN = [
+    {
+        "name": "phase_a_explore",
+        "runs": 16,
+        "preset_sequence": ["balanced", "conservative", "geometry_fast", "appearance_fast"],
+        "jitter_mode": "random",
+        "jitter_min": 0.94,
+        "jitter_max": 1.06,
+    },
+    {
+        "name": "phase_b_stability",
+        "runs": 8,
+        "jitter_mode": "random",
+        "jitter_min": 0.97,
+        "jitter_max": 1.03,
+    },
+    {
+        "name": "phase_c_adaptive",
+        "runs": 12,
+        "jitter_mode": "random",
+        "jitter_min": 0.97,
+        "jitter_max": 1.03,
+    },
+]
+
+
+def _resolve_warmup_phase_plan(total_runs: int) -> list[dict[str, Any]]:
+    """Scale the 3-phase warmup template to a requested total run count."""
+    target = max(3, int(total_runs or 0))
+    weights = [int(phase.get("runs") or 1) for phase in WARMUP_PHASE_PLAN]
+    weight_sum = sum(weights) or len(weights)
+
+    raw = [target * (w / weight_sum) for w in weights]
+    alloc = [max(1, int(v)) for v in raw]
+    allocated = sum(alloc)
+
+    # Distribute remaining runs to phases with largest fractional remainder.
+    if allocated < target:
+        remainder_order = sorted(
+            range(len(raw)),
+            key=lambda i: (raw[i] - int(raw[i])),
+            reverse=True,
+        )
+        idx = 0
+        while allocated < target:
+            alloc[remainder_order[idx % len(remainder_order)]] += 1
+            allocated += 1
+            idx += 1
+
+    # Remove excess runs from largest phases first while keeping >=1 each.
+    if allocated > target:
+        shrink_order = sorted(range(len(alloc)), key=lambda i: alloc[i], reverse=True)
+        idx = 0
+        while allocated > target and any(v > 1 for v in alloc):
+            candidate = shrink_order[idx % len(shrink_order)]
+            if alloc[candidate] > 1:
+                alloc[candidate] -= 1
+                allocated -= 1
+            idx += 1
+
+    plan: list[dict[str, Any]] = []
+    for i, phase in enumerate(WARMUP_PHASE_PLAN):
+        clone = dict(phase)
+        clone["runs"] = int(alloc[i])
+        plan.append(clone)
+    return plan
+
 
 def _get_project_shared_config_path(project_dir: Path) -> Path:
     return project_dir / SHARED_CONFIG_FILE
@@ -1100,6 +1167,7 @@ def _run_batch_process(
     start_index: int = 1,
     initial_previous_success_run_id: str | None = None,
     initial_completed_runs: int = 0,
+    preset_sequence: list[str] | None = None,
 ) -> None:
     """Run multiple sessions sequentially using the same base config."""
     try:
@@ -1155,6 +1223,13 @@ def _run_batch_process(
                 run_params["run_name"] = seed_run_name
             else:
                 run_params["run_name"] = _build_followup_run_name(seed_run_name, idx + 1)
+
+            if preset_sequence:
+                forced = str(preset_sequence[idx % len(preset_sequence)] or "").strip().lower()
+                if forced:
+                    run_params["ai_preset_override"] = forced
+            else:
+                run_params.pop("ai_preset_override", None)
 
             run_params = _apply_run_jitter(
                 run_params,
@@ -1241,6 +1316,163 @@ def _run_batch_process(
     except Exception as exc:
         logger.error("Batch process failed for %s: %s", project_id, exc, exc_info=True)
         status.update_status(project_id, "failed", error=str(exc), message=f"Batch failed: {exc}")
+
+
+def _build_warmup_seed_params(project_dir: Path, requested_params: dict) -> tuple[dict, str]:
+    project_status = status.get_status(project_dir.name)
+    base_session_id = str(project_status.get("base_session_id") or "").strip()
+    if not base_session_id:
+        raise RuntimeError("Warmup requires a base session on the project.")
+
+    base_cfg_path = project_dir / "runs" / base_session_id / "run_config.json"
+    base_cfg = _read_json_if_exists(base_cfg_path)
+    if not isinstance(base_cfg, dict):
+        raise RuntimeError("Warmup requires a valid base session run_config.")
+
+    base_resolved = base_cfg.get("resolved_params") if isinstance(base_cfg.get("resolved_params"), dict) else {}
+    base_requested = base_cfg.get("requested_params") if isinstance(base_cfg.get("requested_params"), dict) else {}
+    seed = json.loads(json.dumps(base_resolved if base_resolved else base_requested))
+    if not isinstance(seed, dict) or not seed:
+        raise RuntimeError("Warmup could not derive seed parameters from base session.")
+
+    # Keep base configuration as source of truth; allow a small set of runtime overrides from request.
+    for key in (
+        "worker_mode",
+        "engine",
+        "mode",
+        "tune_scope",
+        "trend_scope",
+        "ai_input_mode",
+        "baseline_session_id",
+        "start_model_mode",
+        "source_model_id",
+        "source_run_id",
+        "source_model_checkpoint",
+        "ai_preset_override",
+    ):
+        if key in requested_params and requested_params.get(key) not in {None, ""}:
+            seed[key] = requested_params.get(key)
+
+    # Keep the training horizon from base session (user expects 5k/4k to remain unchanged).
+    if isinstance(base_resolved.get("max_steps"), (int, float)):
+        seed["max_steps"] = int(base_resolved.get("max_steps"))
+    if isinstance(base_resolved.get("densify_until_iter"), (int, float)):
+        seed["densify_until_iter"] = int(base_resolved.get("densify_until_iter"))
+
+    seed["stage"] = "train_only"
+    seed["resume"] = False
+    seed["restart_fresh"] = False
+    seed["run_count"] = 1
+    seed["batch_connect_runs"] = True
+    seed["continue_on_failure"] = bool(requested_params.get("continue_on_failure", True))
+    seed.pop("warmup_at_start", None)
+
+    for key in (
+        "run_jitter_mode",
+        "run_jitter_factor",
+        "run_jitter_min",
+        "run_jitter_max",
+        "run_jitter_multiplier",
+        "batch_plan_id",
+        "batch_index",
+        "batch_total",
+        "batch_completed",
+        "batch_continue_on_failure",
+        "batch_run_name_prefix",
+    ):
+        seed.pop(key, None)
+
+    return seed, base_session_id
+
+
+def _run_warmup_experiment(project_id: str, requested_params: dict) -> None:
+    project_dir = DATA_DIR / project_id
+    continue_on_failure = bool(requested_params.get("continue_on_failure", True))
+    requested_total_runs = int(requested_params.get("run_count") or sum(int(p.get("runs") or 0) for p in WARMUP_PHASE_PLAN))
+    warmup_plan = _resolve_warmup_phase_plan(requested_total_runs)
+
+    try:
+        seed_params, base_session_id = _build_warmup_seed_params(project_dir, requested_params)
+        previous_success_run_id: str | None = None
+        if str(seed_params.get("start_model_mode") or "").strip().lower() == "reuse":
+            previous_success_run_id = str(seed_params.get("source_run_id") or "").strip() or None
+
+        for phase_idx, phase in enumerate(warmup_plan, start=1):
+            runs = int(phase.get("runs") or 1)
+            jitter_mode = _normalize_jitter_mode(phase.get("jitter_mode"))
+            jitter_min = _parse_jitter_value(phase.get("jitter_min"), 1.0)
+            jitter_max = _parse_jitter_value(phase.get("jitter_max"), 1.0)
+            if jitter_min > jitter_max:
+                jitter_min, jitter_max = jitter_max, jitter_min
+
+            phase_name = str(phase.get("name") or f"phase_{phase_idx}")
+            phase_sequence_raw = phase.get("preset_sequence")
+            phase_sequence = [
+                str(item).strip().lower()
+                for item in (phase_sequence_raw if isinstance(phase_sequence_raw, list) else [])
+                if str(item).strip()
+            ] or None
+            phase_seed = json.loads(json.dumps(seed_params))
+            phase_seed["batch_plan_id"] = f"warmup_{uuid.uuid4().hex[:12]}"
+            phase_seed["run_name"] = f"warmup_{phase_name}"
+
+            if previous_success_run_id and bool(phase_seed.get("batch_connect_runs", True)):
+                phase_seed["start_model_mode"] = "reuse"
+                phase_seed["source_run_id"] = previous_success_run_id
+                phase_seed.pop("source_model_id", None)
+
+            status.update_status(
+                project_id,
+                "processing",
+                message=(
+                    f"Warmup {phase_idx}/{len(warmup_plan)} ({phase_name}) queued: "
+                    f"{runs} runs, jitter={jitter_mode} [{jitter_min}, {jitter_max}]"
+                ),
+                stop_requested=False,
+                error=None,
+                batch_total=runs,
+                batch_completed=0,
+                batch_current_index=0,
+            )
+
+            _run_batch_process(
+                project_id,
+                phase_seed,
+                runs,
+                1.0,
+                jitter_mode,
+                jitter_min,
+                jitter_max,
+                continue_on_failure,
+                1,
+                previous_success_run_id,
+                0,
+                phase_sequence,
+            )
+
+            lineage = _read_batch_lineage(project_dir)
+            final_run_id = str((lineage or {}).get("final_run_id") or "").strip()
+            if final_run_id:
+                previous_success_run_id = final_run_id
+
+            phase_status = status.get_status(project_id)
+            if str(phase_status.get("status") or "") in {"failed", "stopped"}:
+                break
+
+        latest = status.get_status(project_id)
+        latest_state = str(latest.get("status") or "pending")
+        if latest_state not in {"failed", "stopped"}:
+            status.update_status(
+                project_id,
+                latest_state,
+                message=(
+                    f"Warmup experiment finished ({sum(int(p.get('runs') or 0) for p in warmup_plan)} runs). "
+                    f"Base session: {base_session_id}."
+                ),
+            )
+    except Exception as exc:
+        logger.error("Warmup experiment failed for %s: %s", project_id, exc, exc_info=True)
+        status.update_status(project_id, "failed", error=str(exc), message=f"Warmup failed: {exc}")
 
 
 def _sanitize_run_token(value: str) -> str:
@@ -2204,17 +2436,26 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         mode_value = str(params_payload.get("mode") or "baseline").strip().lower()
         tune_scope_value = str(params_payload.get("tune_scope") or "").strip().lower()
         requested_ai_input_mode = str(requested_params.get("ai_input_mode") or "").strip().lower()
+        requested_preset_override = str(requested_params.get("ai_preset_override") or "").strip().lower()
         valid_ai_input_modes = {
             "exif_only",
             "exif_plus_flight_plan",
             "exif_plus_flight_plan_plus_external",
         }
+        valid_ai_preset_overrides = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
         if requested_ai_input_mode and requested_ai_input_mode not in valid_ai_input_modes:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "ai_input_mode must be one of: exif_only, exif_plus_flight_plan, "
                     "exif_plus_flight_plan_plus_external"
+                ),
+            )
+        if requested_preset_override and requested_preset_override not in valid_ai_preset_overrides:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ai_preset_override must be one of: conservative, balanced, geometry_fast, appearance_fast"
                 ),
             )
 
@@ -2261,12 +2502,16 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                         detail="Selected baseline session must be a baseline-mode run",
                     )
                 params_payload["baseline_session_id"] = baseline_session_id
+                if requested_preset_override:
+                    params_payload["ai_preset_override"] = requested_preset_override
             else:
                 params_payload.pop("ai_input_mode", None)
                 params_payload.pop("baseline_session_id", None)
+                params_payload.pop("ai_preset_override", None)
         else:
             params_payload.pop("ai_input_mode", None)
             params_payload.pop("baseline_session_id", None)
+            params_payload.pop("ai_preset_override", None)
 
         # Optional warm-start from globally elevated model.
         start_model_mode = str(requested_params.get("start_model_mode") or "scratch").strip().lower()
@@ -2324,10 +2569,93 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         if run_count < 1:
             run_count = 1
 
+        warmup_at_start = bool(requested_params.get("warmup_at_start", False))
+
         # Restart-from-scratch is scoped to one existing selected session.
         # Never treat restart_fresh requests as batch orchestration.
         if bool(requested_params.get("restart_fresh")):
             run_count = 1
+
+        if warmup_at_start:
+            if bool(requested_params.get("resume")):
+                raise HTTPException(status_code=400, detail="Warmup start does not support resume.")
+            if bool(requested_params.get("restart_fresh")):
+                raise HTTPException(status_code=400, detail="Warmup start does not support restart_fresh.")
+
+            warmup_mode = str(params_payload.get("mode") or "baseline").strip().lower()
+            warmup_scope = str(params_payload.get("tune_scope") or "").strip().lower()
+            warmup_ai_mode = str(params_payload.get("ai_input_mode") or "").strip().lower()
+            if engine != "gsplat" or warmup_mode != "modified" or warmup_scope != "core_ai_optimization" or not warmup_ai_mode:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Warmup start requires gsplat + modified + core_ai_optimization with ai_input_mode enabled."
+                    ),
+                )
+
+            if resolved_worker_mode == "docker":
+                running_workers = colmap.get_project_worker_container_ids(project_id)
+                if running_workers:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "A docker worker is already running for this project. "
+                            "Stop it first or wait for it to finish."
+                        ),
+                    )
+            else:
+                if pipeline.is_local_project_active(project_id):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "A local worker is already running for this project. "
+                            "Stop it first or wait for it to finish."
+                        ),
+                    )
+
+            warmup_total_runs = max(3, int(run_count or 0))
+            status.update_status(
+                project_id,
+                "processing",
+                progress=1,
+                engine=engine,
+                worker_mode=resolved_worker_mode,
+                stop_requested=False,
+                message=(
+                    f"Warmup experiment queued: {warmup_total_runs} total runs "
+                    "(base config + phased jitter)."
+                ),
+                error=None,
+                batch_total=warmup_total_runs,
+                batch_completed=0,
+                batch_current_index=0,
+            )
+
+            warmup_seed_params = dict(requested_params)
+            warmup_seed_params["worker_mode"] = resolved_worker_mode
+            warmup_seed_params["engine"] = engine
+            warmup_seed_params["mode"] = params_payload.get("mode")
+            warmup_seed_params["tune_scope"] = params_payload.get("tune_scope")
+            warmup_seed_params["ai_input_mode"] = params_payload.get("ai_input_mode")
+            warmup_seed_params["run_count"] = warmup_total_runs
+            if params_payload.get("baseline_session_id"):
+                warmup_seed_params["baseline_session_id"] = params_payload.get("baseline_session_id")
+
+            thread = threading.Thread(
+                target=_run_warmup_experiment,
+                args=(project_id, warmup_seed_params),
+                daemon=True,
+            )
+            thread.start()
+
+            return {
+                "status": "warmup_processing_started",
+                "run_count": warmup_total_runs,
+                "phase_count": len(WARMUP_PHASE_PLAN),
+            }
+
+        # Orchestration-only flag; do not pass to worker runtime.
+        params_payload.pop("warmup_at_start", None)
 
         if run_count > 1:
             if bool(requested_params.get("resume")):

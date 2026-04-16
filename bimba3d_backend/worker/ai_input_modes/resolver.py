@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .common import ModeContext
+from .common import ModeContext, apply_preset_updates
 from .exif_only import build_preset as build_exif_only_preset
 from .exif_plus_flight_plan import build_preset as build_exif_plus_flight_plan_preset
 from .exif_plus_flight_plan_plus_external import (
@@ -20,6 +20,12 @@ VALID_AI_INPUT_MODES = {
 }
 
 CACHE_VERSION = 1
+VALID_PRESET_OVERRIDES = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
+
+
+def _normalize_preset_override(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    return token if token in VALID_PRESET_OVERRIDES else ""
 
 
 def _feature_cache_dir(project_dir: Path) -> Path:
@@ -245,6 +251,12 @@ def apply_initial_preset(
     )
     selected_updates = dict(selection.get("updates") or {})
     selected_preset = str(selection.get("selected_preset") or heuristic_preset)
+    forced_preset = _normalize_preset_override(params.get("ai_preset_override"))
+    preset_forced = bool(forced_preset)
+    if preset_forced:
+        # Optional override for controlled exploration experiments; default path remains adaptive.
+        selected_preset = forced_preset
+        selected_updates = apply_preset_updates(params, selected_preset)
 
     for key, value in selected_updates.items():
         if key == "preset_name":
@@ -258,11 +270,12 @@ def apply_initial_preset(
         json.dumps(feature_details, sort_keys=True),
     )
     logger.info(
-        "AI_INPUT_MODE_PRESET mode=%s heuristic=%s selected=%s cache_used=%s",
+        "AI_INPUT_MODE_PRESET mode=%s heuristic=%s selected=%s cache_used=%s forced=%s",
         mode,
         heuristic_preset,
         selected_preset,
         str(bool(cache_used)).lower(),
+        str(preset_forced).lower(),
     )
     logger.info(
         "AI_INPUT_MODE_INITIAL_PARAMS mode=%s params=%s",
@@ -287,6 +300,7 @@ def apply_initial_preset(
         "notes": result_notes,
         "heuristic_preset": heuristic_preset,
         "selected_preset": selected_preset,
+        "preset_forced": preset_forced,
         "yhat_scores": dict(selection.get("yhat_scores") or {}),
         "project_dir": str(project_dir),
         "cache_used": cache_used,
