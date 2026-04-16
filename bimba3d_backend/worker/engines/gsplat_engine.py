@@ -1790,6 +1790,8 @@ def run_training(
                     if isinstance(tuning_state.get("best_splat"), dict)
                     else None
                 ),
+                "best_loss_source": "best_splat_update",
+                "best_loss_tracking_start_step": p.get("best_splat_start_step"),
                 "stopped_early": bool(
                     isinstance(tuning_state.get("early_stop"), dict)
                     and (tuning_state.get("early_stop") or {}).get("triggered")
