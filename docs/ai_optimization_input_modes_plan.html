@@ -649,6 +649,7 @@
                   <span class="step-title">Step 1. Predict and pick one preset.</span>
                   The model outputs scores over all preset candidates and selects the highest score.
                   <div class="equation"><span class="eq-main"><span class="v">k</span><sup>*</sup> = argmax<sub><span class="v">k</span></sub>(<span class="v">s</span><sub><span class="v">k</span></sub>), with <span class="v">y</span><sub>hat</sub> = [<span class="v">s</span><sub>1</sub>, <span class="v">s</span><sub>2</sub>, ..., <span class="v">s</span><sub><span class="v">K</span></sub>]</span><span class="eq-no">(4B.1)</span></div>
+                  In the current implementation, the heuristic preset receives a small fixed score bonus before selection (<code>+0.01</code>), while learned bias remains mode-specific and persistent.
                   Meaning: <code>argmax</code> means "pick the index of the largest value". <code>yhat</code> is the model score vector, <code>s_k</code> is the score of preset <code>k</code>, and <code>k*</code> is the selected preset index.
                   Example: if <code>yhat = [0.12, 0.41, 0.33, 0.14]</code>, then <code>k* = 2</code> because <code>0.41</code> is the largest score.
                 </li>
@@ -667,25 +668,29 @@
                   Example: if <code>E = [1000, 2000, 3000]</code> and <code>t_best = 1400</code>, then <code>t_eval,best = 2000</code>.
                 </li>
                 <li>
-                  <span class="step-title">Step 4. Compute quality score and time score.</span>
-                  Quality uses normalized PSNR, SSIM, and LPIPS. Time uses normalized runtime to a reference.
+                  <span class="step-title">Step 4. Compute loss, quality, and time scores.</span>
+                  Loss score uses normalized loss (inverted), quality uses normalized PSNR/SSIM/LPIPS, and time uses normalized runtime to a reference.
+                  <div class="equation"><span class="eq-main"><span class="v">L</span><sub>score</sub>(<span class="v">t</span>) = 1 - Loss<sub>norm</sub>(<span class="v">t</span>)</span><span class="eq-no">(4B.4)</span></div>
                   <div class="equation"><span class="eq-main"><span class="v">Q</span>(<span class="v">t</span>) = <span class="v">w</span><sub>psnr</sub> PSNR<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>ssim</sub> SSIM<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>lpips</sub> (1 - LPIPS<sub>norm</sub>(<span class="v">t</span>))</span><span class="eq-no">(4B.4)</span></div>
                   <div class="equation"><span class="eq-main"><span class="v">T</span>(<span class="v">t</span>) = 1 - clamp( time_to_step(<span class="v">t</span>) / time<sub>ref</sub>, 0, 1 )</span><span class="eq-no">(4B.5)</span></div>
-                  Meaning: <code>Q(t)</code> is quality score and <code>T(t)</code> is time score. <code>clamp(x,0,1)</code> means force <code>x</code> into the range <code>[0,1]</code>. LPIPS is inverted by <code>(1 - LPIPS_norm)</code> so larger is better, like PSNR and SSIM.
+                  Meaning: <code>L_score(t)</code> is the inverted normalized loss score, <code>Q(t)</code> is quality score, and <code>T(t)</code> is time score. <code>clamp(x,0,1)</code> means force <code>x</code> into the range <code>[0,1]</code>. LPIPS is inverted by <code>(1 - LPIPS_norm)</code> so larger is better, like PSNR and SSIM.
                   Example: if <code>time_to_step(t)/time_ref = 1.2</code>, then <code>clamp = 1</code> and <code>T(t) = 0</code>. If ratio is <code>0.6</code>, then <code>T(t) = 0.4</code>.
                 </li>
                 <li>
                   <span class="step-title">Step 5. Compute composite score at both anchors.</span>
-                  The score at any checkpoint combines quality and time, with higher weight on quality.
-                  <div class="equation"><span class="eq-main"><span class="v">S</span>(<span class="v">t</span>) = <span class="v">w</span><sub>q</sub> <span class="v">Q</span>(<span class="v">t</span>) + <span class="v">w</span><sub>t</sub> <span class="v">T</span>(<span class="v">t</span>), where <span class="v">w</span><sub>q</sub> + <span class="v">w</span><sub>t</sub> = 1 and <span class="v">w</span><sub>q</sub> &gt; <span class="v">w</span><sub>t</sub></span><span class="eq-no">(4B.6)</span></div>
-                  Meaning: <code>S(t)</code> is one final score at step <code>t</code>. <code>w_q</code> is quality weight and <code>w_t</code> is time weight.
-                  Example: with <code>w_q=0.7</code>, <code>w_t=0.3</code>, <code>Q=0.80</code>, <code>T=0.40</code>, then <code>S=0.7*0.80 + 0.3*0.40 = 0.68</code>.
+                  The score at any checkpoint combines loss score, quality score, and time score.
+                  <div class="equation"><span class="eq-main"><span class="v">S</span>(<span class="v">t</span>) = 0.5 <span class="v">L</span><sub>score</sub>(<span class="v">t</span>) + 0.25 <span class="v">Q</span>(<span class="v">t</span>) + 0.25 <span class="v">T</span>(<span class="v">t</span>)</span><span class="eq-no">(4B.6)</span></div>
+                  Meaning: <code>S(t)</code> is one final score at step <code>t</code>. Loss receives 50% weight, quality 25%, and time 25%.
+                  Example: with <code>L_score=0.70</code>, <code>Q=0.80</code>, <code>T=0.40</code>, then <code>S=0.5*0.70 + 0.25*0.80 + 0.25*0.40 = 0.65</code>.
                 </li>
                 <li>
                   <span class="step-title">Step 6. Decide run score from best-anchor and end-step.</span>
                   One score is computed at <code>t_eval,best</code>. Another score is computed at <code>t_end</code>. The larger one is used.
                   <div class="equation"><span class="eq-main"><span class="v">S</span><sub>run</sub> = max( <span class="v">S</span>(<span class="v">t</span><sub>eval,best</sub>), <span class="v">S</span>(<span class="v">t</span><sub>end</sub>) )</span><span class="eq-no">(4B.7)</span></div>
-                  Meaning: <code>max(a,b)</code> means choose the larger value. <code>S_run</code> is the final run decision score and <code>t_end</code> is the final training step.
+                  Baseline anchor scores are computed with the same rule, and learning reward uses <code>S_run - S_base</code>.
+                  <div class="equation"><span class="eq-main"><span class="v">S</span><sub>base</sub> = max( <span class="v">S</span><sub>base</sub>(<span class="v">t</span><sub>eval,best</sub>), <span class="v">S</span><sub>base</sub>(<span class="v">t</span><sub>end</sub>) )</span><span class="eq-no">(4B.8)</span></div>
+                  <div class="equation"><span class="eq-main">reward = <span class="v">S</span><sub>run</sub> - <span class="v">S</span><sub>base</sub></span><span class="eq-no">(4B.9)</span></div>
+                  Meaning: <code>max(a,b)</code> means choose the larger value. <code>S_run</code> is the run decision score and <code>S_base</code> is the baseline decision score under the same anchor rule.
                   Example: if <code>S(t_eval,best)=0.68</code> and <code>S(t_end)=0.63</code>, then <code>S_run=0.68</code>.
                 </li>
                 <li>
@@ -770,6 +775,21 @@
                     <td>Scaled by preset-specific factor and clamped.</td>
                     <td>Modifies minimum relative-improvement threshold.</td>
                   </tr>
+                  <tr>
+                    <td><code>densify_grad_threshold</code></td>
+                    <td>Scaled by preset-specific factor and clamped.</td>
+                    <td>Controls densification trigger aggressiveness.</td>
+                  </tr>
+                  <tr>
+                    <td><code>opacity_threshold</code></td>
+                    <td>Scaled by preset-specific factor and clamped.</td>
+                    <td>Controls pruning threshold aggressiveness.</td>
+                  </tr>
+                  <tr>
+                    <td><code>lambda_dssim</code></td>
+                    <td>Scaled by preset-specific factor and clamped.</td>
+                    <td>Balances DSSIM versus photometric loss.</td>
+                  </tr>
                 </tbody>
               </table>
 
@@ -823,7 +843,7 @@
               <h3>4C.3 Practical interpretation</h3>
               <ul>
                 <li>The three input modes learn by improving preset selection, not by directly training a large parameter regressor.</li>
-                <li>The immediate run receives the seven preset-driven parameter updates from Section 4C.1.</li>
+                <li>The immediate run receives ten preset-driven parameter updates from Section 4C.1.</li>
                 <li>After the run, bias/reward statistics are updated, which changes the next run's selected preset and therefore next run's parameters.</li>
               </ul>
             </div>
@@ -1041,19 +1061,19 @@
                   <tr>
                     <td>Phase A - Explore</td>
                     <td>Forced rotating preset sequence: <code>balanced</code>, <code>conservative</code>, <code>geometry_fast</code>, <code>appearance_fast</code></td>
-                    <td>Random bounded jitter, wider range</td>
+                    <td>Random bounded jitter in <code>[0.5, 1.5]</code></td>
                     <td>Guarantee preset coverage early and collect broad outcome signals</td>
                   </tr>
                   <tr>
                     <td>Phase B - Stability</td>
                     <td>Adaptive preset selection (no forced override)</td>
-                    <td>Random bounded jitter, tighter range</td>
+                    <td>Random bounded jitter in <code>[0.75, 1.25]</code></td>
                     <td>Verify consistency around promising regions</td>
                   </tr>
                   <tr>
                     <td>Phase C - Adaptive</td>
                     <td>Adaptive preset selection (no forced override)</td>
-                    <td>Random bounded jitter, tighter range</td>
+                    <td>Random bounded jitter in <code>[0.9, 1.1]</code></td>
                     <td>Consolidate learning under normal selector behavior</td>
                   </tr>
                 </tbody>

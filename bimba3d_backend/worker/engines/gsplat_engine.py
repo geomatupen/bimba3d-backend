@@ -14,7 +14,7 @@ from ..modified_rule_scopes import (
 )
 from ..ai_adaptive_light import ACTION_KEEP, CoreAIAdaptiveController
 from ..ai_input_modes import apply_initial_preset
-from ..ai_input_modes.learner import update_from_run
+from ..ai_input_modes.learner import record_run_penalty, update_from_run
 
 
 def _find_vswhere_exe() -> Path | None:
@@ -166,6 +166,10 @@ def run_training(
     )
     mode = p.get("mode", "baseline")
     max_steps = int(p.get("max_steps", 15_000))
+    try:
+        gaussian_hard_cap = max(1, int(p.get("gaussian_hard_cap", 5_000_000)))
+    except Exception:
+        gaussian_hard_cap = 5_000_000
     raw_tune_start_step = p.get("tune_start_step", 100)
     try:
         modified_tune_start_step = max(1, int(raw_tune_start_step))
@@ -293,6 +297,10 @@ def run_training(
         "loss_by_step": {},
         "best_splat": {"step": None, "loss": None, "path": None},
         "input_mode_preset": preset_summary,
+        "gaussian_hard_cap": int(gaussian_hard_cap),
+        "gaussian_cap_reached": False,
+        "gaussian_cap_step": None,
+        "gaussian_cap_count": None,
         "early_stop": {
             "enabled": bool(auto_early_stop),
             "candidate": False,
@@ -1032,6 +1040,33 @@ def run_training(
         tuning_state["last_callback_step"] = int(step)
         tuning_state["last_callback_elapsed"] = float(elapsed)
 
+        if not bool(tuning_state.get("gaussian_cap_reached")):
+            runner_obj = runner_ref.get("runner")
+            if runner_obj is not None:
+                try:
+                    means_tensor = getattr(runner_obj, "splats", {}).get("means")
+                    gaussians = (
+                        int(means_tensor.shape[0])
+                        if means_tensor is not None and hasattr(means_tensor, "shape") and len(means_tensor.shape) > 0
+                        else 0
+                    )
+                    if gaussians >= int(gaussian_hard_cap) and not stop_flag.exists():
+                        tuning_state["gaussian_cap_reached"] = True
+                        tuning_state["gaussian_cap_step"] = int(step)
+                        tuning_state["gaussian_cap_count"] = int(gaussians)
+                        stop_flag.write_text(
+                            f"gaussian_hard_cap_reached:{int(gaussians)}:{int(gaussian_hard_cap)}:{int(step)}",
+                            encoding="utf-8",
+                        )
+                        logger.warning(
+                            "Gaussian hard cap reached at step %d: gaussians=%d cap=%d",
+                            int(step),
+                            int(gaussians),
+                            int(gaussian_hard_cap),
+                        )
+                except Exception as exc:
+                    logger.debug("Failed gaussian hard-cap check at step %s: %s", step, exc)
+
         requested_stop = stop_checker()
 
         eta = (
@@ -1043,11 +1078,19 @@ def run_training(
         if eta is not None:
             timing["eta"] = eta
 
-        message = (
-            f"⏸️ Stopping after step {step}/{max_steps_local} completes (loss: {loss:.6f})..."
-            if requested_stop
-            else f"🎯 Training step {step}/{max_steps_local} (loss: {loss:.6f})"
-        )
+        gaussian_cap_reached = bool(tuning_state.get("gaussian_cap_reached"))
+        if gaussian_cap_reached:
+            cap_count = tuning_state.get("gaussian_cap_count")
+            message = (
+                f"🛑 Gaussian hard cap reached ({cap_count}/{int(gaussian_hard_cap)}). "
+                f"Stopping this run after step {step}/{max_steps_local}."
+            )
+        else:
+            message = (
+                f"⏸️ Stopping after step {step}/{max_steps_local} completes (loss: {loss:.6f})..."
+                if requested_stop
+                else f"🎯 Training step {step}/{max_steps_local} (loss: {loss:.6f})"
+            )
 
         update_status(
             project_dir,
@@ -1364,6 +1407,78 @@ def run_training(
             stop_flag_reason = None
 
     if stop_reason is not None or stop_flag_reason:
+        gaussian_cap_hit = isinstance(stop_flag_reason, str) and stop_flag_reason.startswith("gaussian_hard_cap_reached")
+        if gaussian_cap_hit:
+            cap_count = tuning_state.get("gaussian_cap_count")
+            cap_step = tuning_state.get("gaussian_cap_step")
+            stop_message = (
+                "Gaussian hard cap reached; run marked failed and batch may continue. "
+                f"gaussians={cap_count}, cap={int(gaussian_hard_cap)}, step={cap_step}"
+            )
+
+            input_mode_learning_payload = None
+            if use_html_input_mode_flow:
+                selected_preset = str((preset_summary or {}).get("selected_preset") or "")
+                yhat_scores = dict((preset_summary or {}).get("yhat_scores") or {})
+                mode_name = str((preset_summary or {}).get("mode") or "")
+                if selected_preset and mode_name:
+                    try:
+                        input_mode_learning_payload = record_run_penalty(
+                            project_dir=project_dir,
+                            mode=mode_name,
+                            selected_preset=selected_preset,
+                            yhat_scores=yhat_scores,
+                            penalty_reward=-1.5,
+                            reason="gaussian_hard_cap_reached",
+                            run_id=run_session_id,
+                            logger=logger,
+                        )
+                        write_json_atomic(
+                            engine_output_dir / "input_mode_learning_results.json",
+                            input_mode_learning_payload,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to apply input-mode penalty after gaussian hard cap: %s", exc)
+
+            metadata_path = engine_output_dir / "metadata.json"
+            metadata = {}
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, "r", encoding="utf-8") as handle:
+                        metadata = json.load(handle)
+                except Exception:
+                    metadata = {}
+            metadata["mode"] = mode
+            metadata["stop_reason"] = stop_flag_reason
+            metadata["gaussian_hard_cap"] = int(gaussian_hard_cap)
+            metadata["gaussian_cap_step"] = cap_step
+            metadata["gaussian_cap_count"] = cap_count
+            if input_mode_learning_payload is not None:
+                metadata["input_mode_learning"] = input_mode_learning_payload
+            write_json_atomic(metadata_path, metadata)
+
+            logger.warning(stop_message)
+            update_status(
+                project_dir,
+                "failed",
+                progress=60,
+                stage="training",
+                message=(
+                    "🛑 Gaussian count hard cap reached; this run is failed to protect stability. "
+                    "Batch warmup/chain can continue with next run."
+                ),
+                error=stop_message,
+                stopped_step=int(cap_step) if isinstance(cap_step, int) else None,
+            )
+            if stop_flag.exists():
+                stop_flag.unlink()
+            return {
+                "terminal_state": "failed",
+                "reason": "gaussian_hard_cap_reached",
+                "step": int(cap_step) if isinstance(cap_step, int) else None,
+                "message": stop_message,
+            }
+
         if not early_stop_triggered:
             stop_message = "⏸️ Training stopped by user."
             logger.info("Training stopped before export; reason=%s", stop_flag_reason or stop_reason)

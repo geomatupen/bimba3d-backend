@@ -7,6 +7,7 @@ from typing import Any
 from .common import apply_preset_updates, clamp_float
 
 PRESETS = ["conservative", "balanced", "geometry_fast", "appearance_fast"]
+HEURISTIC_PRESET_BONUS = 0.01
 
 
 def _selector_dir(project_dir: Path) -> Path:
@@ -80,7 +81,7 @@ def select_preset(
     for preset in PRESETS:
         base = float(bias.get(preset, 0.0) or 0.0)
         if preset == heuristic_preset:
-            base += 0.03
+            base += HEURISTIC_PRESET_BONUS
         scores[preset] = base
 
     selected_preset = max(PRESETS, key=lambda p: scores.get(p, 0.0))
@@ -132,13 +133,11 @@ def update_from_run(
     eval_rows.sort(key=lambda r: int(r.get("step", 0)))
     eval_steps = [int(r["step"]) for r in eval_rows]
 
-    # Equation (4B.2): t_best = argmin_t L(t)
     if loss_by_step:
         t_best = int(min(loss_by_step.keys(), key=lambda s: float(loss_by_step[s])))
     else:
         t_best = int(eval_steps[-1])
 
-    # Equation (4B.3): first eval step >= t_best else last eval step
     eval_ge = [s for s in eval_steps if s >= t_best]
     t_eval_best = int(min(eval_ge)) if eval_ge else int(max(eval_steps))
     t_end = int(max(eval_steps))
@@ -146,6 +145,7 @@ def update_from_run(
     psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in eval_rows]
     ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in eval_rows]
     lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in eval_rows]
+    loss_vals = [float(loss_by_step.get(int(r["step"]), r.get("final_loss") or 0.0) or 0.0) for r in eval_rows]
     elapsed_vals = [float(elapsed_by_step.get(int(r["step"]), r.get("elapsed_seconds") or 0.0) or 0.0) for r in eval_rows]
 
     baseline_rows: list[dict[str, Any]] = []
@@ -156,6 +156,7 @@ def update_from_run(
     psnr_norm = _normalize_series(psnr_vals)
     ssim_norm = _normalize_series(ssim_vals)
     lpips_norm = _normalize_series(lpips_vals, invert=True)
+    loss_norm = _normalize_series(loss_vals, invert=True)
 
     baseline_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows] if baseline_rows else []
     baseline_time_ref = max(baseline_elapsed_vals) if baseline_elapsed_vals else 0.0
@@ -169,8 +170,9 @@ def update_from_run(
         q = 0.4 * psnr_norm[idx] + 0.3 * ssim_norm[idx] + 0.3 * lpips_norm[idx]
         t_ratio = elapsed_vals[idx] / time_ref
         t_score = 1.0 - clamp_float(t_ratio, 0.0, 1.0)
-        s = 0.7 * q + 0.3 * t_score
-        by_step[step] = {"q": q, "t": t_score, "s": s}
+        l_score = loss_norm[idx]
+        s = 0.5 * l_score + 0.25 * q + 0.25 * t_score
+        by_step[step] = {"l": l_score, "q": q, "t": t_score, "s": s}
 
     s_best = float(by_step.get(t_eval_best, {}).get("s", 0.0))
     s_end = float(by_step.get(t_end, {}).get("s", 0.0))
@@ -183,11 +185,13 @@ def update_from_run(
         b_psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in baseline_rows]
         b_ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in baseline_rows]
         b_lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in baseline_rows]
+        b_loss_vals = [float(r.get("final_loss") or 0.0) for r in baseline_rows]
         b_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows]
 
         b_psnr_norm = _normalize_series(b_psnr_vals)
         b_ssim_norm = _normalize_series(b_ssim_vals)
         b_lpips_norm = _normalize_series(b_lpips_vals, invert=True)
+        b_loss_norm = _normalize_series(b_loss_vals, invert=True)
 
         b_by_step: dict[int, dict[str, float]] = {}
         for idx, row in enumerate(baseline_rows):
@@ -195,8 +199,9 @@ def update_from_run(
             q = 0.4 * b_psnr_norm[idx] + 0.3 * b_ssim_norm[idx] + 0.3 * b_lpips_norm[idx]
             t_ratio = b_elapsed_vals[idx] / time_ref
             t_score = 1.0 - clamp_float(t_ratio, 0.0, 1.0)
-            s = 0.7 * q + 0.3 * t_score
-            b_by_step[step] = {"q": q, "t": t_score, "s": s}
+            l_score = b_loss_norm[idx]
+            s = 0.5 * l_score + 0.25 * q + 0.25 * t_score
+            b_by_step[step] = {"l": l_score, "q": q, "t": t_score, "s": s}
 
         def _anchor_step(target: int) -> int:
             ge = [s for s in b_steps if s >= target]
@@ -215,6 +220,11 @@ def update_from_run(
             "s_base_end": s_base_end,
             "s_base": s_base,
             "s_run_relative": reward_signal,
+            "score_weights": {
+                "loss": 0.5,
+                "quality": 0.25,
+                "time": 0.25,
+            },
         }
 
     outcomes = {
@@ -313,4 +323,68 @@ def update_from_run(
         "transition": transition,
         "baseline_comparison": baseline_comparison,
         "reward_signal": reward_signal,
+    }
+
+
+def record_run_penalty(
+    *,
+    project_dir: Path,
+    mode: str,
+    selected_preset: str,
+    yhat_scores: dict[str, float],
+    penalty_reward: float,
+    reason: str,
+    run_id: str,
+    logger,
+) -> dict[str, Any]:
+    model = _load_model(project_dir)
+    entry = _mode_entry(model, mode)
+    runs = int(entry.get("runs", 0) or 0)
+    reward_mean = float(entry.get("reward_mean", 0.0) or 0.0)
+    reward_signal = float(penalty_reward)
+    delta = reward_signal - reward_mean
+
+    alpha = 1.0 / float(runs + 1)
+    reward_mean = reward_mean + alpha * delta
+    entry["reward_mean"] = reward_mean
+    entry["runs"] = runs + 1
+
+    bias = entry.get("bias", {})
+    lr = 0.10
+    for preset in PRESETS:
+        cur = float(bias.get(preset, 0.0) or 0.0)
+        if preset == selected_preset:
+            cur += lr * delta
+        else:
+            cur -= lr * 0.15 * delta
+        bias[preset] = float(clamp_float(cur, -3.0, 3.0))
+
+    entry["bias"] = bias
+    entry["last"] = {
+        "run_id": run_id,
+        "selected_preset": selected_preset,
+        "yhat_scores": yhat_scores,
+        "reward_signal": reward_signal,
+        "reason": reason,
+        "penalty": True,
+    }
+
+    _save_model(project_dir, model)
+
+    logger.info(
+        "AI_INPUT_MODE_PENALTY mode=%s preset=%s reward=%.4f reason=%s",
+        mode,
+        selected_preset,
+        reward_signal,
+        reason,
+    )
+
+    return {
+        "updated": True,
+        "mode": mode,
+        "selected_preset": selected_preset,
+        "reward_signal": reward_signal,
+        "reason": reason,
+        "penalty": True,
+        "yhat_scores": yhat_scores,
     }

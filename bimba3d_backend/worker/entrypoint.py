@@ -2050,7 +2050,19 @@ def main():
                 resume=resume,
             )
 
-        if stop_reason:
+        terminal_failure = isinstance(stop_reason, dict) and str(stop_reason.get("terminal_state") or "").strip().lower() == "failed"
+        if terminal_failure:
+            failure_message = str(stop_reason.get("message") or "Training failed.")
+            update_status(
+                project_dir,
+                "failed",
+                stage="training",
+                message=failure_message,
+                error=failure_message,
+            )
+            logger.warning("Pipeline failed with engine terminal failure payload: %s", stop_reason)
+            stop_reason = None
+        elif stop_reason:
             # If stopped, set status to 'stopped' and include step info in message
             final_status = "stopped"
             # Try to infer stopped_stage and stopped_step

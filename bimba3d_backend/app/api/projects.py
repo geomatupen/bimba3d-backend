@@ -106,22 +106,22 @@ WARMUP_PHASE_PLAN = [
         "runs": 16,
         "preset_sequence": ["balanced", "conservative", "geometry_fast", "appearance_fast"],
         "jitter_mode": "random",
-        "jitter_min": 0.94,
-        "jitter_max": 1.06,
+        "jitter_min": 0.5,
+        "jitter_max": 1.5,
     },
     {
         "name": "phase_b_stability",
         "runs": 8,
         "jitter_mode": "random",
-        "jitter_min": 0.97,
-        "jitter_max": 1.03,
+        "jitter_min": 0.75,
+        "jitter_max": 1.25,
     },
     {
         "name": "phase_c_adaptive",
         "runs": 12,
         "jitter_mode": "random",
-        "jitter_min": 0.97,
-        "jitter_max": 1.03,
+        "jitter_min": 0.9,
+        "jitter_max": 1.1,
     },
 ]
 
@@ -465,7 +465,7 @@ def _apply_run_jitter(
     jitter_min: float = 1.0,
     jitter_max: float = 1.0,
 ) -> dict:
-    """Apply per-run multiplicative jitter to selected learning-rate parameters.
+    """Apply per-run multiplicative jitter to learnable optimization parameters.
 
     Run index is zero-based; run 1 (index 0) is intentionally left unchanged.
     """
@@ -497,10 +497,40 @@ def _apply_run_jitter(
         "position_lr_init": 1.6e-4,
         "position_lr_final": 1.6e-6,
     }
+
+    # Keep jittered values in the same safety envelope used by the selector presets.
+    bounded_float_defaults = {
+        "densify_grad_threshold": (2.0e-4, 5.0e-5, 5.0e-4),
+        "opacity_threshold": (0.005, 0.001, 0.02),
+        "lambda_dssim": (0.2, 0.05, 0.5),
+        "tune_min_improvement": (0.005, 0.001, 0.02),
+    }
+
+    bounded_int_defaults = {
+        "tune_interval": (100, 50, 400),
+    }
+
+    def _clamp_float(value: float, low: float, high: float) -> float:
+        return max(low, min(high, float(value)))
+
+    def _clamp_int(value: int, low: int, high: int) -> int:
+        return max(low, min(high, int(value)))
+
     for key, default_val in lr_defaults.items():
         base_val = out.get(key, default_val)
         if isinstance(base_val, (int, float)):
             out[key] = float(base_val) * multiplier
+
+    for key, (default_val, low, high) in bounded_float_defaults.items():
+        base_val = out.get(key, default_val)
+        if isinstance(base_val, (int, float)):
+            out[key] = _clamp_float(float(base_val) * multiplier, low, high)
+
+    for key, (default_val, low, high) in bounded_int_defaults.items():
+        base_val = out.get(key, default_val)
+        if isinstance(base_val, (int, float)):
+            out[key] = _clamp_int(round(float(base_val) * multiplier), low, high)
+
     out["run_jitter_multiplier"] = float(multiplier)
     return out
 

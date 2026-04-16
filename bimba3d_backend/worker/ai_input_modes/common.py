@@ -43,6 +43,9 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "rotation_lr_mult": 0.95,
         "tune_interval_mult": 0.95,
         "tune_min_improvement_mult": 0.95,
+        "densify_grad_threshold_mult": 1.20,
+        "opacity_threshold_mult": 1.15,
+        "lambda_dssim_mult": 1.05,
     },
     "balanced": {
         "feature_lr_mult": 1.00,
@@ -52,6 +55,9 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "rotation_lr_mult": 1.00,
         "tune_interval_mult": 1.00,
         "tune_min_improvement_mult": 1.00,
+        "densify_grad_threshold_mult": 1.00,
+        "opacity_threshold_mult": 1.00,
+        "lambda_dssim_mult": 1.00,
     },
     "geometry_fast": {
         "feature_lr_mult": 0.95,
@@ -61,6 +67,9 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "rotation_lr_mult": 1.06,
         "tune_interval_mult": 1.05,
         "tune_min_improvement_mult": 1.03,
+        "densify_grad_threshold_mult": 0.92,
+        "opacity_threshold_mult": 0.92,
+        "lambda_dssim_mult": 0.98,
     },
     "appearance_fast": {
         "feature_lr_mult": 1.10,
@@ -70,6 +79,9 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "rotation_lr_mult": 0.99,
         "tune_interval_mult": 1.03,
         "tune_min_improvement_mult": 1.02,
+        "densify_grad_threshold_mult": 1.05,
+        "opacity_threshold_mult": 1.02,
+        "lambda_dssim_mult": 1.08,
     },
 }
 
@@ -84,6 +96,9 @@ def apply_preset_updates(params: dict[str, Any], preset_name: str) -> dict[str, 
     rotation_lr = float(params.get("rotation_lr", 1.0e-3))
     tune_interval = int(params.get("tune_interval", 100))
     tune_min_improvement = float(params.get("tune_min_improvement", 0.005))
+    densify_grad_threshold = float(params.get("densify_grad_threshold", 2.0e-4))
+    opacity_threshold = float(params.get("opacity_threshold", 0.005))
+    lambda_dssim = float(params.get("lambda_dssim", 0.2))
 
     updates = {
         "preset_name": preset_name,
@@ -94,6 +109,17 @@ def apply_preset_updates(params: dict[str, Any], preset_name: str) -> dict[str, 
         "rotation_lr": clamp_float(rotation_lr * float(preset["rotation_lr_mult"]), 1e-4, 1e-2),
         "tune_interval": clamp_int(round(tune_interval * float(preset["tune_interval_mult"])), 50, 400),
         "tune_min_improvement": clamp_float(tune_min_improvement * float(preset["tune_min_improvement_mult"]), 0.001, 0.02),
+        "densify_grad_threshold": clamp_float(
+            densify_grad_threshold * float(preset["densify_grad_threshold_mult"]),
+            5e-5,
+            5e-4,
+        ),
+        "opacity_threshold": clamp_float(
+            opacity_threshold * float(preset["opacity_threshold_mult"]),
+            0.001,
+            0.02,
+        ),
+        "lambda_dssim": clamp_float(lambda_dssim * float(preset["lambda_dssim_mult"]), 0.05, 0.5),
     }
     return updates
 

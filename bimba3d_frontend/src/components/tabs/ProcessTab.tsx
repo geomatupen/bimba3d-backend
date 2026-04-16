@@ -266,6 +266,9 @@ const LEARNABLE_AI_PARAM_KEYS = new Set([
   "scaling_lr",
   "rotation_lr",
   "position_lr_init",
+  "densify_grad_threshold",
+  "opacity_threshold",
+  "lambda_dssim",
 ]);
 
 const isMissingFlagField = (key: string): boolean => /_missing$/i.test(key);
