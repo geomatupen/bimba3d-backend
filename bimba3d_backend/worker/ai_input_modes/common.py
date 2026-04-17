@@ -41,8 +41,6 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "scaling_lr_mult": 0.84,
         "opacity_lr_mult": 0.84,
         "rotation_lr_mult": 0.90,
-        "tune_interval_mult": 0.90,
-        "tune_min_improvement_mult": 0.90,
         "densify_grad_threshold_mult": 1.40,
         "opacity_threshold_mult": 1.30,
         "lambda_dssim_mult": 1.10,
@@ -53,8 +51,6 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "scaling_lr_mult": 1.00,
         "opacity_lr_mult": 1.00,
         "rotation_lr_mult": 1.00,
-        "tune_interval_mult": 1.00,
-        "tune_min_improvement_mult": 1.00,
         "densify_grad_threshold_mult": 1.00,
         "opacity_threshold_mult": 1.00,
         "lambda_dssim_mult": 1.00,
@@ -65,8 +61,6 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "scaling_lr_mult": 1.16,
         "opacity_lr_mult": 0.96,
         "rotation_lr_mult": 1.12,
-        "tune_interval_mult": 1.10,
-        "tune_min_improvement_mult": 1.06,
         "densify_grad_threshold_mult": 0.84,
         "opacity_threshold_mult": 0.84,
         "lambda_dssim_mult": 0.96,
@@ -77,8 +71,6 @@ PRESET_UPDATES: dict[str, dict[str, Any]] = {
         "scaling_lr_mult": 0.96,
         "opacity_lr_mult": 1.16,
         "rotation_lr_mult": 0.98,
-        "tune_interval_mult": 1.06,
-        "tune_min_improvement_mult": 1.04,
         "densify_grad_threshold_mult": 1.10,
         "opacity_threshold_mult": 1.04,
         "lambda_dssim_mult": 1.16,
@@ -94,8 +86,6 @@ def apply_preset_updates(params: dict[str, Any], preset_name: str) -> dict[str, 
     scaling_lr = float(params.get("scaling_lr", 5.0e-3))
     opacity_lr = float(params.get("opacity_lr", 5.0e-2))
     rotation_lr = float(params.get("rotation_lr", 1.0e-3))
-    tune_interval = int(params.get("tune_interval", 100))
-    tune_min_improvement = float(params.get("tune_min_improvement", 0.005))
     densify_grad_threshold = float(params.get("densify_grad_threshold", 2.0e-4))
     opacity_threshold = float(params.get("opacity_threshold", 0.005))
     lambda_dssim = float(params.get("lambda_dssim", 0.2))
@@ -107,8 +97,6 @@ def apply_preset_updates(params: dict[str, Any], preset_name: str) -> dict[str, 
         "scaling_lr": clamp_float(scaling_lr * float(preset["scaling_lr_mult"]), 1e-4, 2e-2),
         "opacity_lr": clamp_float(opacity_lr * float(preset["opacity_lr_mult"]), 1e-3, 1e-1),
         "rotation_lr": clamp_float(rotation_lr * float(preset["rotation_lr_mult"]), 1e-4, 1e-2),
-        "tune_interval": clamp_int(round(tune_interval * float(preset["tune_interval_mult"])), 50, 400),
-        "tune_min_improvement": clamp_float(tune_min_improvement * float(preset["tune_min_improvement_mult"]), 0.001, 0.02),
         "densify_grad_threshold": clamp_float(
             densify_grad_threshold * float(preset["densify_grad_threshold_mult"]),
             5e-5,

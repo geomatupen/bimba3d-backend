@@ -128,6 +128,7 @@ interface AILearningTableRow {
   run_end_q?: number | null;
   run_end_t?: number | null;
   run_end_s?: number | null;
+  learned_input_params?: Record<string, unknown> | null;
 }
 
 function buildPolylinePoints(points: ChartPoint[], width: number, height: number): ChartGeometry {
@@ -914,6 +915,24 @@ export default function LogsTab({ projectId }: LogsTabProps) {
     return value.toLocaleString();
   };
 
+  const fmtLearnedParams = (params: Record<string, unknown> | null | undefined) => {
+    if (!params || typeof params !== "object") return "-";
+    const entries = Object.entries(params);
+    if (entries.length === 0) return "-";
+    return entries
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return `${key}=${Number(value.toFixed(6)).toString()}`;
+        }
+        if (typeof value === "boolean") {
+          return `${key}=${value ? "true" : "false"}`;
+        }
+        return `${key}=${String(value)}`;
+      })
+      .join("\n");
+  };
+
   return (
     <div className="max-w-6xl">
       <div className="bg-white rounded-xl shadow-md border border-gray-200">
@@ -1141,11 +1160,12 @@ export default function LogsTab({ projectId }: LogsTabProps) {
               </div>
               <div className="p-4">
                 <div className="overflow-x-auto bg-white border border-gray-200 rounded-lg">
-                  <table className="min-w-[1900px] w-full text-xs">
+                  <table className="min-w-[2200px] w-full text-xs">
                     <thead className="bg-slate-100 text-slate-700">
                       <tr>
                         <th className="px-2 py-2 text-left font-semibold">Run</th>
                         <th className="px-2 py-2 text-left font-semibold">Preset</th>
+                        <th className="px-2 py-2 text-left font-semibold">Learned Input Params</th>
                         <th className="px-2 py-2 text-left font-semibold">Best Loss</th>
                         <th className="px-2 py-2 text-left font-semibold">Final Loss</th>
                         <th className="px-2 py-2 text-left font-semibold">Best PSNR</th>
@@ -1168,7 +1188,7 @@ export default function LogsTab({ projectId }: LogsTabProps) {
                     <tbody>
                       {aiLearningRows.length === 0 ? (
                         <tr>
-                          <td className="px-3 py-6 text-slate-500" colSpan={19}>
+                          <td className="px-3 py-6 text-slate-500" colSpan={20}>
                             {aiLearningMessage || "No AI learning rows available for this project yet."}
                           </td>
                         </tr>
@@ -1180,6 +1200,7 @@ export default function LogsTab({ projectId }: LogsTabProps) {
                               <div className="text-[10px] text-slate-500">{row.run_id}</div>
                             </td>
                             <td className="px-2 py-2 text-slate-700">{row.selected_preset || "-"}</td>
+                            <td className="px-2 py-2 text-slate-700 font-mono text-[10px] whitespace-pre-wrap break-words max-w-[360px]">{fmtLearnedParams(row.learned_input_params)}</td>
                             <td className="px-2 py-2 text-slate-700">{fmt(row.best_loss)} @ {fmtStep(row.best_loss_step)}</td>
                             <td className="px-2 py-2 text-slate-700">{fmt(row.final_loss)} @ {fmtStep(row.final_loss_step)}</td>
                             <td className="px-2 py-2 text-slate-700">{fmt(row.best_psnr, 4)} @ {fmtStep(row.best_psnr_step)}</td>

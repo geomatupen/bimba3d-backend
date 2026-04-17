@@ -2089,39 +2089,65 @@ def run_training(
         }
 
         input_mode_insights = None
-        if isinstance(input_mode_learning_payload, dict):
-            transition = input_mode_learning_payload.get("transition") if isinstance(input_mode_learning_payload.get("transition"), dict) else {}
-            outcomes = transition.get("outcomes") if isinstance(transition.get("outcomes"), dict) else {}
-            baseline_comparison = transition.get("baseline_comparison") if isinstance(transition.get("baseline_comparison"), dict) else {}
+        if isinstance(preset_summary, dict) and bool(preset_summary.get("applied")):
+            applied_keys = [
+                "feature_lr",
+                "position_lr_init",
+                "scaling_lr",
+                "opacity_lr",
+                "rotation_lr",
+                "densify_grad_threshold",
+                "opacity_threshold",
+                "lambda_dssim",
+            ]
+            applied_initial_params = {
+                key: p.get(key)
+                for key in applied_keys
+                if p.get(key) is not None
+            }
+
+            transition = input_mode_learning_payload.get("transition") if isinstance(input_mode_learning_payload, dict) and isinstance(input_mode_learning_payload.get("transition"), dict) else {}
+            outcomes = transition.get("outcomes") if isinstance(transition, dict) and isinstance(transition.get("outcomes"), dict) else {}
+            baseline_comparison = transition.get("baseline_comparison") if isinstance(transition, dict) and isinstance(transition.get("baseline_comparison"), dict) else {}
+            reward_signal = input_mode_learning_payload.get("reward_signal") if isinstance(input_mode_learning_payload, dict) else None
+
             input_mode_insights = {
                 "ai_input_mode": str((preset_summary or {}).get("mode") or "") or None,
                 "baseline_session_id": str(p.get("baseline_session_id") or "").strip() or None,
-                "selected_preset": input_mode_learning_payload.get("selected_preset"),
+                "selected_preset": (
+                    input_mode_learning_payload.get("selected_preset")
+                    if isinstance(input_mode_learning_payload, dict)
+                    else str((preset_summary or {}).get("selected_preset") or "") or None
+                ),
                 "heuristic_preset": str((preset_summary or {}).get("heuristic_preset") or "") or None,
                 "cache_used": bool((preset_summary or {}).get("cache_used")) if (preset_summary or {}).get("cache_used") is not None else None,
-                "reward": input_mode_learning_payload.get("reward_signal"),
+                "reward": reward_signal,
                 "reward_positive": (
-                    bool(input_mode_learning_payload.get("reward_signal") > 0.0)
-                    if isinstance(input_mode_learning_payload.get("reward_signal"), (int, float))
+                    bool(reward_signal > 0.0)
+                    if isinstance(reward_signal, (int, float))
                     else None
                 ),
                 "reward_label": (
                     "rewarded"
-                    if isinstance(input_mode_learning_payload.get("reward_signal"), (int, float)) and input_mode_learning_payload.get("reward_signal") > 0.0
-                    else "penalized_or_neutral"
+                    if isinstance(reward_signal, (int, float)) and reward_signal > 0.0
+                    else ("penalized_or_neutral" if isinstance(reward_signal, (int, float)) else "unknown")
                 ),
                 "reward_mode": str((preset_summary or {}).get("mode") or "") or None,
-                "reward_preset": input_mode_learning_payload.get("selected_preset"),
+                "reward_preset": (
+                    input_mode_learning_payload.get("selected_preset")
+                    if isinstance(input_mode_learning_payload, dict)
+                    else str((preset_summary or {}).get("selected_preset") or "") or None
+                ),
                 "feature_source": "runtime",
-                "initial_params": dict((preset_summary or {}).get("updates") or {}),
+                "initial_params": applied_initial_params,
                 "feature_details": dict((preset_summary or {}).get("features") or {}),
                 "learn_snapshot": {
-                    "s_best": input_mode_learning_payload.get("s_best"),
-                    "s_end": input_mode_learning_payload.get("s_end"),
-                    "s_run": input_mode_learning_payload.get("s_run"),
-                    "t_best": input_mode_learning_payload.get("t_best"),
-                    "t_eval_best": input_mode_learning_payload.get("t_eval_best"),
-                    "t_end": input_mode_learning_payload.get("t_end"),
+                    "s_best": input_mode_learning_payload.get("s_best") if isinstance(input_mode_learning_payload, dict) else None,
+                    "s_end": input_mode_learning_payload.get("s_end") if isinstance(input_mode_learning_payload, dict) else None,
+                    "s_run": input_mode_learning_payload.get("s_run") if isinstance(input_mode_learning_payload, dict) else None,
+                    "t_best": input_mode_learning_payload.get("t_best") if isinstance(input_mode_learning_payload, dict) else None,
+                    "t_eval_best": input_mode_learning_payload.get("t_eval_best") if isinstance(input_mode_learning_payload, dict) else None,
+                    "t_end": input_mode_learning_payload.get("t_end") if isinstance(input_mode_learning_payload, dict) else None,
                     "best_anchor": outcomes.get("best_anchor") if isinstance(outcomes, dict) else None,
                     "end_anchor": outcomes.get("end_anchor") if isinstance(outcomes, dict) else None,
                     "baseline_comparison": baseline_comparison if isinstance(baseline_comparison, dict) else None,

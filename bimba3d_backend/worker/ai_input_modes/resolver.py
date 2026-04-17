@@ -175,8 +175,6 @@ def _build_initial_params_log(params: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "tune_start_step",
         "tune_end_step",
-        "tune_interval",
-        "tune_min_improvement",
         "trend_scope",
         "feature_lr",
         "opacity_lr",
@@ -223,9 +221,19 @@ def apply_initial_preset(
             "selector_strategy": selector_strategy,
         }
 
-    ctx = ModeContext(image_dir=Path(image_dir), colmap_dir=Path(colmap_dir), params=params)
-    project_dir = Path(image_dir).resolve().parent
-    fingerprint = _image_fingerprint(Path(image_dir))
+    image_dir_path = Path(image_dir)
+    project_dir = image_dir_path.resolve().parent
+
+    # Keep metadata extraction tied to original uploads when resized copies exist,
+    # because some EXIF/XMP fields may be dropped during resize.
+    metadata_image_dir = image_dir_path
+    if image_dir_path.name == "images_resized":
+        original_dir = project_dir / "images"
+        if original_dir.exists() and original_dir.is_dir():
+            metadata_image_dir = original_dir
+
+    ctx = ModeContext(image_dir=metadata_image_dir, colmap_dir=Path(colmap_dir), params=params)
+    fingerprint = _image_fingerprint(metadata_image_dir)
     cached = _load_feature_cache(project_dir, mode, fingerprint)
     cache_used = cached is not None
 

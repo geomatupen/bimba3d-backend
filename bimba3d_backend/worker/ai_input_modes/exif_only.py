@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from statistics import median
 from typing import Any
 
@@ -53,7 +54,117 @@ def _read_exif(path: Path) -> tuple[dict[str, Any], int, int]:
         for key, value in raw.items():
             name = ExifTags.TAGS.get(key, key)
             exif[str(name)] = value
+
+        # Ensure GPSInfo is a parsed dict when available.
+        if not isinstance(exif.get("GPSInfo"), dict) and hasattr(raw, "get_ifd"):
+            try:
+                gps_ifd = raw.get_ifd(0x8825)  # GPS IFD pointer tag
+            except Exception:
+                gps_ifd = None
+            if isinstance(gps_ifd, dict):
+                gps: dict[Any, Any] = {}
+                for k, v in gps_ifd.items():
+                    gps_name = ExifTags.GPSTAGS.get(k, k)
+                    gps[gps_name] = v
+                    gps[k] = v
+                exif["GPSInfo"] = gps
+
+        # DJI and similar cameras often keep useful capture metadata in XMP.
+        xmp_attrs = _extract_xmp_attrs(img.info.get("xmp"))
+        _apply_xmp_fallbacks(exif, xmp_attrs)
         return exif, width, height
+
+
+def _extract_xmp_attrs(xmp_blob: Any) -> dict[str, str]:
+    if isinstance(xmp_blob, (bytes, bytearray)):
+        text = xmp_blob.decode("utf-8", errors="ignore")
+    elif isinstance(xmp_blob, str):
+        text = xmp_blob
+    else:
+        return {}
+
+    attrs: dict[str, str] = {}
+    for key, value in re.findall(r'([A-Za-z0-9_.:-]+)\s*=\s*"([^"]*)"', text):
+        attrs[key] = value
+    return attrs
+
+
+def _xmp_pick(attrs: dict[str, str], keys: list[str]) -> str | None:
+    for key in keys:
+        val = attrs.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def _apply_xmp_fallbacks(exif: dict[str, Any], xmp_attrs: dict[str, str]) -> None:
+    if not xmp_attrs:
+        return
+
+    if not exif.get("LensModel"):
+        lens = _xmp_pick(xmp_attrs, ["aux:Lens", "exifEX:LensModel", "drone-dji:Lens"])
+        if lens:
+            exif["LensModel"] = lens
+
+    if exif.get("FocalLength") is None:
+        focal = _xmp_pick(xmp_attrs, ["exif:FocalLength", "tiff:FocalLength"])
+        focal_val = _as_float(focal)
+        if focal_val is None:
+            # Calibrated focal is often in pixels; only accept if value looks like mm.
+            calibrated = _as_float(_xmp_pick(xmp_attrs, ["drone-dji:CalibratedFocalLength"]))
+            if calibrated is not None and 1.0 <= calibrated <= 100.0:
+                focal_val = calibrated
+        if focal_val is None:
+            lens_text = str(exif.get("LensModel") or "")
+            m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*mm", lens_text, flags=re.IGNORECASE)
+            if m:
+                focal_val = _as_float(m.group(1))
+        if focal_val is not None:
+            exif["FocalLength"] = focal_val
+
+    if exif.get("FNumber") is None:
+        f_number = _as_float(_xmp_pick(xmp_attrs, ["exif:FNumber", "aux:LensInfoAperture"]))
+        if f_number is None:
+            lens_text = str(exif.get("LensModel") or "")
+            m = re.search(r"f\s*/?\s*([0-9]+(?:\.[0-9]+)?)", lens_text, flags=re.IGNORECASE)
+            if m:
+                f_number = _as_float(m.group(1))
+        if f_number is not None:
+            exif["FNumber"] = f_number
+
+    if exif.get("ExposureTime") is None:
+        exp = _as_float(_xmp_pick(xmp_attrs, ["exif:ExposureTime"]))
+        if exp is not None:
+            exif["ExposureTime"] = exp
+
+    if exif.get("ISOSpeedRatings") is None and exif.get("PhotographicSensitivity") is None:
+        iso = _as_float(_xmp_pick(xmp_attrs, ["exif:ISOSpeedRatings", "exif:PhotographicSensitivity", "drone-dji:ISO"]))
+        if iso is not None:
+            exif["ISOSpeedRatings"] = iso
+
+    if exif.get("DateTimeOriginal") is None:
+        dt = _xmp_pick(xmp_attrs, ["exif:DateTimeOriginal", "xmp:CreateDate", "drone-dji:CreateDate"])
+        if dt:
+            exif["DateTimeOriginal"] = dt
+
+    if exif.get("Pitch") is None and exif.get("CameraElevationAngle") is None:
+        pitch = _as_float(_xmp_pick(xmp_attrs, ["drone-dji:GimbalPitchDegree", "drone-dji:FlightPitchDegree"]))
+        if pitch is not None:
+            exif["Pitch"] = pitch
+
+    if not isinstance(exif.get("GPSInfo"), dict):
+        lat = _as_float(_xmp_pick(xmp_attrs, ["drone-dji:GpsLatitude", "exif:GPSLatitude"]))
+        lon = _as_float(_xmp_pick(xmp_attrs, ["drone-dji:GpsLongitude", "exif:GPSLongitude"]))
+        alt = _as_float(_xmp_pick(xmp_attrs, ["drone-dji:AbsoluteAltitude", "drone-dji:RelativeAltitude", "exif:GPSAltitude"]))
+        gps_payload: dict[str, float] = {}
+        if lat is not None:
+            gps_payload["lat"] = lat
+        if lon is not None:
+            gps_payload["lon"] = lon
+        if alt is not None:
+            gps_payload["alt"] = alt
+        if gps_payload:
+            exif["GPSInfo"] = gps_payload
 
 
 def _as_float(value: Any) -> float | None:
@@ -63,6 +174,12 @@ def _as_float(value: Any) -> float | None:
             if float(den) == 0.0:
                 return None
             return float(num) / float(den)
+        if isinstance(value, str) and "/" in value:
+            num_s, den_s = value.split("/", 1)
+            den = float(den_s.strip())
+            if den == 0.0:
+                return None
+            return float(num_s.strip()) / den
         return float(value)
     except Exception:
         return None
@@ -72,6 +189,13 @@ def _extract_gps(exif: dict[str, Any]) -> tuple[float | None, float | None, floa
     gps = exif.get("GPSInfo")
     if not isinstance(gps, dict):
         return None, None, None
+
+    # Support direct decimal GPS payloads (used by XMP fallback path).
+    lat_direct = _as_float(gps.get("lat"))
+    lon_direct = _as_float(gps.get("lon"))
+    alt_direct = _as_float(gps.get("alt"))
+    if lat_direct is not None or lon_direct is not None or alt_direct is not None:
+        return lat_direct, lon_direct, alt_direct
 
     def _to_deg(ref_key: int, val_key: int) -> float | None:
         ref = gps.get(ref_key)

@@ -6,10 +6,13 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
-from PIL import ExifTags, Image
-
 from .common import ModeContext, PresetResult, apply_preset_updates, keep_only_feature_keys
-from .exif_only import EXIF_ONLY_FEATURE_KEYS, build_preset as build_exif_only_preset
+from .exif_only import (
+    EXIF_ONLY_FEATURE_KEYS,
+    build_preset as build_exif_only_preset,
+    _extract_gps as _extract_gps_shared,
+    _read_exif as _read_exif_shared,
+)
 
 
 FLIGHT_PLAN_FEATURE_KEYS: set[str] = {
@@ -46,42 +49,6 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
-
-
-def _read_exif(path: Path) -> dict[str, Any]:
-    with Image.open(path) as img:
-        raw = img.getexif() or {}
-    exif: dict[str, Any] = {}
-    for key, value in raw.items():
-        name = ExifTags.TAGS.get(key, key)
-        exif[str(name)] = value
-    return exif
-
-
-def _extract_gps(exif: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
-    gps = exif.get("GPSInfo")
-    if not isinstance(gps, dict):
-        return None, None, None
-
-    def _to_deg(ref_key: int, val_key: int) -> float | None:
-        ref = gps.get(ref_key)
-        val = gps.get(val_key)
-        if not isinstance(val, (tuple, list)) or len(val) != 3:
-            return None
-        d = _as_float(val[0])
-        m = _as_float(val[1])
-        s = _as_float(val[2])
-        if d is None or m is None or s is None:
-            return None
-        out = d + (m / 60.0) + (s / 3600.0)
-        if str(ref).upper() in {"S", "W"}:
-            out = -out
-        return out
-
-    lat = _to_deg(1, 2)
-    lon = _to_deg(3, 4)
-    alt = _as_float(gps.get(6))
-    return lat, lon, alt
 
 
 def _extract_angle(exif: dict[str, Any]) -> float | None:
@@ -142,10 +109,10 @@ def build_preset(ctx: ModeContext) -> PresetResult:
 
     for path in images:
         try:
-            exif = _read_exif(path)
+            exif, _, _ = _read_exif_shared(path)
         except Exception:
             continue
-        lat, lon, alt = _extract_gps(exif)
+        lat, lon, alt = _extract_gps_shared(exif)
         ts = _extract_timestamp(exif)
         ang = _extract_angle(exif)
         if lat is not None and lon is not None:

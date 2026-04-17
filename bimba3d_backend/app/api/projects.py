@@ -49,6 +49,7 @@ BEST_SPARSE_META = ".best_sparse_selection.json"
 SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
 SHARED_CONFIG_FILE = "shared_config.json"
 BATCH_LINEAGE_FILE = ".batch_lineage_latest.json"
+PROJECT_MODEL_STATE_FILE = ".project_model_state.json"
 RUN_CONFIG_HISTORY_KEEP = 5
 GSPLAT_SNAPSHOT_RE = re.compile(
     r"\[GSPLAT SNAPSHOT\]\s+step=(?P<step>\d+)/(?:\s*)?(?P<max_steps>\d+).*?loss=(?P<loss>[0-9.eE+-]+).*?elapsed=(?P<elapsed>[0-9.eE+-]+)s.*?eta=(?P<eta>[^\s]+).*?speed=(?P<speed>[^\s]+)",
@@ -99,6 +100,35 @@ AI_INPUT_MODE_REWARD_OUTCOME_RE = re.compile(
     r"AI_INPUT_MODE_REWARD_OUTCOME\s+mode=(?P<mode>[^\s]+)\s+preset=(?P<preset>[^\s]+)\s+reward=(?P<reward>[0-9.eE+-]+)\s+rewarded=(?P<rewarded>true|false)",
     re.IGNORECASE,
 )
+
+EXIF_ONLY_INPUT_X_KEYS = {
+    "camera_make",
+    "camera_model",
+    "camera_meta_missing",
+    "lens_model",
+    "lens_missing",
+    "focal_length_mm",
+    "focal_missing",
+    "aperture_f",
+    "aperture_missing",
+    "shutter_s",
+    "shutter_missing",
+    "iso",
+    "iso_missing",
+    "camera_angle_bucket",
+    "angle_missing",
+    "gps_lat_mean",
+    "gps_lon_mean",
+    "gps_alt_mean",
+    "gps_missing",
+    "timestamp_mode",
+    "timestamp_missing",
+    "img_width_median",
+    "img_height_median",
+    "img_orientation",
+    "orientation_missing",
+    "img_size_missing",
+}
 
 WARMUP_PHASE_PLAN = [
     {
@@ -642,6 +672,126 @@ def _write_batch_lineage(project_dir: Path, payload: dict) -> None:
     tmp.replace(target)
 
 
+def _get_project_model_state_path(project_dir: Path) -> Path:
+    return project_dir / PROJECT_MODEL_STATE_FILE
+
+
+def _read_project_model_state(project_dir: Path) -> dict:
+    payload = _read_json_if_exists(_get_project_model_state_path(project_dir))
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def _write_project_model_state(project_dir: Path, payload: dict) -> None:
+    target = _get_project_model_state_path(project_dir)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    tmp.replace(target)
+
+
+def _build_project_model_series_key(project_model_name: str) -> str:
+    base = _sanitize_run_token(project_model_name) or "project_model"
+    return f"{base}_{uuid.uuid4().hex[:8]}"
+
+
+def _read_run_config_params(project_dir: Path, run_id: str) -> tuple[dict, dict]:
+    run_cfg = _read_json_if_exists(project_dir / "runs" / run_id / "run_config.json")
+    if not isinstance(run_cfg, dict):
+        return {}, {}
+    requested = run_cfg.get("requested_params") if isinstance(run_cfg.get("requested_params"), dict) else {}
+    resolved = run_cfg.get("resolved_params") if isinstance(run_cfg.get("resolved_params"), dict) else {}
+    return requested, resolved
+
+
+def _resolve_project_model_metadata_from_run(project_dir: Path, run_id: str) -> tuple[str | None, str | None]:
+    if not run_id:
+        return None, None
+    requested, resolved = _read_run_config_params(project_dir, run_id)
+    key = str(
+        resolved.get("project_model_key")
+        or requested.get("project_model_key")
+        or ""
+    ).strip()
+    name = str(
+        resolved.get("project_model_name")
+        or requested.get("project_model_name")
+        or ""
+    ).strip()
+    return (key or None, name or None)
+
+
+def _resolve_project_model_source_run_id(project_dir: Path, series_key: str) -> str | None:
+    key = str(series_key or "").strip()
+    if not key:
+        return None
+
+    state = _read_project_model_state(project_dir)
+    models = state.get("models") if isinstance(state.get("models"), dict) else {}
+    series = models.get(key) if isinstance(models.get(key), dict) else {}
+    candidates: list[str] = []
+
+    for item in series.get("run_history") if isinstance(series.get("run_history"), list) else []:
+        run_id = str(item).strip()
+        if run_id:
+            candidates.append(run_id)
+
+    last_run_id = str(series.get("last_run_id") or "").strip()
+    if last_run_id:
+        candidates.append(last_run_id)
+
+    # Keep order stable while de-duplicating.
+    seen: set[str] = set()
+    ordered = [rid for rid in candidates if not (rid in seen or seen.add(rid))]
+
+    # Search newest-first for a run that already has a usable gsplat checkpoint.
+    for run_id in reversed(ordered):
+        run_dir = project_dir / "runs" / run_id
+        if not run_dir.exists() or not run_dir.is_dir():
+            continue
+        checkpoint_path = model_registry.find_latest_gsplat_checkpoint(run_dir)
+        if checkpoint_path is not None and checkpoint_path.exists():
+            return run_id
+    return None
+
+
+def _record_project_model_series_run(
+    project_dir: Path,
+    series_key: str,
+    project_model_name: str,
+    run_id: str,
+) -> None:
+    key = str(series_key or "").strip()
+    if not key:
+        return
+
+    state = _read_project_model_state(project_dir)
+    models = state.get("models") if isinstance(state.get("models"), dict) else {}
+    record = models.get(key) if isinstance(models.get(key), dict) else {}
+
+    history = [str(item).strip() for item in (record.get("run_history") if isinstance(record.get("run_history"), list) else [])]
+    history = [item for item in history if item]
+    if run_id:
+        history.append(run_id)
+    # Keep a compact tail to avoid unbounded growth.
+    history = history[-100:]
+
+    models[key] = {
+        "project_model_key": key,
+        "project_model_name": str(project_model_name or "").strip() or key,
+        "last_run_id": run_id,
+        "run_history": history,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "scope": "project",
+    }
+    state["models"] = models
+    state["active_project_model_key"] = key
+    state["active_project_model_name"] = str(project_model_name or "").strip() or key
+    state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    _write_project_model_state(project_dir, state)
+
+
 def _prune_run_config_history(run_configs_dir: Path, keep: int = RUN_CONFIG_HISTORY_KEEP) -> None:
     """Keep only the most recent versioned run_config snapshots."""
     try:
@@ -1133,6 +1283,36 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
         "reward_mode": reward_mode,
         "reward_preset": reward_preset,
         "feature_source": "log" if features_from_log else ("cache" if features_details else "none"),
+    }
+
+
+def _extract_learned_params_from_json(run_analytics: dict | None, run_config: dict | None) -> dict[str, Any]:
+    """Extract learned params from canonical analytics JSON only."""
+
+    learned_keys = [
+        "feature_lr",
+        "position_lr_init",
+        "scaling_lr",
+        "opacity_lr",
+        "rotation_lr",
+        "densify_grad_threshold",
+        "opacity_threshold",
+        "lambda_dssim",
+    ]
+
+    if not isinstance(run_analytics, dict):
+        return {}
+
+    ai_block = run_analytics.get("ai") if isinstance(run_analytics.get("ai"), dict) else {}
+    insight = ai_block.get("input_mode_insights") if isinstance(ai_block.get("input_mode_insights"), dict) else {}
+    initial_params = insight.get("initial_params") if isinstance(insight.get("initial_params"), dict) else {}
+    if not initial_params:
+        return {}
+
+    return {
+        key: initial_params.get(key)
+        for key in learned_keys
+        if initial_params.get(key) is not None
     }
 
 
@@ -1696,7 +1876,12 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
 
         for run_dir in sorted([p for p in runs_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
             run_id = run_dir.name
+            run_config = _read_json_if_exists(run_dir / "run_config.json")
             run_analytics = _read_run_analytics(run_dir)
+            learned_input_params = _extract_learned_params_from_json(
+                run_analytics if isinstance(run_analytics, dict) else None,
+                run_config if isinstance(run_config, dict) else None,
+            )
             if isinstance(run_analytics, dict):
                 metrics = _analytics_metrics(run_analytics)
                 ai_block = run_analytics.get("ai") if isinstance(run_analytics.get("ai"), dict) else {}
@@ -1759,147 +1944,12 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
                             "run_end_q": end_anchor.get("q"),
                             "run_end_t": end_anchor.get("t"),
                             "run_end_s": end_anchor.get("s"),
+                            "learned_input_params": learned_input_params or None,
                         }
                     )
                     continue
 
-            run_config = _read_json_if_exists(run_dir / "run_config.json")
-            resolved_cfg = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
-            requested_cfg = run_config.get("requested_params") if isinstance(run_config, dict) and isinstance(run_config.get("requested_params"), dict) else {}
-
-            ai_mode = str(resolved_cfg.get("ai_input_mode") or requested_cfg.get("ai_input_mode") or "").strip().lower()
-            learning_path = run_dir / "outputs" / "engines" / "gsplat" / "input_mode_learning_results.json"
-            learning_payload = _read_json_if_exists(learning_path)
-
-            if not ai_mode and not isinstance(learning_payload, dict):
-                continue
-
-            if not isinstance(run_analytics, dict):
-                run_analytics = _ensure_run_analytics(
-                    run_dir=run_dir,
-                    run_config=run_config if isinstance(run_config, dict) else None,
-                    ai_insights=None,
-                )
-                if isinstance(run_analytics, dict):
-                    metrics = _analytics_metrics(run_analytics)
-                    ai_block = run_analytics.get("ai") if isinstance(run_analytics.get("ai"), dict) else {}
-                    input_mode_learning = ai_block.get("input_mode_learning") if isinstance(ai_block.get("input_mode_learning"), dict) else {}
-                    transition = input_mode_learning.get("transition") if isinstance(input_mode_learning.get("transition"), dict) else {}
-                    outcomes = transition.get("outcomes") if isinstance(transition.get("outcomes"), dict) else {}
-                    baseline_comparison = transition.get("baseline_comparison") if isinstance(transition.get("baseline_comparison"), dict) else {}
-                    best_anchor = outcomes.get("best_anchor") if isinstance(outcomes.get("best_anchor"), dict) else {}
-                    end_anchor = outcomes.get("end_anchor") if isinstance(outcomes.get("end_anchor"), dict) else {}
-                    insight = ai_block.get("input_mode_insights") if isinstance(ai_block.get("input_mode_insights"), dict) else {}
-                    if insight.get("ai_input_mode") or input_mode_learning:
-                        rows.append(
-                            {
-                                "run_id": run_id,
-                                "run_name": run_analytics.get("run_name"),
-                                "ai_input_mode": insight.get("ai_input_mode"),
-                                "baseline_run_id": insight.get("baseline_session_id"),
-                                "selected_preset": input_mode_learning.get("selected_preset") or insight.get("selected_preset"),
-                                "phase": "phase_a" if run_id.startswith("warmup_phase_a") else (
-                                    "phase_b" if run_id.startswith("warmup_phase_b") else (
-                                        "phase_c" if run_id.startswith("warmup_phase_c") else "other"
-                                    )
-                                ),
-                                "is_warmup": run_id.startswith("warmup_phase_"),
-                                "best_loss_step": metrics.get("best_loss_step"),
-                                "best_loss": metrics.get("best_loss"),
-                                "final_loss_step": metrics.get("final_loss_step"),
-                                "final_loss": metrics.get("final_loss"),
-                                "best_psnr_step": metrics.get("best_psnr_step"),
-                                "best_psnr": metrics.get("best_psnr"),
-                                "final_psnr_step": metrics.get("final_psnr_step"),
-                                "final_psnr": metrics.get("final_psnr"),
-                                "best_ssim_step": metrics.get("best_ssim_step"),
-                                "best_ssim": metrics.get("best_ssim"),
-                                "final_ssim_step": metrics.get("final_ssim_step"),
-                                "final_ssim": metrics.get("final_ssim"),
-                                "best_lpips_step": metrics.get("best_lpips_step"),
-                                "best_lpips": metrics.get("best_lpips"),
-                                "final_lpips_step": metrics.get("final_lpips_step"),
-                                "final_lpips": metrics.get("final_lpips"),
-                                "t_best": input_mode_learning.get("t_best"),
-                                "t_eval_best": input_mode_learning.get("t_eval_best"),
-                                "t_end": input_mode_learning.get("t_end"),
-                                "s_best": input_mode_learning.get("s_best"),
-                                "s_end": input_mode_learning.get("s_end"),
-                                "s_run": input_mode_learning.get("s_run"),
-                                "s_base_best": baseline_comparison.get("s_base_best"),
-                                "s_base_end": baseline_comparison.get("s_base_end"),
-                                "s_base": baseline_comparison.get("s_base"),
-                                "reward": input_mode_learning.get("reward_signal"),
-                                "baseline_best_anchor_step": baseline_comparison.get("baseline_best_anchor_step"),
-                                "baseline_end_anchor_step": baseline_comparison.get("baseline_end_anchor_step"),
-                                "score_weights": baseline_comparison.get("score_weights"),
-                                "run_best_l": best_anchor.get("l"),
-                                "run_best_q": best_anchor.get("q"),
-                                "run_best_t": best_anchor.get("t"),
-                                "run_best_s": best_anchor.get("s"),
-                                "run_end_l": end_anchor.get("l"),
-                                "run_end_q": end_anchor.get("q"),
-                                "run_end_t": end_anchor.get("t"),
-                                "run_end_s": end_anchor.get("s"),
-                            }
-                        )
-                        continue
-
-            transition = learning_payload.get("transition") if isinstance(learning_payload, dict) and isinstance(learning_payload.get("transition"), dict) else {}
-            outcomes = transition.get("outcomes") if isinstance(transition.get("outcomes"), dict) else {}
-            baseline_comparison = transition.get("baseline_comparison") if isinstance(transition.get("baseline_comparison"), dict) else {}
-            best_anchor = outcomes.get("best_anchor") if isinstance(outcomes.get("best_anchor"), dict) else {}
-            end_anchor = outcomes.get("end_anchor") if isinstance(outcomes.get("end_anchor"), dict) else {}
-
-            # TODO(legacy-fallback-cleanup): remove this log/stats fallback branch
-            # once canonical analytics JSON exists for every AI run.
-            loss_summary = _extract_loss_summary_from_log(run_dir / "processing.log")
-            eval_summary = _extract_eval_summary(run_dir / "outputs" / "engines" / "gsplat" / "stats")
-
-            run_name = None
-            if isinstance(run_config, dict):
-                run_name = run_config.get("run_name") or run_config.get("name")
-                if not run_name and isinstance(requested_cfg, dict):
-                    run_name = requested_cfg.get("run_name")
-
-            rows.append(
-                {
-                    "run_id": run_id,
-                    "run_name": run_name,
-                    "ai_input_mode": ai_mode or None,
-                    "baseline_run_id": str(resolved_cfg.get("baseline_session_id") or requested_cfg.get("baseline_session_id") or "").strip() or None,
-                    "selected_preset": learning_payload.get("selected_preset") if isinstance(learning_payload, dict) else None,
-                    "phase": "phase_a" if run_id.startswith("warmup_phase_a") else (
-                        "phase_b" if run_id.startswith("warmup_phase_b") else (
-                            "phase_c" if run_id.startswith("warmup_phase_c") else "other"
-                        )
-                    ),
-                    "is_warmup": run_id.startswith("warmup_phase_"),
-                    **loss_summary,
-                    **eval_summary,
-                    "t_best": learning_payload.get("t_best") if isinstance(learning_payload, dict) else None,
-                    "t_eval_best": learning_payload.get("t_eval_best") if isinstance(learning_payload, dict) else None,
-                    "t_end": learning_payload.get("t_end") if isinstance(learning_payload, dict) else None,
-                    "s_best": learning_payload.get("s_best") if isinstance(learning_payload, dict) else None,
-                    "s_end": learning_payload.get("s_end") if isinstance(learning_payload, dict) else None,
-                    "s_run": learning_payload.get("s_run") if isinstance(learning_payload, dict) else None,
-                    "s_base_best": baseline_comparison.get("s_base_best") if isinstance(baseline_comparison, dict) else None,
-                    "s_base_end": baseline_comparison.get("s_base_end") if isinstance(baseline_comparison, dict) else None,
-                    "s_base": baseline_comparison.get("s_base") if isinstance(baseline_comparison, dict) else None,
-                    "reward": learning_payload.get("reward_signal") if isinstance(learning_payload, dict) else None,
-                    "baseline_best_anchor_step": baseline_comparison.get("baseline_best_anchor_step") if isinstance(baseline_comparison, dict) else None,
-                    "baseline_end_anchor_step": baseline_comparison.get("baseline_end_anchor_step") if isinstance(baseline_comparison, dict) else None,
-                    "score_weights": baseline_comparison.get("score_weights") if isinstance(baseline_comparison, dict) else None,
-                    "run_best_l": best_anchor.get("l") if isinstance(best_anchor, dict) else None,
-                    "run_best_q": best_anchor.get("q") if isinstance(best_anchor, dict) else None,
-                    "run_best_t": best_anchor.get("t") if isinstance(best_anchor, dict) else None,
-                    "run_best_s": best_anchor.get("s") if isinstance(best_anchor, dict) else None,
-                    "run_end_l": end_anchor.get("l") if isinstance(end_anchor, dict) else None,
-                    "run_end_q": end_anchor.get("q") if isinstance(end_anchor, dict) else None,
-                    "run_end_t": end_anchor.get("t") if isinstance(end_anchor, dict) else None,
-                    "run_end_s": end_anchor.get("s") if isinstance(end_anchor, dict) else None,
-                }
-            )
+            continue
 
         baseline_ids: list[str] = []
         for row in rows:
@@ -1925,59 +1975,52 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
 
                 baseline_cfg = _read_json_if_exists(baseline_run_dir / "run_config.json")
                 baseline_requested = baseline_cfg.get("requested_params") if isinstance(baseline_cfg, dict) and isinstance(baseline_cfg.get("requested_params"), dict) else {}
+                baseline_resolved = baseline_cfg.get("resolved_params") if isinstance(baseline_cfg, dict) and isinstance(baseline_cfg.get("resolved_params"), dict) else {}
                 baseline_name = None
                 if isinstance(baseline_cfg, dict):
                     baseline_name = baseline_cfg.get("run_name") or baseline_cfg.get("name")
                 if not baseline_name and isinstance(baseline_requested, dict):
                     baseline_name = baseline_requested.get("run_name")
 
+                # Baseline row should also display learned-key inputs for side-by-side comparison.
+                baseline_learned_keys = [
+                    "feature_lr",
+                    "position_lr_init",
+                    "scaling_lr",
+                    "opacity_lr",
+                    "rotation_lr",
+                    "densify_grad_threshold",
+                    "opacity_threshold",
+                    "lambda_dssim",
+                ]
+                baseline_learned_input_params: dict[str, Any] = {}
+                for key in baseline_learned_keys:
+                    if baseline_resolved.get(key) is not None:
+                        baseline_learned_input_params[key] = baseline_resolved.get(key)
+                    elif baseline_requested.get(key) is not None:
+                        baseline_learned_input_params[key] = baseline_requested.get(key)
+
                 baseline_analytics = _read_run_analytics(baseline_run_dir)
                 if not isinstance(baseline_analytics, dict):
-                    baseline_analytics = _ensure_run_analytics(
-                        run_dir=baseline_run_dir,
-                        run_config=baseline_cfg if isinstance(baseline_cfg, dict) else None,
-                        ai_insights=None,
-                    )
+                    continue
 
-                if isinstance(baseline_analytics, dict):
-                    baseline_metrics = _analytics_metrics(baseline_analytics)
-                    best_loss_step = baseline_metrics.get("best_loss_step")
-                    best_loss = baseline_metrics.get("best_loss")
-                    final_loss_step = baseline_metrics.get("final_loss_step")
-                    final_loss = baseline_metrics.get("final_loss")
-                    best_psnr_step = baseline_metrics.get("best_psnr_step")
-                    best_psnr = baseline_metrics.get("best_psnr")
-                    final_psnr_step = baseline_metrics.get("final_psnr_step")
-                    final_psnr = baseline_metrics.get("final_psnr")
-                    best_ssim_step = baseline_metrics.get("best_ssim_step")
-                    best_ssim = baseline_metrics.get("best_ssim")
-                    final_ssim_step = baseline_metrics.get("final_ssim_step")
-                    final_ssim = baseline_metrics.get("final_ssim")
-                    best_lpips_step = baseline_metrics.get("best_lpips_step")
-                    best_lpips = baseline_metrics.get("best_lpips")
-                    final_lpips_step = baseline_metrics.get("final_lpips_step")
-                    final_lpips = baseline_metrics.get("final_lpips")
-                else:
-                    # TODO(legacy-fallback-cleanup): remove baseline log/stats
-                    # fallback after historical baseline runs are migrated.
-                    loss_summary = _extract_loss_summary_from_log(baseline_run_dir / "processing.log")
-                    eval_summary = _extract_eval_summary(baseline_run_dir / "outputs" / "engines" / "gsplat" / "stats")
-                    best_loss_step = loss_summary.get("best_loss_step")
-                    best_loss = loss_summary.get("best_loss")
-                    final_loss_step = loss_summary.get("final_loss_step")
-                    final_loss = loss_summary.get("final_loss")
-                    best_psnr_step = eval_summary.get("best_psnr_step")
-                    best_psnr = eval_summary.get("best_psnr")
-                    final_psnr_step = eval_summary.get("final_psnr_step")
-                    final_psnr = eval_summary.get("final_psnr")
-                    best_ssim_step = eval_summary.get("best_ssim_step")
-                    best_ssim = eval_summary.get("best_ssim")
-                    final_ssim_step = eval_summary.get("final_ssim_step")
-                    final_ssim = eval_summary.get("final_ssim")
-                    best_lpips_step = eval_summary.get("best_lpips_step")
-                    best_lpips = eval_summary.get("best_lpips")
-                    final_lpips_step = eval_summary.get("final_lpips_step")
-                    final_lpips = eval_summary.get("final_lpips")
+                baseline_metrics = _analytics_metrics(baseline_analytics)
+                best_loss_step = baseline_metrics.get("best_loss_step")
+                best_loss = baseline_metrics.get("best_loss")
+                final_loss_step = baseline_metrics.get("final_loss_step")
+                final_loss = baseline_metrics.get("final_loss")
+                best_psnr_step = baseline_metrics.get("best_psnr_step")
+                best_psnr = baseline_metrics.get("best_psnr")
+                final_psnr_step = baseline_metrics.get("final_psnr_step")
+                final_psnr = baseline_metrics.get("final_psnr")
+                best_ssim_step = baseline_metrics.get("best_ssim_step")
+                best_ssim = baseline_metrics.get("best_ssim")
+                final_ssim_step = baseline_metrics.get("final_ssim_step")
+                final_ssim = baseline_metrics.get("final_ssim")
+                best_lpips_step = baseline_metrics.get("best_lpips_step")
+                best_lpips = baseline_metrics.get("best_lpips")
+                final_lpips_step = baseline_metrics.get("final_lpips_step")
+                final_lpips = baseline_metrics.get("final_lpips")
 
                 baseline_ref = baseline_reference_map.get(baseline_run_id) or {}
                 baseline_rows.append(
@@ -2024,6 +2067,7 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
                         "run_end_q": None,
                         "run_end_t": None,
                         "run_end_s": None,
+                        "learned_input_params": baseline_learned_input_params or None,
                     }
                 )
 
@@ -2126,7 +2170,42 @@ def _run_batch_process(
             )
             logger.info("Batch %s/%s starting for %s (run_name=%s)", idx + 1, run_count_int, project_id, run_params.get("run_name"))
 
-            response = process_project(project_id, ProcessParams(**run_params))
+            max_start_attempts = 30
+            response = None
+            for start_attempt in range(1, max_start_attempts + 1):
+                try:
+                    response = process_project(project_id, ProcessParams(**run_params))
+                    break
+                except HTTPException as exc:
+                    detail = str(getattr(exc, "detail", "") or "")
+                    conflict_on_active_worker = exc.status_code == 409 and "already running" in detail.lower()
+                    if not conflict_on_active_worker or start_attempt >= max_start_attempts:
+                        raise
+
+                    logger.warning(
+                        "Batch %s/%s delayed for %s due to worker teardown race (attempt %s/%s): %s",
+                        idx + 1,
+                        run_count_int,
+                        project_id,
+                        start_attempt,
+                        max_start_attempts,
+                        detail,
+                    )
+                    status.update_status(
+                        project_id,
+                        "processing",
+                        batch_total=run_count_int,
+                        batch_completed=completed_runs,
+                        batch_current_index=idx + 1,
+                        message=(
+                            f"Batch session {idx + 1}/{run_count_int} waiting for previous worker teardown..."
+                        ),
+                        error=None,
+                    )
+                    time.sleep(2)
+
+            if not response:
+                raise RuntimeError("Batch run failed to start after worker teardown retries")
             run_id = str(response.get("run_id") or "")
             if not run_id:
                 raise RuntimeError("Batch run started without run_id")
@@ -3025,17 +3104,35 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
         project_status = status.get_status(project_id)
         project_name = project_status.get("name") if isinstance(project_status, dict) else None
 
-        model_name = ""
+        requested_model_name = ""
         if payload and payload.model_name:
-            model_name = str(payload.model_name).strip()
-        if not model_name:
-            model_name = run_id
+            requested_model_name = str(payload.model_name).strip()
 
-        model_id = model_registry.build_model_id(model_name)
-        model_dir = model_registry.MODELS_DIR / model_id
-        model_dir.mkdir(parents=True, exist_ok=False)
+        source_model_id = None
+        if isinstance(run_cfg, dict):
+            resolved = run_cfg.get("resolved_params") if isinstance(run_cfg.get("resolved_params"), dict) else {}
+            if str(resolved.get("start_model_mode") or "").strip().lower() == "reuse":
+                source_model_id = str(resolved.get("source_model_id") or "").strip() or None
+
+        parent_model_record = model_registry.resolve_reusable_model(source_model_id or "") if source_model_id else None
+        is_inplace_update = bool(parent_model_record and source_model_id)
+
+        if is_inplace_update:
+            model_id = str(parent_model_record.get("model_id") or source_model_id)
+            existing_paths = parent_model_record.get("paths") if isinstance(parent_model_record.get("paths"), dict) else {}
+            model_dir_raw = existing_paths.get("model_dir") if isinstance(existing_paths, dict) else None
+            model_dir = Path(str(model_dir_raw)).expanduser() if model_dir_raw else (model_registry.MODELS_DIR / model_id)
+            model_dir.mkdir(parents=True, exist_ok=True)
+            model_name = requested_model_name or str(parent_model_record.get("model_name") or "").strip() or run_id
+            created_at = str(parent_model_record.get("created_at") or "").strip() or model_registry.utc_now_iso()
+        else:
+            model_name = requested_model_name or run_id
+            model_id = model_registry.build_model_id(model_name)
+            model_dir = model_registry.MODELS_DIR / model_id
+            model_dir.mkdir(parents=True, exist_ok=False)
+            created_at = model_registry.utc_now_iso()
+
         captured_at = model_registry.utc_now_iso()
-
         target_ckpt = model_dir / "source_checkpoint.pt"
         shutil.copy2(checkpoint_path, target_ckpt)
 
@@ -3045,14 +3142,8 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
             except Exception as exc:
                 logger.warning("Failed to copy metadata for elevated model %s: %s", model_id, exc)
 
-        source_model_id = None
-        if isinstance(run_cfg, dict):
-            resolved = run_cfg.get("resolved_params") if isinstance(run_cfg.get("resolved_params"), dict) else {}
-            if str(resolved.get("start_model_mode") or "").strip().lower() == "reuse":
-                source_model_id = str(resolved.get("source_model_id") or "").strip() or None
-
-        parent_model_record = model_registry.resolve_reusable_model(source_model_id or "") if source_model_id else None
-        model_registry.import_parent_configs_into_model(parent_model_record, model_dir)
+        if not is_inplace_update:
+            model_registry.import_parent_configs_into_model(parent_model_record, model_dir)
         parent_contributors = model_registry.load_parent_lineage_contributors(parent_model_record)
         current_contributor = model_registry.snapshot_contributor_configs(
             model_dir=model_dir,
@@ -3097,7 +3188,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
         lineage_doc = model_registry.write_lineage(
             model_dir=model_dir,
             model_id=model_id,
-            source_model_id=source_model_id,
+            source_model_id=(None if is_inplace_update else source_model_id),
             contributors=[*parent_contributors, *batch_contributors, current_contributor],
             captured_at=captured_at,
         )
@@ -3107,7 +3198,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
             "model_id": model_id,
             "model_name": model_name,
             "engine": "gsplat",
-            "created_at": captured_at,
+            "created_at": created_at,
             "source": {
                 "project_id": project_id,
                 "project_name": project_name,
@@ -3125,7 +3216,17 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
         }
 
         records = model_registry.load_models_index()
-        records.append(model_record)
+        if is_inplace_update:
+            replaced = False
+            for idx, item in enumerate(records):
+                if str(item.get("model_id") or "") == model_id:
+                    records[idx] = model_record
+                    replaced = True
+                    break
+            if not replaced:
+                records.append(model_record)
+        else:
+            records.append(model_record)
         model_registry.save_models_index(records)
 
         model_registry.write_json_atomic(model_dir / "model.json", model_record)
@@ -3412,7 +3513,18 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             params_payload.pop("baseline_session_id", None)
             params_payload.pop("ai_preset_override", None)
 
-        # Optional warm-start from globally elevated model.
+        # Project-scoped model lineage is the default scope for run-to-run reuse.
+        # Elevated models remain available through source_model_id (global scope).
+        requested_project_model_name = str(requested_params.get("project_model_name") or "").strip()
+        requested_project_model_key = _sanitize_run_token(str(requested_params.get("project_model_key") or ""))
+
+        state_snapshot = _read_project_model_state(project_dir)
+        active_series_key = str(state_snapshot.get("active_project_model_key") or "").strip()
+        active_series_name = str(state_snapshot.get("active_project_model_name") or "").strip()
+
+        project_model_key: str | None = requested_project_model_key or None
+        project_model_name: str | None = requested_project_model_name or None
+
         start_model_mode = str(requested_params.get("start_model_mode") or "scratch").strip().lower()
         if start_model_mode not in {"scratch", "reuse"}:
             raise HTTPException(status_code=400, detail="start_model_mode must be 'scratch' or 'reuse'")
@@ -3420,8 +3532,22 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         if start_model_mode == "reuse":
             source_model_id = str(requested_params.get("source_model_id") or "").strip()
             source_run_id = str(requested_params.get("source_run_id") or "").strip()
+            if not project_model_key:
+                project_model_key = active_series_key or None
+            if not project_model_name:
+                project_model_name = active_series_name or None
+
+            if not source_model_id and not source_run_id and project_model_key:
+                source_run_id = _resolve_project_model_source_run_id(project_dir, project_model_key) or ""
+
             if not source_model_id and not source_run_id:
-                raise HTTPException(status_code=400, detail="source_model_id or source_run_id is required when start_model_mode='reuse'")
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "source_model_id, source_run_id, or an active project model series is required "
+                        "when start_model_mode='reuse'"
+                    ),
+                )
 
             mode = str(params_payload.get("mode") or "baseline")
             tune_scope = str(params_payload.get("tune_scope") or "")
@@ -3442,6 +3568,8 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                     raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
                 params_payload["source_model_id"] = source_model_id
                 params_payload.pop("source_run_id", None)
+                if not project_model_name:
+                    project_model_name = str(model_record.get("model_name") or "").strip() or None
             else:
                 source_run_dir = project_dir / "runs" / source_run_id
                 if not source_run_dir.exists() or not source_run_dir.is_dir():
@@ -3452,6 +3580,12 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 params_payload["source_run_id"] = source_run_id
                 params_payload.pop("source_model_id", None)
 
+                source_series_key, source_series_name = _resolve_project_model_metadata_from_run(project_dir, source_run_id)
+                if not project_model_key and source_series_key:
+                    project_model_key = source_series_key
+                if not project_model_name and source_series_name:
+                    project_model_name = source_series_name
+
             params_payload["start_model_mode"] = "reuse"
             params_payload["source_model_checkpoint"] = str(checkpoint_path)
         else:
@@ -3459,6 +3593,18 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             params_payload.pop("source_model_id", None)
             params_payload.pop("source_run_id", None)
             params_payload.pop("source_model_checkpoint", None)
+
+            if not project_model_name:
+                fallback_name = str(requested_params.get("run_name") or "").strip()
+                project_model_name = fallback_name or "project_model"
+            # Scratch always starts a new project-scoped model series.
+            project_model_key = _build_project_model_series_key(project_model_name)
+
+        params_payload["project_model_scope"] = "project"
+        if project_model_name:
+            params_payload["project_model_name"] = project_model_name
+        if project_model_key:
+            params_payload["project_model_key"] = project_model_key
 
         # Optional sequential batch orchestration.
         try:
@@ -3699,6 +3845,32 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
 
         params_payload["run_id"] = run_id
         params_payload["run_name"] = run_id
+
+        # Ensure project model metadata is explicit in run config and project lineage state.
+        resolved_project_model_key = str(params_payload.get("project_model_key") or "").strip()
+        resolved_project_model_name = str(params_payload.get("project_model_name") or "").strip()
+        if not resolved_project_model_name:
+            resolved_project_model_name = run_id
+            params_payload["project_model_name"] = resolved_project_model_name
+        if not resolved_project_model_key:
+            resolved_project_model_key = _build_project_model_series_key(resolved_project_model_name)
+            params_payload["project_model_key"] = resolved_project_model_key
+        params_payload["project_model_scope"] = "project"
+
+        # Persist resolved model lineage fields back into requested payload snapshot too.
+        requested_params["project_model_name"] = resolved_project_model_name
+        requested_params["project_model_key"] = resolved_project_model_key
+        requested_params["project_model_scope"] = "project"
+
+        try:
+            _record_project_model_series_run(
+                project_dir,
+                resolved_project_model_key,
+                resolved_project_model_name,
+                run_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to update project model state for %s: %s", project_id, exc)
 
         # If no base session is defined yet, the first run becomes the base session.
         if not project_status.get("base_session_id"):
@@ -3943,7 +4115,6 @@ def get_project_telemetry(
 
         run_dir = project_dir / "runs" / resolved_run_id
         run_log_path = run_dir / "processing.log"
-        stats_dir = run_dir / "outputs" / "engines" / "gsplat" / "stats"
         run_config_path = run_dir / "run_config.json"
         run_analytics = _read_run_analytics(run_dir)
 
@@ -3998,41 +4169,9 @@ def get_project_telemetry(
         text_lines = _read_text_lines(run_log_path, max_lines=log_limit, from_start=bool(from_start))
         event_rows = _extract_event_rows(text_lines, row_limit=max(10, min(100, log_limit)))
 
-        if training_rows_json:
-            training_rows = _slice_rows(training_rows_json, log_limit, bool(from_start))
-            # Enrich canonical JSON rows with snapshot-only fields (timestamp/eta/speed/max_steps)
-            # when they are available in the selected log window.
-            log_snapshot_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
-            if log_snapshot_rows:
-                by_step: dict[int, dict[str, Any]] = {
-                    int(row.get("step")): row
-                    for row in log_snapshot_rows
-                    if isinstance(row, dict) and isinstance(row.get("step"), int)
-                }
-                enriched_rows: list[dict[str, Any]] = []
-                for row in training_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    step_raw = row.get("step")
-                    merged = dict(row)
-                    if isinstance(step_raw, int) and step_raw in by_step:
-                        snap = by_step[step_raw]
-                        for key in ("timestamp", "max_steps", "elapsed_seconds", "eta", "speed", "source"):
-                            if key in snap and merged.get(key) is None:
-                                merged[key] = snap.get(key)
-                    enriched_rows.append(merged)
-                training_rows = enriched_rows
-        else:
-            # TODO(legacy-fallback-cleanup): remove once JSON training rows are
-            # guaranteed for every run.
-            training_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
+        training_rows = _slice_rows(training_rows_json, log_limit, bool(from_start))
 
-        if eval_rows_json:
-            eval_rows = _slice_rows(eval_rows_json, eval_limit, bool(from_start))
-        else:
-            # TODO(legacy-fallback-cleanup): remove once JSON eval rows are
-            # guaranteed for every run.
-            eval_rows = _extract_eval_rows(stats_dir, eval_limit=eval_limit)
+        eval_rows = _slice_rows(eval_rows_json, eval_limit, bool(from_start))
         run_config = _read_json_if_exists(run_config_path)
         if not isinstance(run_config, dict):
             run_config = None
@@ -4053,13 +4192,7 @@ def get_project_telemetry(
             best_loss_start_step=tracking_start_step,
         )
 
-        ai_insights = _extract_ai_run_insights(run_dir, run_config)
-        if not isinstance(run_analytics, dict):
-            run_analytics = _ensure_run_analytics(
-                run_dir=run_dir,
-                run_config=run_config if isinstance(run_config, dict) else None,
-                ai_insights=ai_insights if isinstance(ai_insights, dict) else None,
-            )
+        ai_insights = None
         if isinstance(run_analytics, dict):
             metrics = _analytics_metrics(run_analytics)
             if isinstance(metrics.get("best_loss"), (int, float)):
@@ -4075,27 +4208,33 @@ def get_project_telemetry(
             ai_block = run_analytics.get("ai") if isinstance(run_analytics.get("ai"), dict) else {}
             canonical_ai = ai_block.get("input_mode_insights") if isinstance(ai_block.get("input_mode_insights"), dict) else None
             if isinstance(canonical_ai, dict) and canonical_ai.get("ai_input_mode"):
-                if isinstance(ai_insights, dict):
-                    merged_ai = dict(canonical_ai)
-                    for key, value in ai_insights.items():
-                        if value is None:
-                            continue
-                        if isinstance(value, str) and not value.strip():
-                            continue
-                        if isinstance(value, dict) and not value:
-                            continue
-                        current = merged_ai.get(key)
-                        if current is None:
-                            merged_ai[key] = value
-                            continue
-                        if isinstance(current, str) and not current.strip():
-                            merged_ai[key] = value
-                            continue
-                        if isinstance(current, dict) and not current and isinstance(value, dict):
-                            merged_ai[key] = value
-                    ai_insights = merged_ai
-                else:
-                    ai_insights = canonical_ai
+                selector_owned_keys = {
+                    "feature_lr",
+                    "position_lr_init",
+                    "scaling_lr",
+                    "opacity_lr",
+                    "rotation_lr",
+                    "densify_grad_threshold",
+                    "opacity_threshold",
+                    "lambda_dssim",
+                }
+                normalized_ai = dict(canonical_ai)
+                raw_initial = canonical_ai.get("initial_params") if isinstance(canonical_ai.get("initial_params"), dict) else {}
+                normalized_ai["initial_params"] = {
+                    key: raw_initial.get(key)
+                    for key in selector_owned_keys
+                    if raw_initial.get(key) is not None
+                }
+
+                ai_mode = str(canonical_ai.get("ai_input_mode") or "").strip().lower()
+                raw_features = canonical_ai.get("feature_details") if isinstance(canonical_ai.get("feature_details"), dict) else {}
+                if ai_mode == "exif_only":
+                    normalized_ai["feature_details"] = {
+                        key: raw_features.get(key)
+                        for key in EXIF_ONLY_INPUT_X_KEYS
+                        if key in raw_features
+                    }
+                ai_insights = normalized_ai
 
         project_base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
         shared_doc = _read_project_shared_config(project_dir, str(project_base_session_id) if project_base_session_id else None)

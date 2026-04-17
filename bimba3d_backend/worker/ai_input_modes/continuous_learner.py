@@ -14,8 +14,6 @@ MULT_KEYS = [
     "scaling_lr_mult",
     "opacity_lr_mult",
     "rotation_lr_mult",
-    "tune_interval_mult",
-    "tune_min_improvement_mult",
     "densify_grad_threshold_mult",
     "opacity_threshold_mult",
     "lambda_dssim_mult",
@@ -27,8 +25,6 @@ SAFE_BOUNDS = {
     "scaling_lr_mult": (0.5, 1.5),
     "opacity_lr_mult": (0.5, 1.5),
     "rotation_lr_mult": (0.5, 1.5),
-    "tune_interval_mult": (0.7, 1.3),
-    "tune_min_improvement_mult": (0.7, 1.3),
     "densify_grad_threshold_mult": (0.7, 1.3),
     "opacity_threshold_mult": (0.7, 1.3),
     "lambda_dssim_mult": (0.7, 1.3),
@@ -114,8 +110,6 @@ def _build_updates(params: dict[str, Any], multipliers: dict[str, float]) -> dic
     scaling_lr = float(params.get("scaling_lr", 5.0e-3))
     opacity_lr = float(params.get("opacity_lr", 5.0e-2))
     rotation_lr = float(params.get("rotation_lr", 1.0e-3))
-    tune_interval = int(params.get("tune_interval", 100))
-    tune_min_improvement = float(params.get("tune_min_improvement", 0.005))
     densify_grad_threshold = float(params.get("densify_grad_threshold", 2.0e-4))
     opacity_threshold = float(params.get("opacity_threshold", 0.005))
     lambda_dssim = float(params.get("lambda_dssim", 0.2))
@@ -127,12 +121,6 @@ def _build_updates(params: dict[str, Any], multipliers: dict[str, float]) -> dic
         "scaling_lr": clamp_float(scaling_lr * multipliers["scaling_lr_mult"], 1e-4, 2e-2),
         "opacity_lr": clamp_float(opacity_lr * multipliers["opacity_lr_mult"], 1e-3, 1e-1),
         "rotation_lr": clamp_float(rotation_lr * multipliers["rotation_lr_mult"], 1e-4, 1e-2),
-        "tune_interval": clamp_int(round(tune_interval * multipliers["tune_interval_mult"]), 50, 400),
-        "tune_min_improvement": clamp_float(
-            tune_min_improvement * multipliers["tune_min_improvement_mult"],
-            0.001,
-            0.02,
-        ),
         "densify_grad_threshold": clamp_float(
             densify_grad_threshold * multipliers["densify_grad_threshold_mult"],
             5e-5,

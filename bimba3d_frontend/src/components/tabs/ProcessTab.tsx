@@ -305,6 +305,29 @@ const featureMissingFlagKey = (key: string): string | null => {
   return directMap[key] || null;
 };
 
+type FeatureStatus = "present" | "defaulted" | "unknown";
+
+interface TelemetryFeatureRow {
+  key: string;
+  value: unknown;
+  status: FeatureStatus;
+}
+
+const buildTelemetryFeatureRows = (features: Record<string, unknown> | null | undefined): TelemetryFeatureRow[] => {
+  if (!features || typeof features !== "object") {
+    return [];
+  }
+
+  return Object.entries(features)
+    .filter(([key]) => !isMissingFlagField(key))
+    .map(([key, value]) => {
+      const missingKey = featureMissingFlagKey(key);
+      const missingValue = missingKey ? parseMissingFlag(features[missingKey]) : null;
+      const status: FeatureStatus = missingValue === true ? "defaulted" : missingValue === false ? "present" : "unknown";
+      return { key, value, status };
+    });
+};
+
 const buildDefaultModelName = (
   projectLabel: string | null | undefined,
   projectId: string,
@@ -363,10 +386,11 @@ const getDefaultProcessConfig = () => ({
   run_count: 1,
   run_jitter_mode: "fixed" as RunJitterMode,
   run_jitter_factor: 1,
-  run_jitter_min: 0.85,
-  run_jitter_max: 1.15,
+  run_jitter_min: 0.5,
+  run_jitter_max: 1.5,
   continue_on_failure: true,
   start_model_mode: "scratch" as StartModelMode,
+  project_model_name: "",
   source_model_id: "",
   engine: "gsplat" as TrainingEngine,
   maxSteps: 15000,
@@ -527,10 +551,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [runCount, setRunCount] = useState<number>(cfg.run_count ?? 1);
   const [runJitterMode, setRunJitterMode] = useState<RunJitterMode>(cfg.run_jitter_mode === "random" ? "random" : "fixed");
   const [runJitterFactor, setRunJitterFactor] = useState<number>(cfg.run_jitter_factor ?? 1);
-  const [runJitterMin, setRunJitterMin] = useState<number>(cfg.run_jitter_min ?? 0.85);
-  const [runJitterMax, setRunJitterMax] = useState<number>(cfg.run_jitter_max ?? 1.15);
+  const [runJitterMin, setRunJitterMin] = useState<number>(cfg.run_jitter_min ?? 0.5);
+  const [runJitterMax, setRunJitterMax] = useState<number>(cfg.run_jitter_max ?? 1.5);
   const [continueOnFailure, setContinueOnFailure] = useState<boolean>(cfg.continue_on_failure ?? true);
   const [startModelMode, setStartModelMode] = useState<StartModelMode>(cfg.start_model_mode === "reuse" ? "reuse" : "scratch");
+  const [projectModelName, setProjectModelName] = useState<string>(cfg.project_model_name ?? "");
   const [sourceModelId, setSourceModelId] = useState<string>(cfg.source_model_id ?? "");
   const [reusableModels, setReusableModels] = useState<ReusableModelEntry[]>([]);
   const [reusableModelsLoading, setReusableModelsLoading] = useState<boolean>(false);
@@ -586,6 +611,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const showManualModifiedTuneControls = engine === "gsplat" && mode === "modified" && !showCoreAiSessionControls;
   const showManualDensificationControls = engine === "gsplat" && !showCoreAiSessionControls;
   const showBatchActions = showCoreAiSessionControls && !warmupAtStart && runCount > 1;
+  const isReusableWarmStartSelected = startModelMode === "reuse" && Boolean(sourceModelId);
 
   const tuneScopeDropdownValue: TuneScopeDropdownValue =
     tuneScope === "core_ai_optimization"
@@ -650,8 +676,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     run_jitter_min: 'Random mode only: lower bound for per-run random jitter multiplier (applied from run 2 onward). Bounds: minimum 0.000001, no frontend hard max. If min > max, backend auto-swaps.',
     run_jitter_max: 'Random mode only: upper bound for per-run random jitter multiplier (applied from run 2 onward). Bounds: minimum 0.000001, no frontend hard max. If max < min, backend auto-swaps.',
     continue_on_failure: 'If enabled, remaining runs continue even when one run fails/stops.',
-    start_model_mode: 'Choose training initialization mode. Scratch starts a fresh run; Reuse warm-starts from a selected elevated model.',
-    source_model_id: 'Reusable model used for warm-start. Available models come from elevated gsplat sessions.',
+    start_model_mode: 'Choose training initialization mode. Scratch starts a new project-scoped model series. Reuse continues the active project-scoped series unless a global elevated model is selected below.',
+    project_model_name: 'Optional display name for the project-scoped model series. If empty, run name is used. New series keys are created only when start mode is Scratch.',
+    source_model_id: 'Optional global elevated model for warm-start. Leave empty to reuse the latest checkpoint from the active project-scoped model series.',
     // --- ORIGINAL KERBL PARAMETERS ---
     maxSteps: 'Total training iterations. This value is sent from frontend in both baseline and modified modes. [original]',
     logInterval: 'How often (in steps) to print consolidated training snapshots in worker logs. Lower values are more verbose. [custom]',
@@ -827,10 +854,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setRunCount(defaults.run_count ?? 1);
     setRunJitterMode(defaults.run_jitter_mode === "random" ? "random" : "fixed");
     setRunJitterFactor(defaults.run_jitter_factor ?? 1);
-    setRunJitterMin(defaults.run_jitter_min ?? 0.85);
-    setRunJitterMax(defaults.run_jitter_max ?? 1.15);
+    setRunJitterMin(defaults.run_jitter_min ?? 0.5);
+    setRunJitterMax(defaults.run_jitter_max ?? 1.5);
     setContinueOnFailure(defaults.continue_on_failure ?? true);
     setStartModelMode(defaults.start_model_mode ?? "scratch");
+    setProjectModelName(defaults.project_model_name ?? "");
     setSourceModelId(defaults.source_model_id ?? "");
     setEngine(defaults.engine ?? "gsplat");
     setMaxSteps(defaults.maxSteps);
@@ -919,6 +947,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       if (typeof resolved.run_jitter_max === "number") setRunJitterMax(Math.max(1e-6, resolved.run_jitter_max));
       if (typeof resolved.continue_on_failure === "boolean") setContinueOnFailure(resolved.continue_on_failure);
       if (resolved.start_model_mode === "scratch" || resolved.start_model_mode === "reuse") setStartModelMode(resolved.start_model_mode);
+      if (typeof resolved.project_model_name === "string") setProjectModelName(resolved.project_model_name);
       if (typeof resolved.source_model_id === "string") setSourceModelId(resolved.source_model_id);
       if (resolved.engine === "gsplat" || resolved.engine === "litegs") setEngine(resolved.engine);
       if (typeof resolved.max_steps === "number") setMaxSteps(resolved.max_steps);
@@ -1055,6 +1084,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
+      project_model_name: projectModelName,
       source_model_id: sourceModelId,
       engine,
       max_steps: maxSteps,
@@ -1087,7 +1117,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       litegs_alpha_shrink: litegsAlphaShrink,
     };
     localStorage.setItem(getTrainingConfigStorageKey(selectedRunId), JSON.stringify(config));
-  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, trendScope, aiInputMode, baselineSessionIdForAi, warmupAtStart, runCount, runJitterMode, runJitterFactor, runJitterMin, runJitterMax, continueOnFailure, startModelMode, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, saveBestSplat, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
+  }, [mode, tuneStartStep, tuneMinImprovement, tuneEndStep, tuneInterval, tuneScope, trendScope, aiInputMode, baselineSessionIdForAi, warmupAtStart, runCount, runJitterMode, runJitterFactor, runJitterMin, runJitterMax, continueOnFailure, startModelMode, projectModelName, sourceModelId, engine, maxSteps, logInterval, splatInterval, bestSplatInterval, bestSplatStartStep, saveBestSplat, autoEarlyStop, earlyStopMonitorInterval, earlyStopDecisionPoints, earlyStopMinEvalPoints, earlyStopMinStepRatio, earlyStopMonitorMinRelativeImprovement, earlyStopEvalMinRelativeImprovement, earlyStopMaxVolatilityRatio, earlyStopEmaAlpha, pngInterval, evalInterval, saveInterval, sparsePreference, sparseMergeSelection, densifyFromIter, densifyUntilIter, densificationInterval, densifyGradThreshold, opacityThreshold, lambdaDssim, litegsTargetPrimitives, litegsAlphaShrink, selectedRunId, getTrainingConfigStorageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1118,12 +1148,6 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       cancelled = true;
     };
   }, [projectId]);
-
-  useEffect(() => {
-    if (sourceModelId && !reusableModels.some((item) => item.model_id === sourceModelId)) {
-      setSourceModelId("");
-    }
-  }, [reusableModels, sourceModelId]);
 
   // Persist shared image/COLMAP config once per project.
   useEffect(() => {
@@ -2694,6 +2718,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? aiInputMode
             : undefined,
+        ai_selector_strategy:
+          effectiveMode === "modified" && tuneScope === "core_ai_optimization"
+            ? aiSelectorStrategy
+            : undefined,
         baseline_session_id:
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? (baselineSessionIdForAi || undefined)
@@ -2706,6 +2734,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         run_jitter_max: includeBatchControls ? runJitterMax : undefined,
         continue_on_failure: includeBatchControls ? continueOnFailure : undefined,
         start_model_mode: includeSessionControls ? startModelMode : undefined,
+        project_model_name:
+          includeSessionControls && !isReusableWarmStartSelected
+            ? (projectModelName.trim() || runNameForRequest || selectedRunId || undefined)
+            : undefined,
         source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
         stage,
         engine,
@@ -2851,6 +2883,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? aiInputMode
             : undefined,
+        ai_selector_strategy:
+          effectiveMode === "modified" && tuneScope === "core_ai_optimization"
+            ? aiSelectorStrategy
+            : undefined,
         baseline_session_id:
           effectiveMode === "modified" && tuneScope === "core_ai_optimization" && aiInputMode
             ? (baselineSessionIdForAi || undefined)
@@ -2863,6 +2899,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         run_jitter_max: includeSessionControls ? runJitterMax : undefined,
         continue_on_failure: includeSessionControls ? continueOnFailure : undefined,
         start_model_mode: includeSessionControls ? startModelMode : undefined,
+        project_model_name:
+          includeSessionControls && !isReusableWarmStartSelected
+            ? (projectModelName.trim() || selectedRunId || newRunName.trim() || undefined)
+            : undefined,
         source_model_id: includeSessionControls && startModelMode === "reuse" ? sourceModelId || undefined : undefined,
         stage: resumeStage,
         engine,
@@ -3034,7 +3074,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       trend_scope: tuneScope === "core_ai_optimization" && !aiInputMode ? trendScope : undefined,
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
       ai_selector_strategy:
-        tuneScope === "core_ai_optimization" && aiInputMode ? aiSelectorStrategy : undefined,
+        tuneScope === "core_ai_optimization" ? aiSelectorStrategy : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
@@ -3045,6 +3085,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
+      project_model_name: isReusableWarmStartSelected ? undefined : (projectModelName || undefined),
       source_model_id: sourceModelId || undefined,
       stage: "train_only",
       engine,
@@ -3090,7 +3131,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       trend_scope: tuneScope === "core_ai_optimization" && !aiInputMode ? trendScope : undefined,
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
       ai_selector_strategy:
-        tuneScope === "core_ai_optimization" && aiInputMode ? aiSelectorStrategy : undefined,
+        tuneScope === "core_ai_optimization" ? aiSelectorStrategy : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
@@ -3101,6 +3142,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       run_jitter_max: runJitterMax,
       continue_on_failure: continueOnFailure,
       start_model_mode: startModelMode,
+      project_model_name: isReusableWarmStartSelected ? "" : projectModelName,
       source_model_id: sourceModelId,
       engine,
       max_steps: maxSteps,
@@ -3272,7 +3314,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
               ? (defaults.ai_input_mode || undefined)
               : undefined,
           ai_selector_strategy:
-            defaults.tune_scope === "core_ai_optimization" && defaults.ai_input_mode
+            defaults.tune_scope === "core_ai_optimization"
               ? defaults.ai_selector_strategy
               : undefined,
           baseline_session_id:
@@ -3287,6 +3329,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           run_jitter_max: includeSessionControls ? defaults.run_jitter_max : undefined,
           continue_on_failure: includeSessionControls ? defaults.continue_on_failure : undefined,
           start_model_mode: includeSessionControls ? defaults.start_model_mode : undefined,
+          project_model_name: includeSessionControls ? defaults.project_model_name || undefined : undefined,
           source_model_id:
             includeSessionControls && defaults.start_model_mode === "reuse"
               ? defaults.source_model_id || undefined
@@ -3650,7 +3693,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           Object.entries(aiInsights.initial_params || {}).map(([key, value]) => [key, value])
         );
         addConfigTable(
-          "AI Extracted Features",
+          "AI Input Features",
           Object.entries(aiInsights.feature_details || {}).map(([key, value]) => [key, value])
         );
       }
@@ -4713,87 +4756,74 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                             <tr>
                               <th className="text-left px-3 py-2">Feature</th>
                               <th className="text-left px-3 py-2">Value</th>
+                              <th className="text-left px-3 py-2">Status</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {Object.entries(telemetryData.ai_insights.feature_details || {}).length === 0 ? (
+                            {buildTelemetryFeatureRows((telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>).length === 0 ? (
                               <tr>
-                                <td className="px-3 py-2 text-slate-500" colSpan={2}>No extracted feature details captured.</td>
+                                <td className="px-3 py-2 text-slate-500" colSpan={3}>No extracted feature details captured.</td>
                               </tr>
                             ) : (
-                              Object.entries(telemetryData.ai_insights.feature_details || {}).map(([key, value]) => {
-                                const features = telemetryData.ai_insights?.feature_details || {};
-                                const missingForKey = featureMissingFlagKey(key);
-                                const missingValue = missingForKey ? parseMissingFlag(features[missingForKey]) : null;
-                                const currentMissingValue = isMissingFlagField(key) ? parseMissingFlag(value) : null;
-
-                                return (
-                                  <tr key={`ai-feature-${key}`} className="border-t border-slate-100">
-                                    <td className="px-3 py-2 text-slate-700">{formatTelemetryFieldLabel(key)}</td>
-                                    <td className="px-3 py-2 text-slate-900">
-                                      <div className="flex items-center justify-between gap-2">
-                                        <span>{formatTelemetryScalar(value)}</span>
-                                        <div className="flex items-center gap-1.5">
-                                          {isMissingFlagField(key) && currentMissingValue !== null && (
-                                            <span
-                                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${currentMissingValue
-                                                ? "bg-red-100 text-red-700"
-                                                : "bg-emerald-100 text-emerald-700"
-                                                }`}
-                                            >
-                                              {currentMissingValue ? "Missing" : "Available"}
-                                            </span>
-                                          )}
-                                          {!isMissingFlagField(key) && missingValue === true && (
-                                            <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-[10px] font-semibold">
-                                              Fallback default
-                                            </span>
-                                          )}
-                                        </div>
-                                      </div>
-                                    </td>
-                                  </tr>
-                                );
-                              })
+                              buildTelemetryFeatureRows((telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>).map((row) => (
+                                <tr key={`ai-feature-${row.key}`} className="border-t border-slate-100">
+                                  <td className="px-3 py-2 text-slate-700">{formatTelemetryFieldLabel(row.key)}</td>
+                                  <td className="px-3 py-2 text-slate-900">{formatTelemetryScalar(row.value)}</td>
+                                  <td className="px-3 py-2 text-slate-900">
+                                    {row.status === "defaulted" ? (
+                                      <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-700 px-2 py-0.5 text-[10px] font-semibold">
+                                        Defaulted
+                                      </span>
+                                    ) : row.status === "present" ? (
+                                      <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5 text-[10px] font-semibold">
+                                        Present
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center rounded-full bg-slate-100 text-slate-600 px-2 py-0.5 text-[10px] font-semibold">
+                                        Unknown
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))
                             )}
                           </tbody>
                         </table>
                       </div>
                     </div>
+
+                    <div>
+                      <p className="text-xs font-semibold text-slate-700 mb-2">Important events</p>
+                      <div className="h-40 overflow-auto border border-slate-200 rounded-lg">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50 text-slate-700">
+                            <tr>
+                              <th className="text-left px-3 py-2">Type</th>
+                              <th className="text-left px-3 py-2">Step</th>
+                              <th className="text-left px-3 py-2">Summary</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(telemetryData?.event_rows || []).length === 0 ? (
+                              <tr>
+                                <td className="px-3 py-2 text-slate-500" colSpan={3}>No important events recorded.</td>
+                              </tr>
+                            ) : (
+                              (telemetryData?.event_rows || []).map((row, idx) => (
+                                <tr key={`${row.type || "event"}-${row.step || "na"}-${idx}`} className="border-t border-slate-100">
+                                  <td className="px-3 py-2 text-slate-900">{row.type || "-"}</td>
+                                  <td className="px-3 py-2 text-slate-700">{typeof row.step === "number" ? row.step.toLocaleString() : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-700">{row.summary || "-"}</td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
                   </div>
                 )}
-
-                <div>
-                  <p className="text-xs font-semibold text-slate-700 mb-2">Important events</p>
-                  <div className="h-40 overflow-auto border border-slate-200 rounded-lg">
-                    <table className="w-full text-xs">
-                      <thead className="bg-slate-50 text-slate-700">
-                        <tr>
-                          <th className="text-left px-3 py-2">Time</th>
-                          <th className="text-left px-3 py-2">Type</th>
-                          <th className="text-left px-3 py-2">Step</th>
-                          <th className="text-left px-3 py-2">Summary</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(telemetryData?.event_rows || []).length === 0 ? (
-                          <tr>
-                            <td className="px-3 py-2 text-slate-500" colSpan={4}>No important events yet.</td>
-                          </tr>
-                        ) : (
-                          (telemetryData?.event_rows || []).map((row, idx) => (
-                            <tr key={`${row.type || "event"}-${row.step || "na"}-${idx}`} className="border-t border-slate-100">
-                              <td className="px-3 py-2 text-slate-700">{row.timestamp || "-"}</td>
-                              <td className="px-3 py-2 text-slate-900">{row.type || "-"}</td>
-                              <td className="px-3 py-2 text-slate-700">{typeof row.step === "number" ? row.step.toLocaleString() : "-"}</td>
-                              <td className="px-3 py-2 text-slate-700">{row.summary || "-"}</td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
 
                 <div>
                   <p className="text-xs font-semibold text-slate-700 mb-2">Log-interval snapshots</p>
@@ -5248,8 +5278,23 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                         </select>
                                       </div>
                                       <div>
+                                        {!isReusableWarmStartSelected && (
+                                          <>
+                                            <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                              <span>Project model name</span>
+                                              <button onClick={() => setSelectedInfoKey("project_model_name")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                            </label>
+                                            <input
+                                              type="text"
+                                              value={projectModelName}
+                                              onChange={(e) => setProjectModelName(e.target.value)}
+                                              placeholder="Project model name (optional)"
+                                              className="mb-1 w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                            />
+                                          </>
+                                        )}
                                         <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
-                                          <span>Reusable model</span>
+                                          <span>Global reusable model (optional)</span>
                                           <button onClick={() => setSelectedInfoKey("source_model_id")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
                                         </label>
                                         <select
@@ -5265,6 +5310,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                                 ? "Select reusable model"
                                                 : "No elevated models available"}
                                           </option>
+                                          {sourceModelId && !reusableModels.some((item) => item.model_id === sourceModelId) && (
+                                            <option value={sourceModelId}>{sourceModelId} (saved)</option>
+                                          )}
                                           {reusableModels.map((item) => (
                                             <option key={item.model_id} value={item.model_id}>
                                               {item.model_name || item.model_id}

@@ -107,6 +107,7 @@ class ProcessParams(BaseModel):
     batch_run_name_prefix: Optional[str] = None
     # Core AI model reuse controls
     start_model_mode: Optional[str] = None  # "scratch" | "reuse"
+    project_model_name: Optional[str] = None
     source_model_id: Optional[str] = None
     source_run_id: Optional[str] = None
     ai_input_mode: Optional[str] = None  # "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external"

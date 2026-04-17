@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { Clock, Download, Eye, FolderTree, MoreHorizontal, Pencil, RefreshCw, Trash2, Upload } from "lucide-react";
 import { api } from "../../api/client";
 
@@ -104,6 +105,12 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
   const [modelActionLoading, setModelActionLoading] = useState<boolean>(false);
   const [modelActionError, setModelActionError] = useState<string | null>(null);
   const [openMenuModelId, setOpenMenuModelId] = useState<string>("");
+  const [openMenuPosition, setOpenMenuPosition] = useState<{ top: number; left: number } | null>(null);
+
+  const openMenuModel = useMemo(
+    () => models.find((item) => item.model_id === openMenuModelId) || null,
+    [models, openMenuModelId],
+  );
 
   const loadModels = async () => {
     setModelsLoading(true);
@@ -168,6 +175,38 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
 
     void loadDetail();
   }, [selectedModelId]);
+
+  useEffect(() => {
+    if (viewMode === "project-ready") {
+      setOpenMenuModelId("");
+      setOpenMenuPosition(null);
+    }
+  }, [viewMode]);
+
+  useEffect(() => {
+    if (!openMenuModelId) return;
+
+    const closeMenu = () => {
+      setOpenMenuModelId("");
+      setOpenMenuPosition(null);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMenu();
+      }
+    };
+
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openMenuModelId]);
 
   const displayedContributors = useMemo(() => {
     const source = Array.isArray(detail?.lineage?.contributors) ? detail?.lineage?.contributors : [];
@@ -283,6 +322,7 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
     } finally {
       setModelActionLoading(false);
       setOpenMenuModelId("");
+      setOpenMenuPosition(null);
     }
   };
 
@@ -308,6 +348,7 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
     } finally {
       setModelActionLoading(false);
       setOpenMenuModelId("");
+      setOpenMenuPosition(null);
     }
   };
 
@@ -420,49 +461,78 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
                           <div className="relative shrink-0">
                             <button
                               type="button"
-                              onClick={() => setOpenMenuModelId((prev) => (prev === model.model_id ? "" : model.model_id))}
+                              onClick={(event) => {
+                                if (openMenuModelId === model.model_id) {
+                                  setOpenMenuModelId("");
+                                  setOpenMenuPosition(null);
+                                  return;
+                                }
+
+                                const rect = (event.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                                setOpenMenuModelId(model.model_id);
+                                setOpenMenuPosition({
+                                  top: Math.max(12, rect.top - 6),
+                                  left: Math.max(12, rect.right - 160),
+                                });
+                              }}
                               className="inline-flex items-center justify-center p-1 rounded border border-slate-300 text-slate-700 hover:bg-slate-100"
                               title="Model actions"
                             >
                               <MoreHorizontal className="w-4 h-4" />
                             </button>
-                            {openMenuModelId === model.model_id && (
-                              <div className="absolute right-0 bottom-full mb-1 w-40 rounded-md border border-slate-200 bg-white shadow-lg z-[1000] py-1">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    openLineageForModel(model.model_id);
-                                    setOpenMenuModelId("");
-                                  }}
-                                  className="w-full px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                >
-                                  Open lineage
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => void renameModel(model.model_id)}
-                                  disabled={modelActionLoading}
-                                  className="w-full px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100 inline-flex items-center gap-1 disabled:opacity-50"
-                                >
-                                  <Pencil className="w-3 h-3" />
-                                  Rename
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => void deleteModel(model.model_id)}
-                                  disabled={modelActionLoading}
-                                  className="w-full px-3 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1 disabled:opacity-50"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                  Delete
-                                </button>
-                              </div>
-                            )}
                           </div>
                         </div>
                       ))
                     )}
                   </div>
+                  {openMenuModelId && openMenuModel && openMenuPosition && typeof document !== "undefined"
+                    ? createPortal(
+                        <div
+                          className="fixed inset-0 z-[1400]"
+                          onClick={() => {
+                            setOpenMenuModelId("");
+                            setOpenMenuPosition(null);
+                          }}
+                        >
+                          <div
+                            className="fixed w-40 rounded-md border border-slate-200 bg-white shadow-lg py-1"
+                            style={{ top: openMenuPosition.top, left: openMenuPosition.left, transform: "translateY(-100%)" }}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                openLineageForModel(openMenuModel.model_id);
+                                setOpenMenuModelId("");
+                                setOpenMenuPosition(null);
+                              }}
+                              className="w-full px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100"
+                            >
+                              Open lineage
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void renameModel(openMenuModel.model_id)}
+                              disabled={modelActionLoading}
+                              className="w-full px-3 py-1.5 text-left text-xs text-slate-700 hover:bg-slate-100 inline-flex items-center gap-1 disabled:opacity-50"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void deleteModel(openMenuModel.model_id)}
+                              disabled={modelActionLoading}
+                              className="w-full px-3 py-1.5 text-left text-xs text-rose-700 hover:bg-rose-50 inline-flex items-center gap-1 disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              Delete
+                            </button>
+                          </div>
+                        </div>,
+                        document.body,
+                      )
+                    : null}
                 </div>
 
                 <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-700">
