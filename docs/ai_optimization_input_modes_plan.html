@@ -630,6 +630,95 @@
                 </tbody>
               </table>
 
+              <p>
+                Exact behavior is implemented as multipliers on key run-start parameters. These multipliers are applied,
+                then values are clamped to safe ranges.
+              </p>
+
+              <table>
+                <thead>
+                  <tr>
+                    <th>Parameter multiplier</th>
+                    <th>conservative</th>
+                    <th>balanced</th>
+                    <th>geometry_fast</th>
+                    <th>appearance_fast</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>feature_lr_mult</code></td>
+                    <td><code>0.90</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>0.95</code></td>
+                    <td><code>1.10</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>position_lr_init_mult</code></td>
+                    <td><code>0.90</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>1.08</code></td>
+                    <td><code>0.98</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>scaling_lr_mult</code></td>
+                    <td><code>0.92</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>1.08</code></td>
+                    <td><code>0.98</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>opacity_lr_mult</code></td>
+                    <td><code>0.92</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>0.98</code></td>
+                    <td><code>1.08</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>rotation_lr_mult</code></td>
+                    <td><code>0.95</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>1.06</code></td>
+                    <td><code>0.99</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>tune_interval_mult</code></td>
+                    <td><code>0.95</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>1.05</code></td>
+                    <td><code>1.03</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>tune_min_improvement_mult</code></td>
+                    <td><code>0.95</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>1.03</code></td>
+                    <td><code>1.02</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>densify_grad_threshold_mult</code></td>
+                    <td><code>1.20</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>0.92</code></td>
+                    <td><code>1.05</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>opacity_threshold_mult</code></td>
+                    <td><code>1.15</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>0.92</code></td>
+                    <td><code>1.02</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>lambda_dssim_mult</code></td>
+                    <td><code>1.05</code></td>
+                    <td><code>1.00</code></td>
+                    <td><code>0.98</code></td>
+                    <td><code>1.08</code></td>
+                  </tr>
+                </tbody>
+              </table>
+
               <div class="tip">
                 If a later version requires a continuous target, y can become a regression target over LR multipliers.
                 For the first version, classification over presets is simpler and cheaper.
@@ -670,10 +759,13 @@
                 <li>
                   <span class="step-title">Step 4. Compute loss, quality, and time scores.</span>
                   Loss score uses normalized loss (inverted), quality uses normalized PSNR/SSIM/LPIPS, and time uses normalized runtime to a reference.
+                  <div class="equation"><span class="eq-main">Norm(v) = (v - min(M)) / (max(M) - min(M)), where M = run_values &cup; baseline_values</span><span class="eq-no">(4B.4a)</span></div>
+                  <div class="equation"><span class="eq-main">If max(M) = min(M), then Norm(v) = 0.5 for all values in M</span><span class="eq-no">(4B.4b)</span></div>
+                  <div class="equation"><span class="eq-main">For lower-is-better metrics (Loss, LPIPS): Norm<sub>inv</sub>(v) = 1 - Norm(v)</span><span class="eq-no">(4B.4c)</span></div>
                   <div class="equation"><span class="eq-main"><span class="v">L</span><sub>score</sub>(<span class="v">t</span>) = 1 - Loss<sub>norm</sub>(<span class="v">t</span>)</span><span class="eq-no">(4B.4)</span></div>
                   <div class="equation"><span class="eq-main"><span class="v">Q</span>(<span class="v">t</span>) = <span class="v">w</span><sub>psnr</sub> PSNR<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>ssim</sub> SSIM<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>lpips</sub> (1 - LPIPS<sub>norm</sub>(<span class="v">t</span>))</span><span class="eq-no">(4B.4)</span></div>
                   <div class="equation"><span class="eq-main"><span class="v">T</span>(<span class="v">t</span>) = 1 - clamp( time_to_step(<span class="v">t</span>) / time<sub>ref</sub>, 0, 1 )</span><span class="eq-no">(4B.5)</span></div>
-                  Meaning: <code>L_score(t)</code> is the inverted normalized loss score, <code>Q(t)</code> is quality score, and <code>T(t)</code> is time score. <code>clamp(x,0,1)</code> means force <code>x</code> into the range <code>[0,1]</code>. LPIPS is inverted by <code>(1 - LPIPS_norm)</code> so larger is better, like PSNR and SSIM.
+                  Meaning: normalization is computed on a shared run+baseline range per metric so both sides use the same scale before comparison. <code>L_score(t)</code> is the inverted normalized loss score, <code>Q(t)</code> is quality score, and <code>T(t)</code> is time score. <code>clamp(x,0,1)</code> means force <code>x</code> into the range <code>[0,1]</code>. LPIPS is inverted by <code>(1 - LPIPS_norm)</code> so larger is better, like PSNR and SSIM.
                   Example: if <code>time_to_step(t)/time_ref = 1.2</code>, then <code>clamp = 1</code> and <code>T(t) = 0</code>. If ratio is <code>0.6</code>, then <code>T(t) = 0.4</code>.
                 </li>
                 <li>
@@ -1022,6 +1114,61 @@
 
               <div class="tip">
                 With a 10-project cap, prioritize diversity of camera profile, flight geometry, and scene type over project count.
+              </div>
+            </div>
+          </section>
+
+          <section id="chapter-8b" class="chapter">
+            <div class="chapter-head">Chapter 8B - Model Selection Rationale and Next Trial Path</div>
+            <div class="chapter-body">
+              <h3>8B.1 Why the current selector is used in this phase</h3>
+              <p>
+                The current phase uses a lightweight preset selector with mode-level bias updates because the dataset size
+                is intentionally small (8 to 10 projects, target 10) and diversity-constrained.
+                Under this condition, simple online updates are preferred over high-capacity models.
+              </p>
+              <ul>
+                <li>Sample efficiency: useful learning signal can be extracted from limited project count and repeated runs.</li>
+                <li>Low overfitting risk: small parameter state is less likely to memorize project-specific noise.</li>
+                <li>Operational stability: deterministic update rules simplify debugging, auditing, and rollback.</li>
+                <li>Policy alignment: the action space is discrete and small (preset selection), which fits lightweight policy updates.</li>
+              </ul>
+
+              <h3>8B.2 Why a larger deep model is not preferred yet</h3>
+              <p>
+                Deep models such as MLPs usually require substantially more independent projects to generalize reliably.
+                With the current cap, deep models would likely increase variance and instability without a clear gain in
+                cross-project behavior.
+              </p>
+              <ul>
+                <li>Higher data demand for robust generalization.</li>
+                <li>Stronger sensitivity to feature drift and class imbalance.</li>
+                <li>Higher implementation and monitoring overhead for this project stage.</li>
+              </ul>
+
+              <h3>8B.3 Recommended next trial model</h3>
+              <p>
+                The recommended next trial is a regularized contextual bandit for preset selection,
+                using linear Thompson Sampling or linear UCB.
+                This keeps the same preset actions while improving context-aware exploration and uncertainty handling.
+              </p>
+              <ul>
+                <li>Action space remains unchanged: <code>conservative</code>, <code>balanced</code>, <code>geometry_fast</code>, <code>appearance_fast</code>.</li>
+                <li>Context remains unchanged: current feature stack from EXIF, flight-plan inference, and optional external signals.</li>
+                <li>Decision quality improves through confidence-aware exploration instead of fixed-bias-only scoring.</li>
+              </ul>
+
+              <h3>8B.4 Trial guardrails</h3>
+              <ul>
+                <li>Keep existing selector as fallback policy.</li>
+                <li>Apply confidence gating: if uncertainty is high, default to <code>balanced</code>.</li>
+                <li>Evaluate on the same project-level final test split to preserve comparability.</li>
+                <li>Promote only if quality/time composite score improves without increased instability.</li>
+              </ul>
+
+              <div class="tip">
+                Current conclusion for this phase: the existing lightweight selector is the safest production choice,
+                while a regularized contextual bandit is the highest-value next trial before any deep-model transition.
               </div>
             </div>
           </section>

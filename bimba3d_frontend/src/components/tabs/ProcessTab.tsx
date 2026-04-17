@@ -14,13 +14,6 @@ const Info = (props: React.ComponentProps<typeof LucideInfo>) => (
   <LucideInfo className={props.className ? props.className + " w-3 h-3" : "w-3 h-3"} {...props} />
 );
 
-// Fix for window.__bimba3dTrainingStart type error
-declare global {
-  interface Window {
-    __bimba3dTrainingStart?: number;
-  }
-}
-
 interface ProcessTabProps {
   projectId: string;
 }
@@ -488,6 +481,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   // Load persisted config and expose individual controls
   const cfg = loadConfig();
   const cfgLegacy = cfg as Record<string, unknown>;
+  const cfgMaxSteps = typeof cfgLegacy["max_steps"] === "number" ? cfgLegacy["max_steps"] : undefined;
+  const cfgLogInterval = typeof cfgLegacy["log_interval"] === "number" ? cfgLegacy["log_interval"] : undefined;
+  const cfgEvalInterval = typeof cfgLegacy["eval_interval"] === "number" ? cfgLegacy["eval_interval"] : undefined;
   const cfgSplatExportInterval = typeof cfgLegacy["splat_export_interval"] === "number" ? cfgLegacy["splat_export_interval"] : undefined;
   const cfgBestSplatInterval = typeof cfgLegacy["best_splat_interval"] === "number" ? cfgLegacy["best_splat_interval"] : undefined;
   const cfgSaveBestSplat = typeof cfgLegacy["save_best_splat"] === "boolean" ? cfgLegacy["save_best_splat"] : undefined;
@@ -535,12 +531,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [reusableModelsLoading, setReusableModelsLoading] = useState<boolean>(false);
   const [reusableModelsError, setReusableModelsError] = useState<string | null>(null);
   const [engine, setEngine] = useState<TrainingEngine>(cfg.engine ?? "gsplat");
-  const [maxSteps, setMaxSteps] = useState<number>(cfg.maxSteps ?? 15000);
-  const [logInterval, setLogInterval] = useState<number>(cfg.logInterval ?? 100);
-  const [splatInterval, setSplatInterval] = useState<number>(cfg.splatInterval ?? cfgSplatExportInterval ?? 31000);
-  const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfg.bestSplatInterval ?? cfgBestSplatInterval ?? 100);
-  const [saveBestSplat, setSaveBestSplat] = useState<boolean>(cfg.saveBestSplat ?? cfgSaveBestSplat ?? false);
-  const [bestSplatStartStep, setBestSplatStartStep] = useState<number>(cfg.bestSplatStartStep ?? cfgBestSplatStartStep ?? 2000);
+  const [maxSteps, setMaxSteps] = useState<number>(cfgMaxSteps ?? cfg.maxSteps ?? 15000);
+  const [logInterval, setLogInterval] = useState<number>(cfgLogInterval ?? cfg.logInterval ?? 100);
+  const [splatInterval, setSplatInterval] = useState<number>(cfgSplatExportInterval ?? cfg.splatInterval ?? 31000);
+  const [bestSplatInterval, setBestSplatInterval] = useState<number>(cfgBestSplatInterval ?? cfg.bestSplatInterval ?? 100);
+  const [saveBestSplat, setSaveBestSplat] = useState<boolean>(cfgSaveBestSplat ?? cfg.saveBestSplat ?? false);
+  const [bestSplatStartStep, setBestSplatStartStep] = useState<number>(cfgBestSplatStartStep ?? cfg.bestSplatStartStep ?? 2000);
   const [autoEarlyStop, setAutoEarlyStop] = useState<boolean>(cfg.auto_early_stop ?? false);
   const [earlyStopMonitorInterval, setEarlyStopMonitorInterval] = useState<number>(cfg.earlyStopMonitorInterval ?? cfgEarlyStopMonitorInterval ?? 200);
   const [earlyStopDecisionPoints, setEarlyStopDecisionPoints] = useState<number>(cfg.earlyStopDecisionPoints ?? cfgEarlyStopDecisionPoints ?? 10);
@@ -551,8 +547,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const [earlyStopMaxVolatilityRatio, setEarlyStopMaxVolatilityRatio] = useState<number>(cfg.earlyStopMaxVolatilityRatio ?? cfgEarlyStopMaxVolatilityRatio ?? 0.01);
   const [earlyStopEmaAlpha, setEarlyStopEmaAlpha] = useState<number>(cfg.earlyStopEmaAlpha ?? cfgEarlyStopEmaAlpha ?? 0.1);
   const [pngInterval, setPngInterval] = useState<number>(cfg.pngInterval ?? 50);
-  const [evalInterval, setEvalInterval] = useState<number>(cfg.evalInterval ?? 1000);
-  const [saveInterval, setSaveInterval] = useState<number>(cfg.saveInterval ?? cfgSaveInterval ?? 31000);
+  const [evalInterval, setEvalInterval] = useState<number>(cfgEvalInterval ?? cfg.evalInterval ?? 1000);
+  const [saveInterval, setSaveInterval] = useState<number>(cfgSaveInterval ?? cfg.saveInterval ?? 31000);
   const [imagesMaxSize, setImagesMaxSize] = useState<number | undefined>(cfg.images_max_size ?? 1600);
   const [imagesResizeEnabled, setImagesResizeEnabled] = useState<boolean>(cfg.images_resize_enabled ?? true);
   const [, setShowAdvancedTraining] = useState<boolean>(false);
@@ -1549,6 +1545,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           (status.status === "processing" || status.status === "stopping") && typeof status.current_run_id === "string"
             ? status.current_run_id
             : "";
+        const statusBusy = status?.status === "processing" || status?.status === "stopping";
         setProcessingRunId(activeRunIdFromStatus);
         const startupWindowActive =
           restartPendingRef.current &&
@@ -1643,9 +1640,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           (status?.status === "processing" || status?.status === "stopping"),
         );
         const anyRunIsActiveFromStatus = Boolean(
-          typeof status?.current_run_id === "string" &&
-          status.current_run_id.trim() &&
-          (status?.status === "processing" || status?.status === "stopping"),
+          statusBusy &&
+          (
+            (typeof status?.current_run_id === "string" && status.current_run_id.trim()) ||
+            (typeof status?.stage === "string" && status.stage !== "idle" && status.stage !== "pending") ||
+            typeof resolvedCurrentStep === "number"
+          ),
         );
         const statusContextActive = selectedRunIsActive || batchRunIsActive || anyRunIsActiveFromStatus;
         
@@ -1725,8 +1725,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         }
         
         const sessionCompleted =
-          Boolean(model) ||
-          selectedRunMeta?.session_status === "completed";
+          !statusBusy &&
+          (Boolean(model) || selectedRunMeta?.session_status === "completed");
 
         // Build detailed status message
         let statusMsg: React.ReactNode = null;
@@ -1836,7 +1836,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setStageStatus(newStatus);
 
         // --- Show Completed and hide Stage Status if all are success and not stopped ---
-        const allStagesSuccess = (newStatus.colmap === "success" && newStatus.training === "success" && newStatus.export === "success" && !stopped) || (!statusContextActive && sessionCompleted);
+        const allStagesSuccess =
+          !statusBusy &&
+          ((newStatus.colmap === "success" && newStatus.training === "success" && newStatus.export === "success" && !stopped) ||
+            (!statusContextActive && sessionCompleted));
         setPipelineDone(allStagesSuccess);
 
         if (allStagesSuccess) {
@@ -1903,6 +1906,42 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
   const restartPendingRef = useRef<boolean>(false);
   const hydratedTrainingRunIdRef = useRef<string>("");
   const hydratedSharedProjectRef = useRef<string>("");
+  const etaSampleRef = useRef<{ step: number; ts: number } | null>(null);
+  const etaSecondsPerStepRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const trainingActive =
+      processing &&
+      currentStageKey === "training" &&
+      typeof trainingCurrentStep === "number" &&
+      typeof trainingMaxSteps === "number" &&
+      Number.isFinite(trainingCurrentStep) &&
+      Number.isFinite(trainingMaxSteps) &&
+      trainingMaxSteps > 0;
+
+    if (!trainingActive) {
+      etaSampleRef.current = null;
+      etaSecondsPerStepRef.current = null;
+      return;
+    }
+
+    const step = Math.max(0, Math.floor(trainingCurrentStep));
+    const now = Date.now();
+    const prev = etaSampleRef.current;
+
+    if (prev && step > prev.step) {
+      const deltaTimeSec = (now - prev.ts) / 1000;
+      const deltaSteps = step - prev.step;
+      const secondsPerStep = deltaTimeSec / deltaSteps;
+      if (Number.isFinite(secondsPerStep) && secondsPerStep > 0 && secondsPerStep < 600) {
+        const prevEstimate = etaSecondsPerStepRef.current;
+        etaSecondsPerStepRef.current =
+          prevEstimate === null ? secondsPerStep : (prevEstimate * 0.7 + secondsPerStep * 0.3);
+      }
+    }
+
+    etaSampleRef.current = { step, ts: now };
+  }, [processing, currentStageKey, trainingCurrentStep, trainingMaxSteps, processingRunId, selectedRunId]);
 
   const resetProgressDisplayForNewRun = () => {
     stoppedPollCountRef.current = 0;
@@ -3310,22 +3349,17 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       overallProgress > 0 &&
       processing
     ) {
-      // Estimate time per step using previous steps
-      const elapsed = window.__bimba3dTrainingStart ? (Date.now() - window.__bimba3dTrainingStart) / 1000 : null;
-      if (!window.__bimba3dTrainingStart && processing) {
-        window.__bimba3dTrainingStart = Date.now();
-        return null;
+      const stepsLeft = Math.max(0, trainingMaxSteps - trainingCurrentStep);
+      if (stepsLeft <= 0) return null;
+
+      let secondsLeft: number | null = null;
+      const smoothedSecondsPerStep = etaSecondsPerStepRef.current;
+      if (typeof smoothedSecondsPerStep === "number" && Number.isFinite(smoothedSecondsPerStep) && smoothedSecondsPerStep > 0) {
+        secondsLeft = smoothedSecondsPerStep * stepsLeft;
       }
-      if (elapsed && trainingCurrentStep > 0) {
-        const avgStepTime = elapsed / trainingCurrentStep;
-        const stepsLeft = trainingMaxSteps - trainingCurrentStep;
-        const secondsLeft = avgStepTime * stepsLeft;
-        if (secondsLeft > 0) {
-          const h = Math.floor(secondsLeft / 3600);
-          const m = Math.floor((secondsLeft % 3600) / 60);
-          const s = Math.floor(secondsLeft % 60);
-          return `${h > 0 ? h + 'h ' : ''}${m > 0 ? m + 'm ' : ''}${s}s remaining`;
-        }
+
+      if (secondsLeft !== null && Number.isFinite(secondsLeft) && secondsLeft > 0) {
+        return `${formatDurationCompact(secondsLeft)} remaining`;
       }
     }
     return null;
@@ -3333,7 +3367,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
   const fetchTelemetry = useCallback(async () => {
     const requestGeneration = telemetryGenerationRef.current;
-    const runIdForTelemetry = processingRunId || selectedRunId || undefined;
+    const runIdForTelemetry = selectedRunId || processingRunId || undefined;
     if (!runIdForTelemetry) {
       if (requestGeneration === telemetryGenerationRef.current) {
         setTelemetryData(null);
@@ -3371,13 +3405,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         setTelemetryLoading(false);
       }
     }
-  }, [projectId, processingRunId, selectedRunId]);
+  }, [projectId, selectedRunId, processingRunId]);
 
   const handleDownloadTelemetryJson = useCallback(async (evt?: { preventDefault?: () => void; stopPropagation?: () => void }) => {
     evt?.preventDefault?.();
     evt?.stopPropagation?.();
 
-    const runIdForTelemetry = (telemetryData?.run_id || processingRunId || selectedRunId || "").trim();
+    const runIdForTelemetry = (telemetryData?.run_id || selectedRunId || processingRunId || "").trim();
     if (!runIdForTelemetry) {
       setTelemetryError("No session selected for telemetry export.");
       return;
@@ -3434,13 +3468,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     } finally {
       setTelemetryDownloadBusy(false);
     }
-  }, [telemetryData?.run_id, processingRunId, selectedRunId, projectId, projectDisplayName, selectedRunMeta]);
+  }, [telemetryData?.run_id, selectedRunId, processingRunId, projectId, projectDisplayName, selectedRunMeta]);
 
   const handleDownloadTelemetryPdf = useCallback(async (evt?: { preventDefault?: () => void; stopPropagation?: () => void }) => {
     evt?.preventDefault?.();
     evt?.stopPropagation?.();
 
-    const runIdForTelemetry = (telemetryData?.run_id || processingRunId || selectedRunId || "").trim();
+    const runIdForTelemetry = (telemetryData?.run_id || selectedRunId || processingRunId || "").trim();
     if (!runIdForTelemetry) {
       setTelemetryError("No session selected for telemetry export.");
       return;
@@ -3762,7 +3796,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     } finally {
       setTelemetryDownloadBusy(false);
     }
-  }, [telemetryData?.run_id, processingRunId, selectedRunId, projectId, projectDisplayName, selectedRunMeta]);
+  }, [telemetryData?.run_id, selectedRunId, processingRunId, projectId, projectDisplayName, selectedRunMeta]);
 
   useEffect(() => {
     if (!showTelemetryModal) return;
@@ -3780,6 +3814,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     const bestLoss = typeof summary?.best_loss === "number" ? summary.best_loss : null;
     const bestStep = typeof summary?.best_loss_step === "number" ? summary.best_loss_step : null;
     return { bestStep, bestLoss };
+  }, [telemetryData]);
+  const telemetryBestTrackingStartStep = useMemo(() => {
+    const resolved = telemetryData?.run_config?.resolved_params;
+    if (!resolved || typeof resolved !== "object") return null;
+    const value = (resolved as Record<string, unknown>)["best_splat_start_step"];
+    return typeof value === "number" ? value : null;
   }, [telemetryData]);
   const hasEngineOutputs = Object.keys(engineOutputMap).length > 0;
   const showEngineDropdown = engineOptions.length > 1;
@@ -4583,10 +4623,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                 {telemetryData?.status && (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs font-semibold text-slate-700 mb-1">Current status</p>
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-2 text-xs text-slate-700">
+                    <div className="grid grid-cols-1 md:grid-cols-6 gap-2 text-xs text-slate-700">
                       <div>Stage: <span className="font-semibold">{telemetryData.status.stage || "-"}</span></div>
                       <div>Step: <span className="font-semibold">{typeof telemetryData.status.currentStep === "number" ? telemetryData.status.currentStep.toLocaleString() : "-"}</span></div>
                       <div>Loss: <span className="font-semibold">{typeof telemetryData.status.current_loss === "number" ? telemetryData.status.current_loss.toFixed(6) : "-"}</span></div>
+                      <div>Best tracking starts: <span className="font-semibold">{typeof telemetryBestTrackingStartStep === "number" ? telemetryBestTrackingStartStep.toLocaleString() : "-"}</span></div>
                       <div>Best loss step: <span className="font-semibold">{typeof telemetryBestLoss.bestStep === "number" ? telemetryBestLoss.bestStep.toLocaleString() : "-"}</span></div>
                       <div>Best loss value: <span className="font-semibold">{typeof telemetryBestLoss.bestLoss === "number" ? telemetryBestLoss.bestLoss.toFixed(6) : "-"}</span></div>
                     </div>
@@ -4737,6 +4778,16 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
 
                 <div>
                   <p className="text-xs font-semibold text-slate-700 mb-2">Log-interval snapshots</p>
+                  <p className="text-[11px] text-slate-500 mb-2">
+                    This table shows full training snapshots from step 1. Best-splat tracking starts at
+                    {" "}
+                    <span className="font-semibold text-slate-700">
+                      {typeof telemetryBestTrackingStartStep === "number"
+                        ? telemetryBestTrackingStartStep.toLocaleString()
+                        : "configured start step"}
+                    </span>
+                    .
+                  </p>
                   <div className="h-64 overflow-auto border border-slate-200 rounded-lg">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 text-slate-700">

@@ -88,6 +88,7 @@ interface ChartGeometry {
 interface AILearningTableRow {
   run_id: string;
   run_name?: string | null;
+  is_baseline_row?: boolean;
   ai_input_mode?: string | null;
   baseline_run_id?: string | null;
   selected_preset?: string | null;
@@ -1173,7 +1174,7 @@ export default function LogsTab({ projectId }: LogsTabProps) {
                         </tr>
                       ) : (
                         aiLearningRows.map((row) => (
-                          <tr key={row.run_id} className="border-t border-gray-100 align-top">
+                          <tr key={row.run_id} className={`border-t border-gray-100 align-top ${row.is_baseline_row ? "bg-amber-50" : ""}`}>
                             <td className="px-2 py-2 text-slate-800">
                               <div className="font-semibold">{row.run_name || row.run_id}</div>
                               <div className="text-[10px] text-slate-500">{row.run_id}</div>

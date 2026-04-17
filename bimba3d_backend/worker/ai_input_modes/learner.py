@@ -153,12 +153,70 @@ def update_from_run(
         baseline_rows = [row for row in baseline_eval_history if isinstance(row, dict) and isinstance(row.get("step"), (int, float))]
         baseline_rows.sort(key=lambda r: int(r.get("step", 0)))
 
-    psnr_norm = _normalize_series(psnr_vals)
-    ssim_norm = _normalize_series(ssim_vals)
-    lpips_norm = _normalize_series(lpips_vals, invert=True)
-    loss_norm = _normalize_series(loss_vals, invert=True)
-
     baseline_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows] if baseline_rows else []
+
+    b_steps: list[int] = []
+    b_psnr_vals: list[float] = []
+    b_ssim_vals: list[float] = []
+    b_lpips_vals: list[float] = []
+    b_loss_vals: list[float] = []
+    b_elapsed_vals: list[float] = []
+    if baseline_rows:
+        b_steps = [int(r["step"]) for r in baseline_rows]
+        b_psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in baseline_rows]
+        b_ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in baseline_rows]
+        b_lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in baseline_rows]
+        b_loss_vals = [float(r.get("final_loss") or 0.0) for r in baseline_rows]
+        b_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows]
+
+    # IMPORTANT: Normalize run and baseline on a shared min/max reference frame.
+    #
+    # If we normalize each side independently, scores become relative to each side's own spread:
+    #   run_norm(v)  = (v - min(run))  / (max(run)  - min(run))
+    #   base_norm(v) = (v - min(base)) / (max(base) - min(base))
+    # This can produce misleading reward signs because the same absolute metric value can map to
+    # very different normalized values depending on local variance.
+    #
+    # To compare outcomes fairly, we compute one joint normalization per metric using run+baseline:
+    #   joint_norm(v) = (v - min(run ∪ base)) / (max(run ∪ base) - min(run ∪ base))
+    # Then split back into run and baseline sequences.
+    #
+    # Metric direction handling stays unchanged:
+    # - PSNR, SSIM: higher is better (direct normalization)
+    # - LPIPS, Loss: lower is better (inverted normalization)
+    #
+    # This keeps reward = s_run - s_base on a consistent scale and avoids false positive/negative
+    # rewards caused by independent scaling artifacts.
+    if baseline_rows:
+        joint_psnr_norm = _normalize_series(psnr_vals + b_psnr_vals)
+        joint_ssim_norm = _normalize_series(ssim_vals + b_ssim_vals)
+        joint_lpips_norm = _normalize_series(lpips_vals + b_lpips_vals, invert=True)
+        joint_loss_norm = _normalize_series(loss_vals + b_loss_vals, invert=True)
+
+        split = len(psnr_vals)
+        psnr_norm = joint_psnr_norm[:split]
+        b_psnr_norm = joint_psnr_norm[split:]
+
+        split = len(ssim_vals)
+        ssim_norm = joint_ssim_norm[:split]
+        b_ssim_norm = joint_ssim_norm[split:]
+
+        split = len(lpips_vals)
+        lpips_norm = joint_lpips_norm[:split]
+        b_lpips_norm = joint_lpips_norm[split:]
+
+        split = len(loss_vals)
+        loss_norm = joint_loss_norm[:split]
+        b_loss_norm = joint_loss_norm[split:]
+    else:
+        psnr_norm = _normalize_series(psnr_vals)
+        ssim_norm = _normalize_series(ssim_vals)
+        lpips_norm = _normalize_series(lpips_vals, invert=True)
+        loss_norm = _normalize_series(loss_vals, invert=True)
+        b_psnr_norm = []
+        b_ssim_norm = []
+        b_lpips_norm = []
+        b_loss_norm = []
     baseline_time_ref = max(baseline_elapsed_vals) if baseline_elapsed_vals else 0.0
 
     time_ref = baseline_time_ref if baseline_time_ref > 0.0 else (max(elapsed_vals) if elapsed_vals else 1.0)
@@ -181,18 +239,6 @@ def update_from_run(
     baseline_comparison: dict[str, Any] | None = None
     reward_signal = s_run
     if baseline_rows:
-        b_steps = [int(r["step"]) for r in baseline_rows]
-        b_psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in baseline_rows]
-        b_ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in baseline_rows]
-        b_lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in baseline_rows]
-        b_loss_vals = [float(r.get("final_loss") or 0.0) for r in baseline_rows]
-        b_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows]
-
-        b_psnr_norm = _normalize_series(b_psnr_vals)
-        b_ssim_norm = _normalize_series(b_ssim_vals)
-        b_lpips_norm = _normalize_series(b_lpips_vals, invert=True)
-        b_loss_norm = _normalize_series(b_loss_vals, invert=True)
-
         b_by_step: dict[int, dict[str, float]] = {}
         for idx, row in enumerate(baseline_rows):
             step = int(row["step"])

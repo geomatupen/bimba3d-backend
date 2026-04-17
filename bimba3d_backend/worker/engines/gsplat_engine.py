@@ -322,6 +322,206 @@ def run_training(
         and bool(isinstance(preset_summary, dict) and preset_summary.get("applied"))
     )
 
+    run_artifact_root = project_dir
+    if configured_run_id:
+        candidate_run_root = project_dir / "runs" / configured_run_id
+        if candidate_run_root.exists():
+            run_artifact_root = candidate_run_root
+    analytics_path = run_artifact_root / "analytics" / "run_analytics_v1.json"
+    eval_history_path = engine_output_dir / "eval_history.json"
+    live_analytics_state: dict[str, int | None] = {
+        "last_step": None,
+    }
+
+    def _load_live_eval_history() -> list[dict]:
+        if not eval_history_path.exists():
+            return []
+        try:
+            payload = json.loads(eval_history_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                return [row for row in payload if isinstance(row, dict)]
+        except Exception:
+            return []
+        return []
+
+    def _build_live_analytics_payload(live_status: str = "processing") -> dict:
+        eval_history_live = _load_live_eval_history()
+
+        elapsed_by_step = tuning_state.get("elapsed_by_step") if isinstance(tuning_state.get("elapsed_by_step"), dict) else {}
+        loss_by_step = tuning_state.get("loss_by_step") if isinstance(tuning_state.get("loss_by_step"), dict) else {}
+        best_splat_state = tuning_state.get("best_splat") if isinstance(tuning_state.get("best_splat"), dict) else {}
+
+        log_loss_series = [
+            {"step": int(step), "loss": float(loss)}
+            for step, loss in loss_by_step.items()
+            if isinstance(step, (int, float)) and isinstance(loss, (int, float))
+        ]
+        log_loss_series.sort(key=lambda row: int(row.get("step", 0)))
+
+        log_time_series = [
+            {"step": int(step), "elapsed_seconds": float(elapsed)}
+            for step, elapsed in elapsed_by_step.items()
+            if isinstance(step, (int, float)) and isinstance(elapsed, (int, float))
+        ]
+        log_time_series.sort(key=lambda row: int(row.get("step", 0)))
+
+        eval_psnr_series: list[dict] = []
+        eval_ssim_series: list[dict] = []
+        eval_lpips_series: list[dict] = []
+        eval_series: list[dict] = []
+        eval_time_series: list[dict] = []
+        for row in eval_history_live:
+            step_raw = row.get("step")
+            if not isinstance(step_raw, (int, float)):
+                continue
+            step_int = int(step_raw)
+
+            psnr_value = row.get("convergence_speed")
+            ssim_value = row.get("sharpness_mean")
+            lpips_value = row.get("lpips_mean")
+            loss_value = row.get("final_loss")
+            elapsed_value = row.get("elapsed_seconds")
+
+            if isinstance(psnr_value, (int, float)):
+                eval_psnr_series.append({"step": step_int, "value": float(psnr_value)})
+            if isinstance(ssim_value, (int, float)):
+                eval_ssim_series.append({"step": step_int, "value": float(ssim_value)})
+            if isinstance(lpips_value, (int, float)):
+                eval_lpips_series.append({"step": step_int, "value": float(lpips_value)})
+            if isinstance(loss_value, (int, float)):
+                eval_series.append({"step": step_int, "loss": float(loss_value)})
+            if isinstance(elapsed_value, (int, float)):
+                eval_time_series.append({"step": step_int, "elapsed_seconds": float(elapsed_value)})
+
+        latest_step = int(log_loss_series[-1].get("step")) if log_loss_series else None
+        latest_loss = float(log_loss_series[-1].get("loss")) if log_loss_series else None
+        latest_elapsed = float(log_time_series[-1].get("elapsed_seconds")) if log_time_series else None
+        total_time_seconds = float(latest_elapsed) if isinstance(latest_elapsed, (int, float)) else max(0.0, float(time.time() - gsplat_start))
+
+        project_id = None
+        try:
+            if run_artifact_root.parent.name == "runs":
+                project_id = run_artifact_root.parent.parent.name
+        except Exception:
+            project_id = None
+
+        run_id_value = str(configured_run_id or run_artifact_root.name)
+        run_name = str(p.get("run_name") or run_id_value)
+
+        runtime_tuning_series = [
+            {"step": item.get("step"), "params": item.get("params")}
+            for item in list(tuning_state.get("events") or [])
+            if isinstance(item, dict) and isinstance(item.get("step"), (int, float)) and isinstance(item.get("params"), dict)
+        ]
+
+        summary_payload = {
+            "project_id": project_id,
+            "run_id": run_id_value,
+            "run_name": run_name,
+            "name": project_id,
+            "status": live_status,
+            "mode": mode,
+            "engine": "gsplat",
+            "metrics": {
+                "final_loss_step": latest_step,
+                "final_loss": latest_loss,
+                "total_time_seconds": total_time_seconds,
+                "num_gaussians": tuning_state.get("last_gaussians"),
+                "best_splat_step": best_splat_state.get("step"),
+                "best_splat_loss": best_splat_state.get("loss"),
+                "best_loss_source": "best_splat_update",
+                "best_loss_tracking_start_step": p.get("best_splat_start_step"),
+                "stopped_early": bool(
+                    isinstance(tuning_state.get("early_stop"), dict)
+                    and (tuning_state.get("early_stop") or {}).get("triggered")
+                ),
+                "early_stop_step": (
+                    (tuning_state.get("early_stop") or {}).get("trigger_step")
+                    if isinstance(tuning_state.get("early_stop"), dict)
+                    else None
+                ),
+            },
+            "tuning": {
+                "initial": {},
+                "final": {},
+                "end_params": (tuning_state.get("last_event") or {}).get("params", {}) if mode == "modified" else {},
+                "end_step": latest_step,
+                "runs": None,
+                "history_count": len(list(tuning_state.get("events") or [])),
+                "history": list(tuning_state.get("events") or []),
+                "tune_interval": p.get("tune_interval"),
+                "log_interval": p.get("log_interval"),
+                "runtime_series": runtime_tuning_series,
+            },
+            "major_params": {
+                "max_steps": p.get("max_steps"),
+                "total_steps_completed": latest_step,
+                "densify_from_iter": p.get("densify_from_iter"),
+                "densify_until_iter": p.get("densify_until_iter"),
+                "densification_interval": p.get("densification_interval"),
+                "eval_interval": p.get("eval_interval"),
+                "save_interval": p.get("save_interval"),
+                "splat_export_interval": p.get("splat_export_interval"),
+                "best_splat_interval": p.get("best_splat_interval"),
+                "best_splat_start_step": p.get("best_splat_start_step"),
+                "auto_early_stop": p.get("auto_early_stop"),
+                "batch_size": p.get("batch_size"),
+            },
+            "loss_milestones": {},
+            "log_loss_series": log_loss_series,
+            "log_time_series": log_time_series,
+            "eval_series": eval_series,
+            "eval_time_series": eval_time_series,
+            "eval_psnr_series": eval_psnr_series,
+            "eval_ssim_series": eval_ssim_series,
+            "eval_lpips_series": eval_lpips_series,
+            "preview_url": None,
+            "eval_points": len(eval_history_live),
+            "early_stop": tuning_state.get("early_stop") if isinstance(tuning_state.get("early_stop"), dict) else None,
+        }
+
+        return {
+            "schema": "run_analytics_v1",
+            "version": 1,
+            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "project_id": project_id,
+            "run_id": run_id_value,
+            "run_name": run_name,
+            "engine": "gsplat",
+            "mode": mode,
+            "summary": summary_payload,
+            "ai": {
+                "input_mode_learning": None,
+                "input_mode_insights": {
+                    "ai_input_mode": str((preset_summary or {}).get("mode") or "") or None,
+                    "baseline_session_id": str(p.get("baseline_session_id") or "").strip() or None,
+                    "selected_preset": str((preset_summary or {}).get("selected_preset") or "") or None,
+                    "heuristic_preset": str((preset_summary or {}).get("heuristic_preset") or "") or None,
+                },
+                "controller": {
+                    "history_count": len(runtime_tuning_series),
+                    "runtime_series": runtime_tuning_series,
+                },
+            },
+        }
+
+    def _write_live_analytics(
+        live_status: str = "processing",
+        *,
+        step: int | None = None,
+        force: bool = False,
+    ) -> None:
+        if not force:
+            last_step = live_analytics_state.get("last_step")
+            if isinstance(step, int) and isinstance(last_step, int) and step <= last_step:
+                return
+        try:
+            write_json_atomic(analytics_path, _build_live_analytics_payload(live_status))
+            if isinstance(step, int):
+                live_analytics_state["last_step"] = int(step)
+        except Exception as exc:
+            logger.debug("Live analytics write skipped: %s", exc)
+
     def _clamp_int(value: int, low: int, high: int) -> int:
         return max(low, min(high, int(value)))
 
@@ -1127,6 +1327,9 @@ def run_training(
             "progress": progress_fraction,
         }, engine=engine_name)
 
+        if step == 1 or step == max_steps_local or step % log_interval == 0:
+            _write_live_analytics("processing", step=int(step), force=True)
+
         should_log_snapshot = (
             step == 1
             or step == max_steps_local
@@ -1170,6 +1373,7 @@ def run_training(
         mode=mode,
         timing={"start": gsplat_start},
     )
+    _write_live_analytics("processing", force=True)
 
     dataset_dir = Path(image_dir).parent
 
@@ -1259,6 +1463,7 @@ def run_training(
     def eval_callback(step: int) -> None:
         materialize_eval_previews(engine_output_dir, eval_step=step)
         _evaluate_early_stop_on_eval(int(step), int(max_steps))
+        _write_live_analytics("processing", step=int(step), force=True)
 
     def checkpoint_callback(step: int, checkpoint_path: str) -> None:
         if step >= best_splat_start_step and (step % best_splat_interval == 0 or step == max_steps):
@@ -1304,6 +1509,7 @@ def run_training(
                         str(best_size) if best_size is not None else "n/a",
                         str(save_best_splat),
                     )
+                    _write_live_analytics("processing", step=int(step), force=True)
             except Exception as exc:
                 logger.warning("Failed to export best.splat at step %s: %s", step, exc)
 

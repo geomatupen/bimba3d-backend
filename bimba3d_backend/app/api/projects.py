@@ -322,7 +322,106 @@ def _analytics_metrics(run_analytics: dict[str, Any] | None) -> dict[str, Any]:
     summary = run_analytics.get("summary") if isinstance(run_analytics.get("summary"), dict) else {}
     summary_metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     if summary_metrics:
-        return summary_metrics
+        canonical = dict(summary_metrics)
+
+        def _best_from_series(series: Any, prefer: str) -> tuple[int | None, float | None]:
+            if not isinstance(series, list):
+                return None, None
+            best_step = None
+            best_value = None
+            for item in series:
+                if not isinstance(item, dict):
+                    continue
+                step_raw = item.get("step")
+                value_raw = item.get("value")
+                if not isinstance(step_raw, (int, float)) or not isinstance(value_raw, (int, float)):
+                    continue
+                step = int(step_raw)
+                value = float(value_raw)
+                if best_value is None:
+                    best_step = step
+                    best_value = value
+                    continue
+                if prefer == "max" and value > best_value:
+                    best_step = step
+                    best_value = value
+                if prefer == "min" and value < best_value:
+                    best_step = step
+                    best_value = value
+            return best_step, best_value
+
+        def _final_from_series(series: Any) -> tuple[int | None, float | None]:
+            if not isinstance(series, list):
+                return None, None
+            candidates = [item for item in series if isinstance(item, dict) and isinstance(item.get("step"), (int, float)) and isinstance(item.get("value"), (int, float))]
+            if not candidates:
+                return None, None
+            last = max(candidates, key=lambda item: int(item.get("step", 0)))
+            return int(last.get("step")), float(last.get("value"))
+
+        def _final_loss_step_from_log_series(series: Any) -> int | None:
+            if not isinstance(series, list):
+                return None
+            steps = [int(item.get("step")) for item in series if isinstance(item, dict) and isinstance(item.get("step"), (int, float))]
+            return max(steps) if steps else None
+
+        # Canonicalize best-loss aliases from run summaries produced by worker engines.
+        if not isinstance(canonical.get("best_loss"), (int, float)) and isinstance(canonical.get("best_splat_loss"), (int, float)):
+            canonical["best_loss"] = float(canonical.get("best_splat_loss"))
+        if not isinstance(canonical.get("best_loss_step"), (int, float)) and isinstance(canonical.get("best_splat_step"), (int, float)):
+            canonical["best_loss_step"] = int(canonical.get("best_splat_step"))
+
+        # Expose final eval aliases when summary stores compact names.
+        if not isinstance(canonical.get("final_psnr"), (int, float)) and isinstance(canonical.get("convergence_speed"), (int, float)):
+            canonical["final_psnr"] = float(canonical.get("convergence_speed"))
+        if not isinstance(canonical.get("final_ssim"), (int, float)) and isinstance(canonical.get("sharpness_mean"), (int, float)):
+            canonical["final_ssim"] = float(canonical.get("sharpness_mean"))
+        if not isinstance(canonical.get("final_lpips"), (int, float)) and isinstance(canonical.get("lpips_mean"), (int, float)):
+            canonical["final_lpips"] = float(canonical.get("lpips_mean"))
+
+        eval_psnr_series = summary.get("eval_psnr_series") if isinstance(summary.get("eval_psnr_series"), list) else None
+        eval_ssim_series = summary.get("eval_ssim_series") if isinstance(summary.get("eval_ssim_series"), list) else None
+        eval_lpips_series = summary.get("eval_lpips_series") if isinstance(summary.get("eval_lpips_series"), list) else None
+        log_loss_series = summary.get("log_loss_series") if isinstance(summary.get("log_loss_series"), list) else None
+
+        if not isinstance(canonical.get("best_psnr"), (int, float)):
+            step, value = _best_from_series(eval_psnr_series, "max")
+            if value is not None:
+                canonical["best_psnr"] = value
+                canonical["best_psnr_step"] = step
+        if not isinstance(canonical.get("best_ssim"), (int, float)):
+            step, value = _best_from_series(eval_ssim_series, "max")
+            if value is not None:
+                canonical["best_ssim"] = value
+                canonical["best_ssim_step"] = step
+        if not isinstance(canonical.get("best_lpips"), (int, float)):
+            step, value = _best_from_series(eval_lpips_series, "min")
+            if value is not None:
+                canonical["best_lpips"] = value
+                canonical["best_lpips_step"] = step
+
+        if not isinstance(canonical.get("final_psnr"), (int, float)):
+            step, value = _final_from_series(eval_psnr_series)
+            if value is not None:
+                canonical["final_psnr"] = value
+                canonical["final_psnr_step"] = step
+        if not isinstance(canonical.get("final_ssim"), (int, float)):
+            step, value = _final_from_series(eval_ssim_series)
+            if value is not None:
+                canonical["final_ssim"] = value
+                canonical["final_ssim_step"] = step
+        if not isinstance(canonical.get("final_lpips"), (int, float)):
+            step, value = _final_from_series(eval_lpips_series)
+            if value is not None:
+                canonical["final_lpips"] = value
+                canonical["final_lpips_step"] = step
+
+        if not isinstance(canonical.get("final_loss_step"), (int, float)):
+            final_loss_step = _final_loss_step_from_log_series(log_loss_series)
+            if isinstance(final_loss_step, int):
+                canonical["final_loss_step"] = final_loss_step
+
+        return canonical
     legacy_metrics = run_analytics.get("metrics") if isinstance(run_analytics.get("metrics"), dict) else {}
     return legacy_metrics
 
@@ -368,6 +467,8 @@ def _ensure_run_analytics(
     run_config: dict[str, Any] | None,
     ai_insights: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    # TODO(legacy-fallback-cleanup): remove this backfill helper after all runs
+    # are guaranteed to have canonical analytics JSON generated during training.
     existing = _read_run_analytics(run_dir)
     if isinstance(existing, dict):
         return existing
@@ -863,15 +964,10 @@ def _parse_optional_float(raw: str | None) -> float | None:
 
 
 def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> dict[str, Any] | None:
-    if not isinstance(run_config, dict):
-        return None
-
-    resolved_cfg = run_config.get("resolved_params") if isinstance(run_config.get("resolved_params"), dict) else {}
-    requested_cfg = run_config.get("requested_params") if isinstance(run_config.get("requested_params"), dict) else {}
+    resolved_cfg = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
+    requested_cfg = run_config.get("requested_params") if isinstance(run_config, dict) and isinstance(run_config.get("requested_params"), dict) else {}
 
     ai_mode = str(resolved_cfg.get("ai_input_mode") or requested_cfg.get("ai_input_mode") or "").strip().lower()
-    if not ai_mode:
-        return None
 
     baseline_session_id = str(
         resolved_cfg.get("baseline_session_id")
@@ -925,11 +1021,17 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
     if isinstance(run_dir, Path):
         log_path = run_dir / "processing.log"
-        lines = _read_text_lines(log_path, max_lines=5000)
+        # AI input-mode metadata is emitted at run start, while reward outcomes are at run end.
+        # Read both head and tail so long runs do not lose the start-of-run metadata.
+        head_lines = _read_text_lines(log_path, max_lines=2500, from_start=True)
+        tail_lines = _read_text_lines(log_path, max_lines=2500)
+        lines = head_lines + tail_lines
 
         for line in lines:
             features_match = AI_INPUT_MODE_FEATURES_RE.search(line)
             if features_match:
+                if not ai_mode:
+                    ai_mode = str(features_match.group("mode") or "").strip().lower()
                 details_raw = str(features_match.group("details") or "{}").strip()
                 try:
                     parsed = json.loads(details_raw)
@@ -941,6 +1043,8 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
             preset_match = AI_INPUT_MODE_PRESET_RE.search(line)
             if preset_match:
+                if not ai_mode:
+                    ai_mode = str(preset_match.group("mode") or "").strip().lower()
                 selected_preset = str(preset_match.group("selected") or "").strip() or selected_preset
                 heuristic_preset = str(preset_match.group("heuristic") or "").strip() or heuristic_preset
                 cache_token = str(preset_match.group("cache") or "").strip().lower()
@@ -949,6 +1053,8 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
             init_params_match = AI_INPUT_MODE_INITIAL_PARAMS_RE.search(line)
             if init_params_match:
+                if not ai_mode:
+                    ai_mode = str(init_params_match.group("mode") or "").strip().lower()
                 params_raw = str(init_params_match.group("params") or "{}").strip()
                 try:
                     parsed = json.loads(params_raw)
@@ -959,6 +1065,8 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
             learn_match = AI_INPUT_MODE_LEARN_RE.search(line)
             if learn_match:
+                if not ai_mode:
+                    ai_mode = str(learn_match.group("mode") or "").strip().lower()
                 reward_value = _parse_optional_float(learn_match.group("reward"))
                 learn_snapshot = {
                     "s_best": _parse_optional_float(learn_match.group("s_best")),
@@ -972,6 +1080,8 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
             reward_outcome_match = AI_INPUT_MODE_REWARD_OUTCOME_RE.search(line)
             if reward_outcome_match:
+                if not ai_mode:
+                    ai_mode = str(reward_outcome_match.group("mode") or "").strip().lower()
                 reward_value = _parse_optional_float(reward_outcome_match.group("reward"))
                 rewarded_token = str(reward_outcome_match.group("rewarded") or "").strip().lower()
                 if rewarded_token in {"true", "false"}:
@@ -985,6 +1095,9 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
             raw_features = cache_payload.get("features")
             if isinstance(raw_features, dict):
                 cache_features = raw_features
+
+    if not ai_mode:
+        return None
 
     if isinstance(initial_params_from_log, dict) and initial_params_from_log:
         initial_params.update(initial_params_from_log)
@@ -1115,7 +1228,10 @@ def _parse_log_timestamp_to_epoch(raw: Any) -> float | None:
         return None
 
 
-def _build_training_summary(training_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_training_summary(
+    training_rows: list[dict[str, Any]],
+    best_loss_start_step: int | None = None,
+) -> dict[str, Any]:
     if not training_rows:
         return {
             "first_step": None,
@@ -1162,6 +1278,9 @@ def _build_training_summary(training_rows: list[dict[str, Any]]) -> dict[str, An
 
         loss = row.get("loss")
         if isinstance(loss, (int, float)):
+            if isinstance(best_loss_start_step, int):
+                if not isinstance(step, int) or step < best_loss_start_step:
+                    continue
             loss_val = float(loss)
             if best_loss is None or loss_val < best_loss:
                 best_loss = loss_val
@@ -1442,6 +1561,8 @@ def _extract_event_rows(lines: list[str], row_limit: int) -> list[dict[str, Any]
 
 
 def _extract_loss_summary_from_log(path: Path) -> dict[str, Any]:
+    # TODO(legacy-fallback-cleanup): remove log parsing after migration completes
+    # and all comparisons/telemetry read canonical analytics JSON only.
     best_loss_step: int | None = None
     best_loss_value: float | None = None
     final_loss_step: int | None = None
@@ -1501,6 +1622,8 @@ def _extract_loss_summary_from_log(path: Path) -> dict[str, Any]:
 
 
 def _extract_eval_summary(stats_dir: Path) -> dict[str, Any]:
+    # TODO(legacy-fallback-cleanup): remove stats directory parsing after legacy
+    # runs are migrated to canonical analytics JSON.
     rows = _extract_eval_rows(stats_dir, eval_limit=200000)
     if not rows:
         return {
@@ -1728,6 +1851,8 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
             best_anchor = outcomes.get("best_anchor") if isinstance(outcomes.get("best_anchor"), dict) else {}
             end_anchor = outcomes.get("end_anchor") if isinstance(outcomes.get("end_anchor"), dict) else {}
 
+            # TODO(legacy-fallback-cleanup): remove this log/stats fallback branch
+            # once canonical analytics JSON exists for every AI run.
             loss_summary = _extract_loss_summary_from_log(run_dir / "processing.log")
             eval_summary = _extract_eval_summary(run_dir / "outputs" / "engines" / "gsplat" / "stats")
 
@@ -1776,12 +1901,140 @@ def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
                 }
             )
 
+        baseline_ids: list[str] = []
+        for row in rows:
+            candidate = row.get("baseline_run_id")
+            if isinstance(candidate, str) and candidate.strip():
+                rid = candidate.strip()
+                if rid not in baseline_ids:
+                    baseline_ids.append(rid)
+
+        baseline_rows: list[dict[str, Any]] = []
+        if baseline_ids:
+            # Reuse an observed baseline score row as a reference (if present) for easier side-by-side reading.
+            baseline_reference_map: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                rid = row.get("baseline_run_id")
+                if isinstance(rid, str) and rid.strip() and rid.strip() not in baseline_reference_map:
+                    baseline_reference_map[rid.strip()] = row
+
+            for baseline_run_id in baseline_ids:
+                baseline_run_dir = runs_dir / baseline_run_id
+                if not baseline_run_dir.exists() or not baseline_run_dir.is_dir():
+                    continue
+
+                baseline_cfg = _read_json_if_exists(baseline_run_dir / "run_config.json")
+                baseline_requested = baseline_cfg.get("requested_params") if isinstance(baseline_cfg, dict) and isinstance(baseline_cfg.get("requested_params"), dict) else {}
+                baseline_name = None
+                if isinstance(baseline_cfg, dict):
+                    baseline_name = baseline_cfg.get("run_name") or baseline_cfg.get("name")
+                if not baseline_name and isinstance(baseline_requested, dict):
+                    baseline_name = baseline_requested.get("run_name")
+
+                baseline_analytics = _read_run_analytics(baseline_run_dir)
+                if not isinstance(baseline_analytics, dict):
+                    baseline_analytics = _ensure_run_analytics(
+                        run_dir=baseline_run_dir,
+                        run_config=baseline_cfg if isinstance(baseline_cfg, dict) else None,
+                        ai_insights=None,
+                    )
+
+                if isinstance(baseline_analytics, dict):
+                    baseline_metrics = _analytics_metrics(baseline_analytics)
+                    best_loss_step = baseline_metrics.get("best_loss_step")
+                    best_loss = baseline_metrics.get("best_loss")
+                    final_loss_step = baseline_metrics.get("final_loss_step")
+                    final_loss = baseline_metrics.get("final_loss")
+                    best_psnr_step = baseline_metrics.get("best_psnr_step")
+                    best_psnr = baseline_metrics.get("best_psnr")
+                    final_psnr_step = baseline_metrics.get("final_psnr_step")
+                    final_psnr = baseline_metrics.get("final_psnr")
+                    best_ssim_step = baseline_metrics.get("best_ssim_step")
+                    best_ssim = baseline_metrics.get("best_ssim")
+                    final_ssim_step = baseline_metrics.get("final_ssim_step")
+                    final_ssim = baseline_metrics.get("final_ssim")
+                    best_lpips_step = baseline_metrics.get("best_lpips_step")
+                    best_lpips = baseline_metrics.get("best_lpips")
+                    final_lpips_step = baseline_metrics.get("final_lpips_step")
+                    final_lpips = baseline_metrics.get("final_lpips")
+                else:
+                    # TODO(legacy-fallback-cleanup): remove baseline log/stats
+                    # fallback after historical baseline runs are migrated.
+                    loss_summary = _extract_loss_summary_from_log(baseline_run_dir / "processing.log")
+                    eval_summary = _extract_eval_summary(baseline_run_dir / "outputs" / "engines" / "gsplat" / "stats")
+                    best_loss_step = loss_summary.get("best_loss_step")
+                    best_loss = loss_summary.get("best_loss")
+                    final_loss_step = loss_summary.get("final_loss_step")
+                    final_loss = loss_summary.get("final_loss")
+                    best_psnr_step = eval_summary.get("best_psnr_step")
+                    best_psnr = eval_summary.get("best_psnr")
+                    final_psnr_step = eval_summary.get("final_psnr_step")
+                    final_psnr = eval_summary.get("final_psnr")
+                    best_ssim_step = eval_summary.get("best_ssim_step")
+                    best_ssim = eval_summary.get("best_ssim")
+                    final_ssim_step = eval_summary.get("final_ssim_step")
+                    final_ssim = eval_summary.get("final_ssim")
+                    best_lpips_step = eval_summary.get("best_lpips_step")
+                    best_lpips = eval_summary.get("best_lpips")
+                    final_lpips_step = eval_summary.get("final_lpips_step")
+                    final_lpips = eval_summary.get("final_lpips")
+
+                baseline_ref = baseline_reference_map.get(baseline_run_id) or {}
+                baseline_rows.append(
+                    {
+                        "run_id": baseline_run_id,
+                        "run_name": baseline_name,
+                        "ai_input_mode": None,
+                        "baseline_run_id": baseline_run_id,
+                        "selected_preset": "baseline",
+                        "phase": "baseline",
+                        "is_warmup": False,
+                        "is_baseline_row": True,
+                        "best_loss_step": best_loss_step,
+                        "best_loss": best_loss,
+                        "final_loss_step": final_loss_step,
+                        "final_loss": final_loss,
+                        "best_psnr_step": best_psnr_step,
+                        "best_psnr": best_psnr,
+                        "final_psnr_step": final_psnr_step,
+                        "final_psnr": final_psnr,
+                        "best_ssim_step": best_ssim_step,
+                        "best_ssim": best_ssim,
+                        "final_ssim_step": final_ssim_step,
+                        "final_ssim": final_ssim,
+                        "best_lpips_step": best_lpips_step,
+                        "best_lpips": best_lpips,
+                        "final_lpips_step": final_lpips_step,
+                        "final_lpips": final_lpips,
+                        "t_best": None,
+                        "t_eval_best": None,
+                        "t_end": None,
+                        "s_best": baseline_ref.get("s_base_best"),
+                        "s_end": baseline_ref.get("s_base_end"),
+                        "s_run": baseline_ref.get("s_base"),
+                        "s_base_best": baseline_ref.get("s_base_best"),
+                        "s_base_end": baseline_ref.get("s_base_end"),
+                        "s_base": baseline_ref.get("s_base"),
+                        "reward": 0.0,
+                        "run_best_l": None,
+                        "run_best_q": None,
+                        "run_best_t": None,
+                        "run_best_s": None,
+                        "run_end_l": None,
+                        "run_end_q": None,
+                        "run_end_t": None,
+                        "run_end_s": None,
+                    }
+                )
+
+        combined_rows = baseline_rows + rows
+
         return {
             "project_id": project_id,
             "generated_at": datetime.utcnow().isoformat() + "Z",
-            "ai_enabled": len(rows) > 0,
-            "rows": rows,
-            "message": None if rows else "No AI-applied runs with learning artifacts found.",
+            "ai_enabled": len(combined_rows) > 0,
+            "rows": combined_rows,
+            "message": None if combined_rows else "No AI-applied runs with learning artifacts found.",
         }
     except HTTPException:
         raise
@@ -3679,14 +3932,112 @@ def get_project_telemetry(
         run_config_path = run_dir / "run_config.json"
         run_analytics = _read_run_analytics(run_dir)
 
+        def _slice_rows(rows: list[dict[str, Any]], limit: int, take_from_start: bool) -> list[dict[str, Any]]:
+            if limit <= 0 or len(rows) <= limit:
+                return rows
+            return rows[:limit] if take_from_start else rows[-limit:]
+
+        def _telemetry_rows_from_analytics(analytics: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            if not isinstance(analytics, dict):
+                return [], []
+            summary = analytics.get("summary") if isinstance(analytics.get("summary"), dict) else {}
+            log_loss_series = summary.get("log_loss_series") if isinstance(summary.get("log_loss_series"), list) else []
+
+            training_rows_from_json: list[dict[str, Any]] = []
+            for row in log_loss_series:
+                if not isinstance(row, dict):
+                    continue
+                step_raw = row.get("step")
+                loss_raw = row.get("loss")
+                if isinstance(step_raw, (int, float)) and isinstance(loss_raw, (int, float)):
+                    training_rows_from_json.append({"step": int(step_raw), "loss": float(loss_raw)})
+            training_rows_from_json.sort(key=lambda item: int(item.get("step", 0)))
+
+            psnr_series = summary.get("eval_psnr_series") if isinstance(summary.get("eval_psnr_series"), list) else []
+            ssim_series = summary.get("eval_ssim_series") if isinstance(summary.get("eval_ssim_series"), list) else []
+            lpips_series = summary.get("eval_lpips_series") if isinstance(summary.get("eval_lpips_series"), list) else []
+
+            eval_map: dict[int, dict[str, Any]] = {}
+
+            def _merge_eval_series(series: list[Any], key: str) -> None:
+                for point in series:
+                    if not isinstance(point, dict):
+                        continue
+                    step_raw = point.get("step")
+                    value_raw = point.get("value")
+                    if not isinstance(step_raw, (int, float)) or not isinstance(value_raw, (int, float)):
+                        continue
+                    step = int(step_raw)
+                    entry = eval_map.setdefault(step, {"step": step})
+                    entry[key] = float(value_raw)
+
+            _merge_eval_series(psnr_series, "psnr")
+            _merge_eval_series(ssim_series, "ssim")
+            _merge_eval_series(lpips_series, "lpips")
+
+            eval_rows_from_json = [eval_map[step] for step in sorted(eval_map.keys())]
+            return training_rows_from_json, eval_rows_from_json
+
+        training_rows_json, eval_rows_json = _telemetry_rows_from_analytics(run_analytics)
+
         text_lines = _read_text_lines(run_log_path, max_lines=log_limit, from_start=bool(from_start))
-        training_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
         event_rows = _extract_event_rows(text_lines, row_limit=max(10, min(100, log_limit)))
-        eval_rows = _extract_eval_rows(stats_dir, eval_limit=eval_limit)
-        training_summary = _build_training_summary(training_rows)
+
+        if training_rows_json:
+            training_rows = _slice_rows(training_rows_json, log_limit, bool(from_start))
+            # Enrich canonical JSON rows with snapshot-only fields (timestamp/eta/speed/max_steps)
+            # when they are available in the selected log window.
+            log_snapshot_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
+            if log_snapshot_rows:
+                by_step: dict[int, dict[str, Any]] = {
+                    int(row.get("step")): row
+                    for row in log_snapshot_rows
+                    if isinstance(row, dict) and isinstance(row.get("step"), int)
+                }
+                enriched_rows: list[dict[str, Any]] = []
+                for row in training_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    step_raw = row.get("step")
+                    merged = dict(row)
+                    if isinstance(step_raw, int) and step_raw in by_step:
+                        snap = by_step[step_raw]
+                        for key in ("timestamp", "max_steps", "elapsed_seconds", "eta", "speed", "source"):
+                            if key in snap and merged.get(key) is None:
+                                merged[key] = snap.get(key)
+                    enriched_rows.append(merged)
+                training_rows = enriched_rows
+        else:
+            # TODO(legacy-fallback-cleanup): remove once JSON training rows are
+            # guaranteed for every run.
+            training_rows = _extract_training_rows(text_lines, row_limit=log_limit, from_start=bool(from_start))
+
+        if eval_rows_json:
+            eval_rows = _slice_rows(eval_rows_json, eval_limit, bool(from_start))
+        else:
+            # TODO(legacy-fallback-cleanup): remove once JSON eval rows are
+            # guaranteed for every run.
+            eval_rows = _extract_eval_rows(stats_dir, eval_limit=eval_limit)
         run_config = _read_json_if_exists(run_config_path)
         if not isinstance(run_config, dict):
             run_config = None
+
+        resolved_cfg = run_config.get("resolved_params") if isinstance(run_config, dict) and isinstance(run_config.get("resolved_params"), dict) else {}
+        requested_cfg = run_config.get("requested_params") if isinstance(run_config, dict) and isinstance(run_config.get("requested_params"), dict) else {}
+        tracking_start_step: int | None = None
+        tracking_raw = (
+            resolved_cfg.get("best_splat_start_step")
+            if resolved_cfg.get("best_splat_start_step") is not None
+            else requested_cfg.get("best_splat_start_step")
+        )
+        if isinstance(tracking_raw, (int, float)):
+            tracking_start_step = int(tracking_raw)
+
+        training_summary = _build_training_summary(
+            training_rows,
+            best_loss_start_step=tracking_start_step,
+        )
+
         ai_insights = _extract_ai_run_insights(run_dir, run_config)
         if not isinstance(run_analytics, dict):
             run_analytics = _ensure_run_analytics(
@@ -3700,6 +4051,7 @@ def get_project_telemetry(
                 training_summary["best_loss"] = float(metrics.get("best_loss"))
             if isinstance(metrics.get("best_loss_step"), (int, float)):
                 training_summary["best_loss_step"] = int(metrics.get("best_loss_step"))
+
             if isinstance(metrics.get("best_loss_source"), str):
                 training_summary["best_loss_source"] = str(metrics.get("best_loss_source"))
             if isinstance(metrics.get("best_loss_tracking_start_step"), (int, float)):
@@ -3708,7 +4060,27 @@ def get_project_telemetry(
             ai_block = run_analytics.get("ai") if isinstance(run_analytics.get("ai"), dict) else {}
             canonical_ai = ai_block.get("input_mode_insights") if isinstance(ai_block.get("input_mode_insights"), dict) else None
             if isinstance(canonical_ai, dict) and canonical_ai.get("ai_input_mode"):
-                ai_insights = canonical_ai
+                if isinstance(ai_insights, dict):
+                    merged_ai = dict(canonical_ai)
+                    for key, value in ai_insights.items():
+                        if value is None:
+                            continue
+                        if isinstance(value, str) and not value.strip():
+                            continue
+                        if isinstance(value, dict) and not value:
+                            continue
+                        current = merged_ai.get(key)
+                        if current is None:
+                            merged_ai[key] = value
+                            continue
+                        if isinstance(current, str) and not current.strip():
+                            merged_ai[key] = value
+                            continue
+                        if isinstance(current, dict) and not current and isinstance(value, dict):
+                            merged_ai[key] = value
+                    ai_insights = merged_ai
+                else:
+                    ai_insights = canonical_ai
 
         project_base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
         shared_doc = _read_project_shared_config(project_dir, str(project_base_session_id) if project_base_session_id else None)
