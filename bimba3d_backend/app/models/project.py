@@ -112,6 +112,7 @@ class ProcessParams(BaseModel):
     ai_input_mode: Optional[str] = None  # "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external"
     baseline_session_id: Optional[str] = None  # completed baseline gsplat session for comparison
     ai_preset_override: Optional[str] = None  # optional forced preset for AI input mode selection
+    ai_selector_strategy: Optional[str] = None  # "preset_bias" | "continuous_bandit_linear"
     # --- ORIGINAL KERBL PARAMETERS ---
     max_steps: Optional[int] = None  # [original]
     log_interval: Optional[int] = None  # [custom]

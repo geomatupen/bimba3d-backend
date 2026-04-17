@@ -11,6 +11,7 @@ from .exif_plus_flight_plan import build_preset as build_exif_plus_flight_plan_p
 from .exif_plus_flight_plan_plus_external import (
     build_preset as build_exif_plus_flight_plan_plus_external_preset,
 )
+from .continuous_learner import select_continuous
 from .learner import select_preset
 
 VALID_AI_INPUT_MODES = {
@@ -21,11 +22,19 @@ VALID_AI_INPUT_MODES = {
 
 CACHE_VERSION = 1
 VALID_PRESET_OVERRIDES = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
+VALID_SELECTOR_STRATEGIES = {"preset_bias", "continuous_bandit_linear"}
 
 
 def _normalize_preset_override(value: Any) -> str:
     token = str(value or "").strip().lower()
     return token if token in VALID_PRESET_OVERRIDES else ""
+
+
+def _normalize_selector_strategy(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token in VALID_SELECTOR_STRATEGIES:
+        return token
+    return "preset_bias"
 
 
 def _feature_cache_dir(project_dir: Path) -> Path:
@@ -201,6 +210,8 @@ def apply_initial_preset(
     mode is selected and only updates a small bounded set of initial params.
     """
     mode = normalize_ai_input_mode(params.get("ai_input_mode"))
+    selector_strategy = _normalize_selector_strategy(params.get("ai_selector_strategy"))
+    params["ai_selector_strategy"] = selector_strategy
     if not mode:
         return {
             "mode": "legacy",
@@ -209,6 +220,7 @@ def apply_initial_preset(
             "features": {},
             "notes": ["No ai_input_mode selected; using existing behavior."],
             "cache_used": False,
+            "selector_strategy": selector_strategy,
         }
 
     ctx = ModeContext(image_dir=Path(image_dir), colmap_dir=Path(colmap_dir), params=params)
@@ -243,20 +255,30 @@ def apply_initial_preset(
             },
         )
 
-    selection = select_preset(
-        project_dir=project_dir,
-        mode=mode,
-        heuristic_preset=heuristic_preset,
-        params=params,
-    )
-    selected_updates = dict(selection.get("updates") or {})
-    selected_preset = str(selection.get("selected_preset") or heuristic_preset)
-    forced_preset = _normalize_preset_override(params.get("ai_preset_override"))
-    preset_forced = bool(forced_preset)
-    if preset_forced:
-        # Optional override for controlled exploration experiments; default path remains adaptive.
-        selected_preset = forced_preset
-        selected_updates = apply_preset_updates(params, selected_preset)
+    if selector_strategy == "continuous_bandit_linear":
+        selection = select_continuous(
+            project_dir=project_dir,
+            mode=mode,
+            params=params,
+        )
+        selected_updates = dict(selection.get("updates") or {})
+        selected_preset = str(selection.get("selected_preset") or "continuous_bandit_linear")
+        preset_forced = False
+    else:
+        selection = select_preset(
+            project_dir=project_dir,
+            mode=mode,
+            heuristic_preset=heuristic_preset,
+            params=params,
+        )
+        selected_updates = dict(selection.get("updates") or {})
+        selected_preset = str(selection.get("selected_preset") or heuristic_preset)
+        forced_preset = _normalize_preset_override(params.get("ai_preset_override"))
+        preset_forced = bool(forced_preset)
+        if preset_forced:
+            # Optional override for controlled exploration experiments; default path remains adaptive.
+            selected_preset = forced_preset
+            selected_updates = apply_preset_updates(params, selected_preset)
 
     for key, value in selected_updates.items():
         if key == "preset_name":
@@ -270,12 +292,13 @@ def apply_initial_preset(
         json.dumps(feature_details, sort_keys=True),
     )
     logger.info(
-        "AI_INPUT_MODE_PRESET mode=%s heuristic=%s selected=%s cache_used=%s forced=%s",
+        "AI_INPUT_MODE_PRESET mode=%s heuristic=%s selected=%s cache_used=%s forced=%s strategy=%s",
         mode,
         heuristic_preset,
         selected_preset,
         str(bool(cache_used)).lower(),
         str(preset_forced).lower(),
+        selector_strategy,
     )
     logger.info(
         "AI_INPUT_MODE_INITIAL_PARAMS mode=%s params=%s",
@@ -301,6 +324,7 @@ def apply_initial_preset(
         "heuristic_preset": heuristic_preset,
         "selected_preset": selected_preset,
         "preset_forced": preset_forced,
+        "selector_strategy": selector_strategy,
         "yhat_scores": dict(selection.get("yhat_scores") or {}),
         "project_dir": str(project_dir),
         "cache_used": cache_used,

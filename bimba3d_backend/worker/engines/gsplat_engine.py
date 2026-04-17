@@ -14,6 +14,10 @@ from ..modified_rule_scopes import (
 )
 from ..ai_adaptive_light import ACTION_KEEP, CoreAIAdaptiveController
 from ..ai_input_modes import apply_initial_preset
+from ..ai_input_modes.continuous_learner import (
+    record_run_penalty_continuous,
+    update_from_run_continuous,
+)
 from ..ai_input_modes.learner import record_run_penalty, update_from_run
 
 
@@ -1627,18 +1631,31 @@ def run_training(
                 selected_preset = str((preset_summary or {}).get("selected_preset") or "")
                 yhat_scores = dict((preset_summary or {}).get("yhat_scores") or {})
                 mode_name = str((preset_summary or {}).get("mode") or "")
+                selector_strategy = str((preset_summary or {}).get("selector_strategy") or "preset_bias")
                 if selected_preset and mode_name:
                     try:
-                        input_mode_learning_payload = record_run_penalty(
-                            project_dir=project_dir,
-                            mode=mode_name,
-                            selected_preset=selected_preset,
-                            yhat_scores=yhat_scores,
-                            penalty_reward=-1.5,
-                            reason="gaussian_hard_cap_reached",
-                            run_id=run_session_id,
-                            logger=logger,
-                        )
+                        if selector_strategy == "continuous_bandit_linear":
+                            input_mode_learning_payload = record_run_penalty_continuous(
+                                project_dir=project_dir,
+                                mode=mode_name,
+                                selected_preset=selected_preset,
+                                yhat_scores=yhat_scores,
+                                penalty_reward=-1.5,
+                                reason="gaussian_hard_cap_reached",
+                                run_id=run_session_id,
+                                logger=logger,
+                            )
+                        else:
+                            input_mode_learning_payload = record_run_penalty(
+                                project_dir=project_dir,
+                                mode=mode_name,
+                                selected_preset=selected_preset,
+                                yhat_scores=yhat_scores,
+                                penalty_reward=-1.5,
+                                reason="gaussian_hard_cap_reached",
+                                run_id=run_session_id,
+                                logger=logger,
+                            )
                         write_json_atomic(
                             engine_output_dir / "input_mode_learning_results.json",
                             input_mode_learning_payload,
@@ -1831,6 +1848,7 @@ def run_training(
             selected_preset = str((preset_summary or {}).get("selected_preset") or "")
             yhat_scores = dict((preset_summary or {}).get("yhat_scores") or {})
             mode_name = str((preset_summary or {}).get("mode") or "")
+            selector_strategy = str((preset_summary or {}).get("selector_strategy") or "preset_bias")
             baseline_eval_history: list[dict] = []
             baseline_session_id = str(p.get("baseline_session_id") or "").strip()
             if baseline_session_id:
@@ -1846,19 +1864,34 @@ def run_training(
                         logger.warning("Failed loading baseline eval history from %s: %s", baseline_eval_path, exc)
             if selected_preset and mode_name:
                 try:
-                    input_mode_learning_payload = update_from_run(
-                        project_dir=project_dir,
-                        mode=mode_name,
-                        selected_preset=selected_preset,
-                        yhat_scores=yhat_scores,
-                        eval_history=eval_history,
-                        baseline_eval_history=baseline_eval_history,
-                        loss_by_step={int(k): float(v) for k, v in (loss_by_step or {}).items()},
-                        elapsed_by_step={int(k): float(v) for k, v in (elapsed_by_step or {}).items()},
-                        x_features=dict((preset_summary or {}).get("features") or {}),
-                        run_id=run_session_id,
-                        logger=logger,
-                    )
+                    if selector_strategy == "continuous_bandit_linear":
+                        input_mode_learning_payload = update_from_run_continuous(
+                            project_dir=project_dir,
+                            mode=mode_name,
+                            selected_preset=selected_preset,
+                            yhat_scores=yhat_scores,
+                            eval_history=eval_history,
+                            baseline_eval_history=baseline_eval_history,
+                            loss_by_step={int(k): float(v) for k, v in (loss_by_step or {}).items()},
+                            elapsed_by_step={int(k): float(v) for k, v in (elapsed_by_step or {}).items()},
+                            x_features=dict((preset_summary or {}).get("features") or {}),
+                            run_id=run_session_id,
+                            logger=logger,
+                        )
+                    else:
+                        input_mode_learning_payload = update_from_run(
+                            project_dir=project_dir,
+                            mode=mode_name,
+                            selected_preset=selected_preset,
+                            yhat_scores=yhat_scores,
+                            eval_history=eval_history,
+                            baseline_eval_history=baseline_eval_history,
+                            loss_by_step={int(k): float(v) for k, v in (loss_by_step or {}).items()},
+                            elapsed_by_step={int(k): float(v) for k, v in (elapsed_by_step or {}).items()},
+                            x_features=dict((preset_summary or {}).get("features") or {}),
+                            run_id=run_session_id,
+                            logger=logger,
+                        )
                     write_json_atomic(
                         engine_output_dir / "input_mode_learning_results.json",
                         input_mode_learning_payload,

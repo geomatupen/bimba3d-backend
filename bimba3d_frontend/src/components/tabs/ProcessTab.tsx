@@ -170,6 +170,7 @@ type TrainingEngine = "gsplat" | "litegs";
 type TuneScope = "core_individual" | "core_only" | "core_ai_optimization" | "core_individual_plus_strategy";
 type TrendScope = "run" | "phase";
 type AiInputMode = "" | "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external";
+type AiSelectorStrategy = "preset_bias" | "continuous_bandit_linear";
 type RunJitterMode = "fixed" | "random";
 type TuneScopeDropdownValue =
   | TuneScope
@@ -356,6 +357,7 @@ const getDefaultProcessConfig = () => ({
   tune_scope: "core_individual_plus_strategy" as TuneScope,
   trend_scope: "run" as TrendScope,
   ai_input_mode: "" as AiInputMode,
+  ai_selector_strategy: "preset_bias" as AiSelectorStrategy,
   baseline_session_id: "",
   warmup_at_start: false,
   run_count: 1,
@@ -517,6 +519,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       ? cfg.ai_input_mode
       : ""
   );
+  const [aiSelectorStrategy, setAiSelectorStrategy] = useState<AiSelectorStrategy>(
+    cfg.ai_selector_strategy === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias"
+  );
   const [baselineSessionIdForAi, setBaselineSessionIdForAi] = useState<string>(cfg.baseline_session_id ?? "");
   const [warmupAtStart, setWarmupAtStart] = useState<boolean>(cfg.warmup_at_start ?? false);
   const [runCount, setRunCount] = useState<number>(cfg.run_count ?? 1);
@@ -636,6 +641,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     tune_scope: 'Rule tuning scope: Core individual updates only LR groups. Core only updates LR groups + core strategy threshold. Core AI optimization uses AI input-mode preset selection and run-end best/end-anchor learning updates. Core individual + strategy updates LR groups and full strategy controls.',
     trend_scope: 'Core AI optimization trend scope setting retained for compatibility with existing payloads.',
     ai_input_mode: 'Initial preset mode for Core AI optimization. Leave empty to use the legacy controller-only flow. EXIF only uses image metadata, EXIF + flight plan adds sequence-derived flight features, and + external adds cheap image-derived scene features (no manual external inputs).',
+    ai_selector_strategy: 'Core AI optimization selector strategy. Preset bias uses discrete preset learning. Continuous bandit linear predicts bounded continuous multipliers per run.',
     baseline_session_id: 'Completed baseline gsplat session used as reference for baseline-relative scoring in Core AI optimization modes.',
     warmup_at_start: 'Runs an automatic 3-phase warmup from this project base-session config (keeps base max_steps and densify_until_iter). Phase A forces rotating presets (balanced, conservative, geometry_fast, appearance_fast) with wider random jitter; Phases B and C switch back to adaptive preset selection with tighter jitter. Manual batch jitter controls are ignored while enabled.',
     run_count: 'Total sessions in this batch, including the selected session as run 1. Default 1 keeps manual behavior.',
@@ -815,6 +821,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setTuneScope(defaults.tune_scope ?? "core_individual_plus_strategy");
     setTrendScope(defaults.trend_scope === "phase" ? "phase" : "run");
     setAiInputMode(defaults.ai_input_mode ?? "");
+    setAiSelectorStrategy(defaults.ai_selector_strategy === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias");
     setBaselineSessionIdForAi(defaults.baseline_session_id ?? "");
     setWarmupAtStart(defaults.warmup_at_start ?? false);
     setRunCount(defaults.run_count ?? 1);
@@ -897,6 +904,9 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         resolved.ai_input_mode === "exif_plus_flight_plan_plus_external"
       ) {
         setAiInputMode(resolved.ai_input_mode as AiInputMode);
+      }
+      if (resolved.ai_selector_strategy === "preset_bias" || resolved.ai_selector_strategy === "continuous_bandit_linear") {
+        setAiSelectorStrategy(resolved.ai_selector_strategy as AiSelectorStrategy);
       }
       if (typeof resolved.baseline_session_id === "string") setBaselineSessionIdForAi(resolved.baseline_session_id);
       if (typeof resolved.warmup_at_start === "boolean") setWarmupAtStart(resolved.warmup_at_start);
@@ -1035,6 +1045,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_scope: tuneScope,
       trend_scope: trendScope,
       ai_input_mode: aiInputMode,
+      ai_selector_strategy: aiSelectorStrategy,
       baseline_session_id: baselineSessionIdForAi,
       warmup_at_start: warmupAtStart,
       run_count: runCount,
@@ -3022,6 +3033,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_scope: tuneScope,
       trend_scope: tuneScope === "core_ai_optimization" && !aiInputMode ? trendScope : undefined,
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
+      ai_selector_strategy:
+        tuneScope === "core_ai_optimization" && aiInputMode ? aiSelectorStrategy : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
@@ -3076,6 +3089,8 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       tune_scope: tuneScope,
       trend_scope: tuneScope === "core_ai_optimization" && !aiInputMode ? trendScope : undefined,
       ai_input_mode: tuneScope === "core_ai_optimization" && aiInputMode ? aiInputMode : undefined,
+      ai_selector_strategy:
+        tuneScope === "core_ai_optimization" && aiInputMode ? aiSelectorStrategy : undefined,
       baseline_session_id:
         tuneScope === "core_ai_optimization" && aiInputMode ? (baselineSessionIdForAi || undefined) : undefined,
       warmup_at_start: showCoreAiSessionControls ? warmupAtStart : undefined,
@@ -3255,6 +3270,10 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
           ai_input_mode:
             defaults.tune_scope === "core_ai_optimization"
               ? (defaults.ai_input_mode || undefined)
+              : undefined,
+          ai_selector_strategy:
+            defaults.tune_scope === "core_ai_optimization" && defaults.ai_input_mode
+              ? defaults.ai_selector_strategy
               : undefined,
           baseline_session_id:
             defaults.tune_scope === "core_ai_optimization" && defaults.ai_input_mode
@@ -4643,7 +4662,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                       <div>Cache used: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.cache_used)}</span></div>
                       <div>Baseline session: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.baseline_session_id)}</span></div>
                       <div>Heuristic preset: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.heuristic_preset)}</span></div>
-                      <div>Selected preset: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.selected_preset)}</span></div>
+                      <div>Selected strategy/action: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.selected_preset)}</span></div>
                       <div>Reward value: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward)}</span></div>
                       <div>Rewarded: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward_positive)}</span></div>
                       <div>Reward label: <span className="font-semibold">{formatTelemetryScalar(telemetryData.ai_insights.reward_label)}</span></div>
@@ -5036,6 +5055,23 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                         <option value="phase">Phase-wise trend</option>
                                       </select>
                                       <p className="mt-1 text-[10px] text-slate-500">Run = one trend across all steps. Phase = separate trend per phase.</p>
+                                    </div>
+                                  )}
+                                  {hasAiInputModeFlow && (
+                                    <div className="md:col-span-2">
+                                      <label className="flex items-center justify-between text-[11px] font-medium text-slate-600 mb-0.5">
+                                        <span>AI selector strategy</span>
+                                        <button onClick={() => setSelectedInfoKey("ai_selector_strategy")} className="p-1 text-slate-400 hover:text-slate-600"><Info /></button>
+                                      </label>
+                                      <select
+                                        value={aiSelectorStrategy}
+                                        onChange={(e) => setAiSelectorStrategy(e.target.value === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias")}
+                                        className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                      >
+                                        <option value="preset_bias">Preset bias</option>
+                                        <option value="continuous_bandit_linear">Continuous bandit (linear)</option>
+                                      </select>
+                                      <p className="mt-1 text-[10px] text-slate-500">Continuous bandit uses bounded continuous multipliers instead of fixed preset templates.</p>
                                     </div>
                                   )}
                                   {hasAiInputModeFlow && (

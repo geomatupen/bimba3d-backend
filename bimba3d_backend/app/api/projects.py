@@ -2228,6 +2228,7 @@ def _build_warmup_seed_params(project_dir: Path, requested_params: dict) -> tupl
         "tune_scope",
         "trend_scope",
         "ai_input_mode",
+        "ai_selector_strategy",
         "baseline_session_id",
         "start_model_mode",
         "source_model_id",
@@ -3322,12 +3323,14 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         tune_scope_value = str(params_payload.get("tune_scope") or "").strip().lower()
         requested_ai_input_mode = str(requested_params.get("ai_input_mode") or "").strip().lower()
         requested_preset_override = str(requested_params.get("ai_preset_override") or "").strip().lower()
+        requested_selector_strategy = str(requested_params.get("ai_selector_strategy") or "").strip().lower()
         valid_ai_input_modes = {
             "exif_only",
             "exif_plus_flight_plan",
             "exif_plus_flight_plan_plus_external",
         }
         valid_ai_preset_overrides = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
+        valid_selector_strategies = {"preset_bias", "continuous_bandit_linear"}
         if requested_ai_input_mode and requested_ai_input_mode not in valid_ai_input_modes:
             raise HTTPException(
                 status_code=400,
@@ -3342,6 +3345,11 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 detail=(
                     "ai_preset_override must be one of: conservative, balanced, geometry_fast, appearance_fast"
                 ),
+            )
+        if requested_selector_strategy and requested_selector_strategy not in valid_selector_strategies:
+            raise HTTPException(
+                status_code=400,
+                detail="ai_selector_strategy must be one of: preset_bias, continuous_bandit_linear",
             )
 
         if engine == "gsplat" and mode_value == "modified" and tune_scope_value == "core_ai_optimization":
@@ -3387,14 +3395,20 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                         detail="Selected baseline session must be a baseline-mode run",
                     )
                 params_payload["baseline_session_id"] = baseline_session_id
+                chosen_strategy = requested_selector_strategy or str(params_payload.get("ai_selector_strategy") or "").strip().lower()
+                if chosen_strategy not in valid_selector_strategies:
+                    chosen_strategy = "preset_bias"
+                params_payload["ai_selector_strategy"] = chosen_strategy
                 if requested_preset_override:
                     params_payload["ai_preset_override"] = requested_preset_override
             else:
                 params_payload.pop("ai_input_mode", None)
+                params_payload.pop("ai_selector_strategy", None)
                 params_payload.pop("baseline_session_id", None)
                 params_payload.pop("ai_preset_override", None)
         else:
             params_payload.pop("ai_input_mode", None)
+            params_payload.pop("ai_selector_strategy", None)
             params_payload.pop("baseline_session_id", None)
             params_payload.pop("ai_preset_override", None)
 
@@ -3522,6 +3536,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             warmup_seed_params["mode"] = params_payload.get("mode")
             warmup_seed_params["tune_scope"] = params_payload.get("tune_scope")
             warmup_seed_params["ai_input_mode"] = params_payload.get("ai_input_mode")
+            warmup_seed_params["ai_selector_strategy"] = params_payload.get("ai_selector_strategy")
             warmup_seed_params["run_count"] = warmup_total_runs
             if params_payload.get("baseline_session_id"):
                 warmup_seed_params["baseline_session_id"] = params_payload.get("baseline_session_id")

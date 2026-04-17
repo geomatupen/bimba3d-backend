@@ -635,6 +635,11 @@
                 then values are clamped to safe ranges.
               </p>
 
+              <p>
+                Current implementation note: preset deviations were amplified by 200% around the balanced baseline.
+                Example: +8% became +16%, and -8% became -16%.
+              </p>
+
               <table>
                 <thead>
                   <tr>
@@ -648,73 +653,73 @@
                 <tbody>
                   <tr>
                     <td><code>feature_lr_mult</code></td>
-                    <td><code>0.90</code></td>
+                    <td><code>0.80</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>0.95</code></td>
-                    <td><code>1.10</code></td>
+                    <td><code>0.90</code></td>
+                    <td><code>1.20</code></td>
                   </tr>
                   <tr>
                     <td><code>position_lr_init_mult</code></td>
-                    <td><code>0.90</code></td>
+                    <td><code>0.80</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>1.08</code></td>
-                    <td><code>0.98</code></td>
+                    <td><code>1.16</code></td>
+                    <td><code>0.96</code></td>
                   </tr>
                   <tr>
                     <td><code>scaling_lr_mult</code></td>
-                    <td><code>0.92</code></td>
+                    <td><code>0.84</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>1.08</code></td>
-                    <td><code>0.98</code></td>
+                    <td><code>1.16</code></td>
+                    <td><code>0.96</code></td>
                   </tr>
                   <tr>
                     <td><code>opacity_lr_mult</code></td>
-                    <td><code>0.92</code></td>
+                    <td><code>0.84</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>0.98</code></td>
-                    <td><code>1.08</code></td>
+                    <td><code>0.96</code></td>
+                    <td><code>1.16</code></td>
                   </tr>
                   <tr>
                     <td><code>rotation_lr_mult</code></td>
-                    <td><code>0.95</code></td>
+                    <td><code>0.90</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>1.06</code></td>
-                    <td><code>0.99</code></td>
+                    <td><code>1.12</code></td>
+                    <td><code>0.98</code></td>
                   </tr>
                   <tr>
                     <td><code>tune_interval_mult</code></td>
-                    <td><code>0.95</code></td>
+                    <td><code>0.90</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>1.05</code></td>
-                    <td><code>1.03</code></td>
+                    <td><code>1.10</code></td>
+                    <td><code>1.06</code></td>
                   </tr>
                   <tr>
                     <td><code>tune_min_improvement_mult</code></td>
-                    <td><code>0.95</code></td>
+                    <td><code>0.90</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>1.03</code></td>
-                    <td><code>1.02</code></td>
+                    <td><code>1.06</code></td>
+                    <td><code>1.04</code></td>
                   </tr>
                   <tr>
                     <td><code>densify_grad_threshold_mult</code></td>
-                    <td><code>1.20</code></td>
+                    <td><code>1.40</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>0.92</code></td>
-                    <td><code>1.05</code></td>
+                    <td><code>0.84</code></td>
+                    <td><code>1.10</code></td>
                   </tr>
                   <tr>
                     <td><code>opacity_threshold_mult</code></td>
-                    <td><code>1.15</code></td>
+                    <td><code>1.30</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>0.92</code></td>
-                    <td><code>1.02</code></td>
+                    <td><code>0.84</code></td>
+                    <td><code>1.04</code></td>
                   </tr>
                   <tr>
                     <td><code>lambda_dssim_mult</code></td>
-                    <td><code>1.05</code></td>
+                    <td><code>1.10</code></td>
                     <td><code>1.00</code></td>
-                    <td><code>0.98</code></td>
-                    <td><code>1.08</code></td>
+                    <td><code>0.96</code></td>
+                    <td><code>1.16</code></td>
                   </tr>
                 </tbody>
               </table>
@@ -738,7 +743,7 @@
                   <span class="step-title">Step 1. Predict and pick one preset.</span>
                   The model outputs scores over all preset candidates and selects the highest score.
                   <div class="equation"><span class="eq-main"><span class="v">k</span><sup>*</sup> = argmax<sub><span class="v">k</span></sub>(<span class="v">s</span><sub><span class="v">k</span></sub>), with <span class="v">y</span><sub>hat</sub> = [<span class="v">s</span><sub>1</sub>, <span class="v">s</span><sub>2</sub>, ..., <span class="v">s</span><sub><span class="v">K</span></sub>]</span><span class="eq-no">(4B.1)</span></div>
-                  In the current implementation, the heuristic preset receives a small fixed score bonus before selection (<code>+0.01</code>), while learned bias remains mode-specific and persistent.
+                  In the current implementation, the heuristic preset receives a small fixed score bonus before selection (<code>+0.002</code>), while learned bias remains mode-specific and persistent.
                   Meaning: <code>argmax</code> means "pick the index of the largest value". <code>yhat</code> is the model score vector, <code>s_k</code> is the score of preset <code>k</code>, and <code>k*</code> is the selected preset index.
                   Example: if <code>yhat = [0.12, 0.41, 0.33, 0.14]</code>, then <code>k* = 2</code> because <code>0.41</code> is the largest score.
                 </li>
@@ -1121,7 +1126,34 @@
           <section id="chapter-8b" class="chapter">
             <div class="chapter-head">Chapter 8B - Model Selection Rationale and Next Trial Path</div>
             <div class="chapter-body">
-              <h3>8B.1 Why the current selector is used in this phase</h3>
+              <h3>8B.1 Selector Strategies (Current Implementation)</h3>
+              <p>
+                Two independent selector strategies are available in Core AI optimization. They are switchable from
+                frontend config and do not fallback into each other.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Strategy key</th>
+                    <th>Behavior</th>
+                    <th>State location</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>preset_bias</code></td>
+                    <td>Discrete preset selection over conservative/balanced/geometry_fast/appearance_fast.</td>
+                    <td><code>models/input_mode_selector/selector_model.json</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>continuous_bandit_linear</code></td>
+                    <td>Continuous bounded multiplier sampling and online mean updates from run reward.</td>
+                    <td><code>models/input_mode_selector_continuous/selector_model.json</code></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h3>8B.2 Why the preset-bias selector remains useful</h3>
               <p>
                 The current phase uses a lightweight preset selector with mode-level bias updates because the dataset size
                 is intentionally small (8 to 10 projects, target 10) and diversity-constrained.
@@ -1134,7 +1166,7 @@
                 <li>Policy alignment: the action space is discrete and small (preset selection), which fits lightweight policy updates.</li>
               </ul>
 
-              <h3>8B.2 Why a larger deep model is not preferred yet</h3>
+              <h3>8B.3 Why a larger deep model is not preferred yet</h3>
               <p>
                 Deep models such as MLPs usually require substantially more independent projects to generalize reliably.
                 With the current cap, deep models would likely increase variance and instability without a clear gain in
@@ -1146,29 +1178,30 @@
                 <li>Higher implementation and monitoring overhead for this project stage.</li>
               </ul>
 
-              <h3>8B.3 Recommended next trial model</h3>
+              <h3>8B.4 Continuous bandit details</h3>
               <p>
-                The recommended next trial is a regularized contextual bandit for preset selection,
-                using linear Thompson Sampling or linear UCB.
-                This keeps the same preset actions while improving context-aware exploration and uncertainty handling.
+                The continuous strategy predicts bounded multipliers per run (instead of selecting a hard-coded preset table).
+                Multipliers are sampled around learned means, applied to initial parameters, then updated online using
+                reward against baseline-relative scoring.
               </p>
               <ul>
-                <li>Action space remains unchanged: <code>conservative</code>, <code>balanced</code>, <code>geometry_fast</code>, <code>appearance_fast</code>.</li>
-                <li>Context remains unchanged: current feature stack from EXIF, flight-plan inference, and optional external signals.</li>
-                <li>Decision quality improves through confidence-aware exploration instead of fixed-bias-only scoring.</li>
+                <li>Core LR multiplier bounds: <code>[0.5, 1.5]</code> for feature/position/scaling/opacity/rotation.</li>
+                <li>Control multiplier bounds: <code>[0.7, 1.3]</code> for tune interval, tune min improvement, densify/opacity thresholds, and lambda DSSIM.</li>
+                <li>Exploration standard deviation decays with run count and is clamped to <code>[0.03, 0.18]</code>.</li>
+                <li>Final parameter values are clamped by absolute safety ranges after multiplier application.</li>
               </ul>
 
-              <h3>8B.4 Trial guardrails</h3>
+              <h3>8B.5 Trial guardrails</h3>
               <ul>
-                <li>Keep existing selector as fallback policy.</li>
-                <li>Apply confidence gating: if uncertainty is high, default to <code>balanced</code>.</li>
+                <li>Use one strategy per run; avoid mixed-strategy fallback in a single run.</li>
+                <li>Keep safety clamps and bounded multiplier ranges enabled at all times.</li>
                 <li>Evaluate on the same project-level final test split to preserve comparability.</li>
                 <li>Promote only if quality/time composite score improves without increased instability.</li>
               </ul>
 
               <div class="tip">
-                Current conclusion for this phase: the existing lightweight selector is the safest production choice,
-                while a regularized contextual bandit is the highest-value next trial before any deep-model transition.
+                Current conclusion for this phase: preset-bias and continuous bandit are both valid for experiments.
+                Continuous strategy provides dynamic values now, while deep-model transitions should wait for larger and more diverse data.
               </div>
             </div>
           </section>
