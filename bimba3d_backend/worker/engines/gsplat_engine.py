@@ -1574,6 +1574,7 @@ def run_training(
 
     start_model_mode = str(p.get("start_model_mode") or "scratch").strip().lower()
     source_model_id = str(p.get("source_model_id") or "").strip()
+    source_model_name = str(p.get("source_model_name") or "").strip()
     source_model_checkpoint = str(p.get("source_model_checkpoint") or "").strip()
     if start_model_mode == "reuse" and source_model_checkpoint:
         try:
@@ -1592,12 +1593,17 @@ def run_training(
                 progress=55,
                 stage="training",
                 stage_progress=2,
-                message=f"Loaded reusable model '{source_model_id or 'selected-model'}' for warm-start.",
+                message=(
+                    f"Loaded reusable model '{source_model_name}' for warm-start."
+                    if source_model_name
+                    else f"Loaded reusable model '{source_model_id or 'selected-model'}' for warm-start."
+                ),
             )
             logger.info(
-                "Warm-started gsplat from reusable model checkpoint %s (model_id=%s)",
+                "Warm-started gsplat from reusable model checkpoint %s (model_id=%s, model_name=%s)",
                 source_model_checkpoint,
                 source_model_id or "<unknown>",
+                source_model_name or "<unknown>",
             )
         except Exception as exc:
             msg = f"Failed to load reusable model checkpoint: {exc}"

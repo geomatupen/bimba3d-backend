@@ -2646,6 +2646,8 @@ def _run_warmup_experiment(project_id: str, requested_params: dict) -> None:
     try:
         seed_params, base_session_id = _build_warmup_seed_params(project_dir, requested_params)
         previous_success_run_id: str | None = None
+        warmup_successful_run_ids: list[str] = []
+        warmup_final_run_id: str | None = None
         if str(seed_params.get("start_model_mode") or "").strip().lower() == "reuse":
             previous_success_run_id = str(seed_params.get("source_run_id") or "").strip() or None
 
@@ -2704,12 +2706,41 @@ def _run_warmup_experiment(project_id: str, requested_params: dict) -> None:
 
             lineage = _read_batch_lineage(project_dir)
             final_run_id = str((lineage or {}).get("final_run_id") or "").strip()
+            phase_success_ids = [
+                str(item).strip()
+                for item in ((lineage or {}).get("successful_run_ids") if isinstance((lineage or {}).get("successful_run_ids"), list) else [])
+                if str(item).strip()
+            ]
+            for candidate in phase_success_ids:
+                if candidate not in warmup_successful_run_ids:
+                    warmup_successful_run_ids.append(candidate)
             if final_run_id:
                 previous_success_run_id = final_run_id
+                warmup_final_run_id = final_run_id
 
             phase_status = status.get_status(project_id)
             if str(phase_status.get("status") or "") in {"failed", "stopped"}:
                 break
+
+        if warmup_final_run_id:
+            try:
+                _write_batch_lineage(
+                    project_dir,
+                    {
+                        "project_id": project_id,
+                        "captured_at": datetime.utcnow().isoformat() + "Z",
+                        "batch_connect_runs": bool(seed_params.get("batch_connect_runs", True)),
+                        "run_count_requested": int(sum(int(p.get("runs") or 0) for p in warmup_plan)),
+                        "start_index": 1,
+                        "completed_count": int(len(warmup_successful_run_ids)),
+                        "successful_run_ids": warmup_successful_run_ids,
+                        "final_run_id": warmup_final_run_id,
+                        "kind": "warmup",
+                        "phase_count": int(len(warmup_plan)),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist warmup lineage manifest for %s: %s", project_id, exc)
 
         latest = status.get_status(project_id)
         latest_state = str(latest.get("status") or "pending")
@@ -3410,22 +3441,11 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
                     source_model_id = _resolve_source_model_id_from_run_ancestry(project_dir, run_id)
 
         parent_model_record = model_registry.resolve_reusable_model(source_model_id or "") if source_model_id else None
-        is_inplace_update = bool(parent_model_record and source_model_id)
-
-        if is_inplace_update:
-            model_id = str(parent_model_record.get("model_id") or source_model_id)
-            existing_paths = parent_model_record.get("paths") if isinstance(parent_model_record.get("paths"), dict) else {}
-            model_dir_raw = existing_paths.get("model_dir") if isinstance(existing_paths, dict) else None
-            model_dir = Path(str(model_dir_raw)).expanduser() if model_dir_raw else (model_registry.MODELS_DIR / model_id)
-            model_dir.mkdir(parents=True, exist_ok=True)
-            model_name = requested_model_name or str(parent_model_record.get("model_name") or "").strip() or run_id
-            created_at = str(parent_model_record.get("created_at") or "").strip() or model_registry.utc_now_iso()
-        else:
-            model_name = requested_model_name or run_id
-            model_id = model_registry.build_model_id(model_name)
-            model_dir = model_registry.MODELS_DIR / model_id
-            model_dir.mkdir(parents=True, exist_ok=False)
-            created_at = model_registry.utc_now_iso()
+        model_name = requested_model_name or run_id
+        model_id = model_registry.build_model_id(model_name)
+        model_dir = model_registry.MODELS_DIR / model_id
+        model_dir.mkdir(parents=True, exist_ok=False)
+        created_at = model_registry.utc_now_iso()
 
         captured_at = model_registry.utc_now_iso()
         target_ckpt = model_dir / "source_checkpoint.pt"
@@ -3437,8 +3457,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
             except Exception as exc:
                 logger.warning("Failed to copy metadata for elevated model %s: %s", model_id, exc)
 
-        if not is_inplace_update:
-            model_registry.import_parent_configs_into_model(parent_model_record, model_dir)
+        model_registry.import_parent_configs_into_model(parent_model_record, model_dir)
         parent_contributors = model_registry.load_parent_lineage_contributors(parent_model_record)
         current_contributor = model_registry.snapshot_contributor_configs(
             model_dir=model_dir,
@@ -3483,7 +3502,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
         lineage_doc = model_registry.write_lineage(
             model_dir=model_dir,
             model_id=model_id,
-            source_model_id=(None if is_inplace_update else source_model_id),
+            source_model_id=source_model_id,
             contributors=[*parent_contributors, *batch_contributors, current_contributor],
             captured_at=captured_at,
         )
@@ -3511,17 +3530,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
         }
 
         records = model_registry.load_models_index()
-        if is_inplace_update:
-            replaced = False
-            for idx, item in enumerate(records):
-                if str(item.get("model_id") or "") == model_id:
-                    records[idx] = model_record
-                    replaced = True
-                    break
-            if not replaced:
-                records.append(model_record)
-        else:
-            records.append(model_record)
+        records.append(model_record)
         model_registry.save_models_index(records)
 
         model_registry.write_json_atomic(model_dir / "model.json", model_record)
@@ -3867,6 +3876,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 model_record = model_registry.resolve_reusable_model(source_model_id)
                 if not isinstance(model_record, dict):
                     raise HTTPException(status_code=404, detail="Reusable model not found")
+                source_model_name = str(model_record.get("model_name") or "").strip()
 
                 if is_session_test:
                     inherited_test_profile = model_registry.resolve_model_ai_profile(model_record)
@@ -3879,9 +3889,13 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                 if not checkpoint_path.exists():
                     raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
                 params_payload["source_model_id"] = source_model_id
+                if source_model_name:
+                    params_payload["source_model_name"] = source_model_name
+                else:
+                    params_payload.pop("source_model_name", None)
                 params_payload.pop("source_run_id", None)
                 if not project_model_name:
-                    project_model_name = str(model_record.get("model_name") or "").strip() or None
+                    project_model_name = source_model_name or None
             else:
                 source_run_dir = project_dir / "runs" / source_run_id
                 if not source_run_dir.exists() or not source_run_dir.is_dir():
@@ -3891,6 +3905,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                     raise HTTPException(status_code=400, detail="Source run has no gsplat checkpoint")
                 params_payload["source_run_id"] = source_run_id
                 params_payload.pop("source_model_id", None)
+                params_payload.pop("source_model_name", None)
 
                 source_series_key, source_series_name = _resolve_project_model_metadata_from_run(project_dir, source_run_id)
                 if not project_model_key and source_series_key:

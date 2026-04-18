@@ -672,6 +672,12 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
         return false;
       }
 
+      // In test mode, allow both selector families for the chosen EXIF mode.
+      // This lets users compare preset-bias and continuous-bandit models side by side.
+      if (isSessionTestMode) {
+        return true;
+      }
+
       if (!aiSelectorStrategy) {
         return true;
       }
@@ -682,6 +688,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     showCoreAiSessionControls,
     reusableModels,
     hasAiInputModeFlow,
+    isSessionTestMode,
     aiInputMode,
     aiSelectorStrategy,
   ]);

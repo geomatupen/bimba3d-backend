@@ -136,6 +136,16 @@
       </ul>
       <p class="muted">Best practice used here: binary checkpoints for weights, JSON for metadata and traceability.</p>
     </div>
+
+    <div class="card">
+      <h2>Quality Metrics in Training Reports</h2>
+      <ul>
+        <li><strong>PSNR</strong> (Peak Signal-to-Noise Ratio): pixel-level fidelity metric derived from reconstruction error. Higher is better.</li>
+        <li><strong>SSIM</strong> (Structural Similarity): compares structure, contrast, and luminance similarity. Usually in [0, 1], and higher is better.</li>
+        <li><strong>LPIPS</strong> (Learned Perceptual Image Patch Similarity): deep-feature perceptual distance. Lower is better.</li>
+      </ul>
+      <p class="muted">Use all three together: PSNR captures numeric closeness, SSIM captures structural consistency, and LPIPS captures perceptual similarity.</p>
+    </div>
   </div>
 </body>
 </html>
