@@ -109,6 +109,14 @@ def _normalize_series(values: list[float], invert: bool = False) -> list[float]:
     return out
 
 
+def _step_value_with_neighbors(values: dict[int, float], step: int) -> float | None:
+    for candidate in (step, step + 1, step - 1):
+        value = values.get(int(candidate))
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
 def update_from_run(
     *,
     project_dir: Path,
@@ -145,8 +153,44 @@ def update_from_run(
     psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in eval_rows]
     ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in eval_rows]
     lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in eval_rows]
-    loss_vals = [float(loss_by_step.get(int(r["step"]), r.get("final_loss") or 0.0) or 0.0) for r in eval_rows]
-    elapsed_vals = [float(elapsed_by_step.get(int(r["step"]), r.get("elapsed_seconds") or 0.0) or 0.0) for r in eval_rows]
+
+    loss_by_step_num = {
+        int(k): float(v)
+        for k, v in (loss_by_step or {}).items()
+        if isinstance(k, int) and isinstance(v, (int, float))
+    }
+    elapsed_by_step_num = {
+        int(k): float(v)
+        for k, v in (elapsed_by_step or {}).items()
+        if isinstance(k, int) and isinstance(v, (int, float))
+    }
+    eval_loss_by_step = {
+        int(r.get("step")): float(r.get("final_loss"))
+        for r in eval_rows
+        if isinstance(r, dict)
+        and isinstance(r.get("step"), (int, float))
+        and isinstance(r.get("final_loss"), (int, float))
+    }
+    eval_elapsed_by_step = {
+        int(r.get("step")): float(r.get("elapsed_seconds"))
+        for r in eval_rows
+        if isinstance(r, dict)
+        and isinstance(r.get("step"), (int, float))
+        and isinstance(r.get("elapsed_seconds"), (int, float))
+    }
+
+    loss_vals: list[float] = []
+    elapsed_vals: list[float] = []
+    for row in eval_rows:
+        step = int(row.get("step", 0) or 0)
+        loss_value = _step_value_with_neighbors(loss_by_step_num, step)
+        if loss_value is None:
+            loss_value = _step_value_with_neighbors(eval_loss_by_step, step)
+        elapsed_value = _step_value_with_neighbors(elapsed_by_step_num, step)
+        if elapsed_value is None:
+            elapsed_value = _step_value_with_neighbors(eval_elapsed_by_step, step)
+        loss_vals.append(float(loss_value) if isinstance(loss_value, (int, float)) else 0.0)
+        elapsed_vals.append(float(elapsed_value) if isinstance(elapsed_value, (int, float)) else 0.0)
 
     baseline_rows: list[dict[str, Any]] = []
     if isinstance(baseline_eval_history, list):
@@ -166,8 +210,24 @@ def update_from_run(
         b_psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in baseline_rows]
         b_ssim_vals = [float(r.get("sharpness_mean", 0.0) or 0.0) for r in baseline_rows]
         b_lpips_vals = [float(r.get("lpips_mean", 0.0) or 0.0) for r in baseline_rows]
-        b_loss_vals = [float(r.get("final_loss") or 0.0) for r in baseline_rows]
-        b_elapsed_vals = [float(r.get("elapsed_seconds") or 0.0) for r in baseline_rows]
+        baseline_loss_by_step = {
+            int(r.get("step")): float(r.get("final_loss"))
+            for r in baseline_rows
+            if isinstance(r.get("step"), (int, float)) and isinstance(r.get("final_loss"), (int, float))
+        }
+        baseline_elapsed_by_step = {
+            int(r.get("step")): float(r.get("elapsed_seconds"))
+            for r in baseline_rows
+            if isinstance(r.get("step"), (int, float)) and isinstance(r.get("elapsed_seconds"), (int, float))
+        }
+        b_loss_vals = [
+            float(_step_value_with_neighbors(baseline_loss_by_step, int(r.get("step", 0) or 0)) or 0.0)
+            for r in baseline_rows
+        ]
+        b_elapsed_vals = [
+            float(_step_value_with_neighbors(baseline_elapsed_by_step, int(r.get("step", 0) or 0)) or 0.0)
+            for r in baseline_rows
+        ]
 
     # IMPORTANT: Normalize run and baseline on a shared min/max reference frame.
     #
