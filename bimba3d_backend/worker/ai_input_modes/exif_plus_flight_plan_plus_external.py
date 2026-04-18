@@ -93,7 +93,7 @@ def build_preset(ctx: ModeContext) -> PresetResult:
     features = dict(base.features)
     notes = list(base.notes)
 
-    img_files = _iter_images(ctx.image_dir)
+    img_files = _iter_images(ctx.processing_image_dir)
     metrics = []
     for path in img_files:
         try:

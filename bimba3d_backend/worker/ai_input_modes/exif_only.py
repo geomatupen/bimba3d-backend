@@ -46,6 +46,21 @@ def _iter_images(image_dir: Path) -> list[Path]:
     return files
 
 
+def _collect_processing_sizes(image_dir: Path, limit: int) -> tuple[list[int], list[int]]:
+    widths: list[int] = []
+    heights: list[int] = []
+    files = _iter_images(image_dir)
+    for path in files[: min(limit, len(files))]:
+        try:
+            with Image.open(path) as img:
+                w, h = img.size
+        except Exception:
+            continue
+        widths.append(int(w))
+        heights.append(int(h))
+    return widths, heights
+
+
 def _read_exif(path: Path) -> tuple[dict[str, Any], int, int]:
     with Image.open(path) as img:
         width, height = img.size
@@ -234,7 +249,7 @@ def _angle_bucket(exif: dict[str, Any]) -> str:
 
 
 def build_preset(ctx: ModeContext) -> PresetResult:
-    files = _iter_images(ctx.image_dir)
+    files = _iter_images(ctx.metadata_image_dir)
     sample = files[: min(24, len(files))]
 
     widths: list[int] = []
@@ -257,9 +272,6 @@ def build_preset(ctx: ModeContext) -> PresetResult:
             exif, width, height = _read_exif(path)
         except Exception:
             continue
-        widths.append(int(width))
-        heights.append(int(height))
-
         make = str(exif.get("Make") or "").strip()
         model = str(exif.get("Model") or "").strip()
         lens = str(exif.get("LensModel") or "").strip()
@@ -302,6 +314,8 @@ def build_preset(ctx: ModeContext) -> PresetResult:
     med_exposure = float(median(exposure_times)) if exposure_times else 0.004
     med_iso = float(median(iso_values)) if iso_values else 100.0
     low_light_index = med_exposure * (med_iso / 100.0)
+
+    widths, heights = _collect_processing_sizes(ctx.processing_image_dir, limit=24)
 
     orientations: list[str] = []
     for path in sample:

@@ -61,6 +61,13 @@ def _image_fingerprint(image_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def _combined_image_fingerprint(metadata_image_dir: Path, processing_image_dir: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(_image_fingerprint(metadata_image_dir).encode("utf-8"))
+    digest.update(_image_fingerprint(processing_image_dir).encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _load_feature_cache(project_dir: Path, mode: str, fingerprint: str) -> dict[str, Any] | None:
     cache_path = _feature_cache_path(project_dir, mode)
     if not cache_path.exists():
@@ -116,57 +123,10 @@ def _build_feature_log_details(mode: str, features: dict[str, Any], image_count:
         "image_count": int(image_count),
     }
 
-    exif_fields = [
-        "camera_make",
-        "camera_model",
-        "focal_length_mm",
-        "focal_missing",
-        "aperture_f",
-        "aperture_missing",
-        "iso",
-        "iso_missing",
-        "gps_missing",
-        "timestamp_mode",
-        "timestamp_missing",
-        "img_width_median",
-        "img_height_median",
-        "img_size_missing",
-    ]
-    for key in exif_fields:
-        if key in features:
-            details[key] = features.get(key)
-
-    if mode in {"exif_plus_flight_plan", "exif_plus_flight_plan_plus_external"}:
-        flight_fields = [
-            "flight_type",
-            "flight_type_missing",
-            "heading_consistency",
-            "heading_missing",
-            "coverage_spread",
-            "coverage_missing",
-            "overlap_proxy",
-            "overlap_missing",
-            "camera_angle_profile",
-            "angle_profile_missing",
-        ]
-        for key in flight_fields:
-            if key in features:
-                details[key] = features.get(key)
-
-    if mode == "exif_plus_flight_plan_plus_external":
-        external_fields = [
-            "vegetation_cover_percentage",
-            "green_area_missing",
-            "terrain_roughness_proxy",
-            "roughness_missing",
-            "texture_density",
-            "texture_missing",
-            "blur_motion_risk",
-            "blur_missing",
-        ]
-        for key in external_fields:
-            if key in features:
-                details[key] = features.get(key)
+    # Emit the complete extracted feature set (including *_missing flags) so
+    # telemetry UIs can render one row per parameter with status tags.
+    for key in sorted(features.keys()):
+        details[key] = features.get(key)
 
     return details
 
@@ -232,8 +192,15 @@ def apply_initial_preset(
         if original_dir.exists() and original_dir.is_dir():
             metadata_image_dir = original_dir
 
-    ctx = ModeContext(image_dir=metadata_image_dir, colmap_dir=Path(colmap_dir), params=params)
-    fingerprint = _image_fingerprint(metadata_image_dir)
+    processing_image_dir = image_dir_path
+
+    ctx = ModeContext(
+        metadata_image_dir=metadata_image_dir,
+        processing_image_dir=processing_image_dir,
+        colmap_dir=Path(colmap_dir),
+        params=params,
+    )
+    fingerprint = _combined_image_fingerprint(metadata_image_dir, processing_image_dir)
     cached = _load_feature_cache(project_dir, mode, fingerprint)
     cache_used = cached is not None
 
@@ -293,7 +260,7 @@ def apply_initial_preset(
             continue
         params[key] = value
 
-    feature_details = _build_feature_log_details(mode, result_features, _count_supported_images(Path(image_dir)))
+    feature_details = _build_feature_log_details(mode, result_features, _count_supported_images(processing_image_dir))
     logger.info(
         "AI_INPUT_MODE_FEATURES mode=%s details=%s",
         mode,

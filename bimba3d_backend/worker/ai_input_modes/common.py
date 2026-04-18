@@ -7,7 +7,8 @@ from typing import Any
 
 @dataclass
 class ModeContext:
-    image_dir: Path
+    metadata_image_dir: Path
+    processing_image_dir: Path
     colmap_dir: Path
     params: dict[str, Any]
 

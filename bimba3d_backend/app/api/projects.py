@@ -131,6 +131,43 @@ EXIF_ONLY_INPUT_X_KEYS = {
     "img_size_missing",
 }
 
+PROCESSED_DIMENSION_FEATURE_KEYS = {
+    "img_width_median",
+    "img_height_median",
+    "img_size_missing",
+    "image_count",
+}
+
+PROCESSED_PIXEL_FEATURE_KEYS = {
+    "vegetation_cover_percentage",
+    "green_area_missing",
+    "vegetation_complexity_score",
+    "veg_complexity_missing",
+    "terrain_roughness_proxy",
+    "roughness_missing",
+    "texture_density",
+    "texture_missing",
+    "blur_motion_risk",
+    "blur_missing",
+}
+
+
+def _infer_feature_sources(features: dict[str, Any]) -> dict[str, str]:
+    sources: dict[str, str] = {}
+    if not isinstance(features, dict):
+        return sources
+
+    for key in features.keys():
+        if not isinstance(key, str):
+            continue
+        if key in PROCESSED_DIMENSION_FEATURE_KEYS:
+            sources[key] = "processed_dimensions"
+        elif key in PROCESSED_PIXEL_FEATURE_KEYS:
+            sources[key] = "processed_pixels"
+        else:
+            sources[key] = "original_metadata"
+    return sources
+
 SELECTOR_OWNED_LEARNED_KEYS = [
     "feature_lr",
     "position_lr_init",
@@ -1271,12 +1308,21 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
 
     if not features_details and cache_features:
         features_details = dict(cache_features)
+    elif features_details and cache_features:
+        # Legacy logs can include a subset of feature keys.
+        # Fill any missing keys from cache so UI can display the full parameter set.
+        for key, value in cache_features.items():
+            if not isinstance(key, str):
+                continue
+            if key not in features_details or features_details.get(key) is None:
+                features_details[key] = value
 
     missing_flags = {
         key: value
         for key, value in features_details.items()
         if isinstance(key, str) and key.endswith("_missing")
     }
+    feature_sources = _infer_feature_sources(features_details)
 
     reward_label = "unknown"
     if reward_positive is True:
@@ -1292,6 +1338,7 @@ def _extract_ai_run_insights(run_dir: Path | None, run_config: dict | None) -> d
         "cache_used": cache_used,
         "initial_params": initial_params,
         "feature_details": features_details,
+        "feature_sources": feature_sources,
         "missing_flags": missing_flags,
         "reward": reward_value,
         "reward_positive": reward_positive,
@@ -1417,6 +1464,33 @@ def _ensure_analytics_ai_initial_params(
                     if not isinstance(insight.get("feature_source"), str) or not str(insight.get("feature_source")).strip():
                         insight["feature_source"] = "cache"
                     changed = True
+    else:
+        # Ensure legacy analytics entries are enriched with any missing feature keys
+        # (not only missing flags), so the full feature table is visible in UI.
+        log_insights = _extract_ai_run_insights(run_dir, run_config)
+        log_features = (
+            log_insights.get("feature_details")
+            if isinstance(log_insights, dict) and isinstance(log_insights.get("feature_details"), dict)
+            else {}
+        )
+        if log_features:
+            merged_features = dict(existing_features)
+            merged = False
+            for key, value in log_features.items():
+                if not isinstance(key, str):
+                    continue
+                if key not in merged_features or merged_features.get(key) is None:
+                    merged_features[key] = value
+                    merged = True
+            if merged:
+                insight["feature_details"] = merged_features
+                changed = True
+
+    feature_details = insight.get("feature_details") if isinstance(insight.get("feature_details"), dict) else {}
+    existing_sources = insight.get("feature_sources") if isinstance(insight.get("feature_sources"), dict) else {}
+    if feature_details and not existing_sources:
+        insight["feature_sources"] = _infer_feature_sources(feature_details)
+        changed = True
 
     if changed:
         try:
@@ -4395,9 +4469,69 @@ def get_project_telemetry(
             eval_rows_from_json = [eval_map[step] for step in sorted(eval_map.keys())]
             return training_rows_from_json, eval_rows_from_json
 
-        training_rows_json, eval_rows_json = _telemetry_rows_from_analytics(run_analytics)
+        training_rows_json, analytics_eval_rows = _telemetry_rows_from_analytics(run_analytics)
+
+        # Root-cause fix: eval metrics are generated live in run artifacts during training,
+        # while analytics may lag or only be fully materialized after run completion.
+        # Use live eval artifacts as primary source for the full-log modal.
+        eval_rows_json = _extract_eval_rows(
+            run_dir / "outputs" / "engines" / "gsplat" / "stats",
+            eval_limit=max(2000, eval_limit * 20),
+        )
+        if not eval_rows_json:
+            eval_history = _read_json_if_exists(run_dir / "outputs" / "engines" / "gsplat" / "eval_history.json")
+            if isinstance(eval_history, list):
+                history_rows: list[dict[str, Any]] = []
+                for item in eval_history:
+                    if not isinstance(item, dict):
+                        continue
+                    step = item.get("step")
+                    if not isinstance(step, (int, float)):
+                        continue
+                    history_rows.append(
+                        {
+                            "step": int(step),
+                            "psnr": item.get("convergence_speed"),
+                            "lpips": item.get("lpips_mean"),
+                            "ssim": item.get("sharpness_mean"),
+                            "num_gaussians": item.get("num_gaussians"),
+                        }
+                    )
+                eval_rows_json = sorted(history_rows, key=lambda r: int(r.get("step", 0)))
+        if not eval_rows_json:
+            eval_rows_json = analytics_eval_rows
 
         text_lines = _read_text_lines(run_log_path, max_lines=log_limit, from_start=bool(from_start))
+        training_rows_log = _extract_training_rows(
+            text_lines,
+            row_limit=max(log_limit, 1000),
+            from_start=bool(from_start),
+        )
+        if training_rows_json:
+            log_by_step: dict[int, dict[str, Any]] = {}
+            for row in training_rows_log:
+                step_value = row.get("step")
+                if isinstance(step_value, int):
+                    # Keep first-seen row so ordering respects from_start source selection.
+                    log_by_step.setdefault(step_value, row)
+
+            enriched_rows: list[dict[str, Any]] = []
+            for row in training_rows_json:
+                if not isinstance(row, dict):
+                    continue
+                merged = dict(row)
+                step_value = merged.get("step")
+                log_row = log_by_step.get(step_value) if isinstance(step_value, int) else None
+                if isinstance(log_row, dict):
+                    for field in ("timestamp", "max_steps", "elapsed_seconds", "eta", "speed"):
+                        value = log_row.get(field)
+                        if value is not None:
+                            merged[field] = value
+                enriched_rows.append(merged)
+            training_rows_json = enriched_rows
+        elif training_rows_log:
+            training_rows_json = training_rows_log
+
         event_rows = _extract_event_rows(text_lines, row_limit=max(10, min(100, log_limit)))
 
         training_rows = _slice_rows(training_rows_json, log_limit, bool(from_start))
@@ -4459,12 +4593,20 @@ def get_project_telemetry(
 
                 ai_mode = str(canonical_ai.get("ai_input_mode") or "").strip().lower()
                 raw_features = canonical_ai.get("feature_details") if isinstance(canonical_ai.get("feature_details"), dict) else {}
+                raw_feature_sources = canonical_ai.get("feature_sources") if isinstance(canonical_ai.get("feature_sources"), dict) else _infer_feature_sources(raw_features)
                 if ai_mode == "exif_only":
                     normalized_ai["feature_details"] = {
                         key: raw_features.get(key)
                         for key in EXIF_ONLY_INPUT_X_KEYS
                         if key in raw_features
                     }
+                    normalized_ai["feature_sources"] = {
+                        key: raw_feature_sources.get(key)
+                        for key in EXIF_ONLY_INPUT_X_KEYS
+                        if key in raw_feature_sources
+                    }
+                else:
+                    normalized_ai["feature_sources"] = raw_feature_sources
                 ai_insights = normalized_ai
 
         project_base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None

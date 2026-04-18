@@ -111,6 +111,7 @@ interface TelemetryPayload {
     feature_source?: string | null;
     initial_params?: Record<string, unknown>;
     feature_details?: Record<string, unknown>;
+    feature_sources?: Record<string, unknown>;
     missing_flags?: Record<string, unknown>;
     learn_snapshot?: Record<string, unknown>;
   } | null;
@@ -307,6 +308,17 @@ const featureMissingFlagKey = (key: string): string | null => {
     img_orientation: "orientation_missing",
     img_width_median: "img_size_missing",
     img_height_median: "img_size_missing",
+    flight_type: "flight_type_missing",
+    camera_angle_profile: "angle_profile_missing",
+    average_altitude: "altitude_missing",
+    heading_consistency: "heading_missing",
+    coverage_spread: "coverage_missing",
+    overlap_proxy: "overlap_missing",
+    vegetation_cover_percentage: "green_area_missing",
+    vegetation_complexity_score: "veg_complexity_missing",
+    terrain_roughness_proxy: "roughness_missing",
+    texture_density: "texture_missing",
+    blur_motion_risk: "blur_missing",
   };
   return directMap[key] || null;
 };
@@ -317,9 +329,22 @@ interface TelemetryFeatureRow {
   key: string;
   value: unknown;
   status: FeatureStatus;
+  source: string;
 }
 
-const buildTelemetryFeatureRows = (features: Record<string, unknown> | null | undefined): TelemetryFeatureRow[] => {
+const formatFeatureSourceLabel = (source: unknown): string => {
+  const token = String(source || "").trim().toLowerCase();
+  if (token === "original_metadata") return "Original metadata";
+  if (token === "processed_dimensions") return "Processed dimensions";
+  if (token === "processed_pixels") return "Processed pixels";
+  return "Unknown";
+};
+
+const buildTelemetryFeatureRows = (
+  features: Record<string, unknown> | null | undefined,
+  missingFlags?: Record<string, unknown> | null,
+  featureSources?: Record<string, unknown> | null,
+): TelemetryFeatureRow[] => {
   if (!features || typeof features !== "object") {
     return [];
   }
@@ -328,9 +353,11 @@ const buildTelemetryFeatureRows = (features: Record<string, unknown> | null | un
     .filter(([key]) => !isMissingFlagField(key))
     .map(([key, value]) => {
       const missingKey = featureMissingFlagKey(key);
-      const missingValue = missingKey ? parseMissingFlag(features[missingKey]) : null;
+      const missingRaw = missingKey ? (features[missingKey] ?? missingFlags?.[missingKey]) : null;
+      const missingValue = parseMissingFlag(missingRaw);
       const status: FeatureStatus = missingValue === true ? "defaulted" : missingValue === false ? "present" : "unknown";
-      return { key, value, status };
+      const source = formatFeatureSourceLabel(featureSources?.[key]);
+      return { key, value, status, source };
     });
 };
 
@@ -4829,15 +4856,24 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                               <th className="text-left px-3 py-2">Feature</th>
                               <th className="text-left px-3 py-2">Value</th>
                               <th className="text-left px-3 py-2">Status</th>
+                              <th className="text-left px-3 py-2">Source</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {buildTelemetryFeatureRows((telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>).length === 0 ? (
+                            {buildTelemetryFeatureRows(
+                              (telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>,
+                              (telemetryData.ai_insights.missing_flags || {}) as Record<string, unknown>,
+                              (telemetryData.ai_insights.feature_sources || {}) as Record<string, unknown>,
+                            ).length === 0 ? (
                               <tr>
-                                <td className="px-3 py-2 text-slate-500" colSpan={3}>No extracted feature details captured.</td>
+                                <td className="px-3 py-2 text-slate-500" colSpan={4}>No extracted feature details captured.</td>
                               </tr>
                             ) : (
-                              buildTelemetryFeatureRows((telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>).map((row) => (
+                              buildTelemetryFeatureRows(
+                                (telemetryData.ai_insights.feature_details || {}) as Record<string, unknown>,
+                                (telemetryData.ai_insights.missing_flags || {}) as Record<string, unknown>,
+                                (telemetryData.ai_insights.feature_sources || {}) as Record<string, unknown>,
+                              ).map((row) => (
                                 <tr key={`ai-feature-${row.key}`} className="border-t border-slate-100">
                                   <td className="px-3 py-2 text-slate-700">{formatTelemetryFieldLabel(row.key)}</td>
                                   <td className="px-3 py-2 text-slate-900">{formatTelemetryScalar(row.value)}</td>
@@ -4856,6 +4892,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                       </span>
                                     )}
                                   </td>
+                                  <td className="px-3 py-2 text-slate-700">{row.source}</td>
                                 </tr>
                               ))
                             )}

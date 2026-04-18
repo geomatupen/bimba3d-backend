@@ -101,7 +101,7 @@ def build_preset(ctx: ModeContext) -> PresetResult:
     angle_missing = int(features.get("angle_missing", 1) or 1)
     timestamp_missing = int(features.get("timestamp_missing", 1) or 1)
 
-    images = _iter_images(ctx.image_dir)
+    images = _iter_images(ctx.metadata_image_dir)
     points: list[tuple[float, float]] = []
     altitudes: list[float] = []
     timestamps: list[datetime] = []

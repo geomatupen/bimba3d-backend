@@ -1393,6 +1393,15 @@ def run_training(
             out.append(max_steps)
         return sorted(set(out))
 
+    def _build_eval_steps(interval_value, fallback):
+        # Some upstream trainer builds treat step counters as 0-based and others
+        # as 1-based at eval checkpoints. Include both terminal candidates so the
+        # final eval is not skipped at the end of training.
+        out = _build_steps(interval_value, fallback)
+        if max_steps > 1:
+            out.append(max_steps - 1)
+        return sorted(set(int(s) for s in out if isinstance(s, int) and s >= 1))
+
     strategy = DefaultStrategy(
         verbose=True,
         prune_opa=float(p.get("opacity_threshold", 0.005)),
@@ -1405,7 +1414,7 @@ def run_training(
     )
 
     feature_lr = float(p.get("feature_lr", 2.5e-3))
-    eval_steps = _build_steps(p.get("eval_interval"), [7000, 30000])
+    eval_steps = _build_eval_steps(p.get("eval_interval"), [7000, 30000])
     save_steps = sorted(set(
         _build_steps(checkpoint_interval, [31000])
         + _build_steps(splat_interval, [31000])
