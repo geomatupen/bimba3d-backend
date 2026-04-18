@@ -66,6 +66,7 @@ interface ProjectRunItem {
   run_name?: string | null;
   saved_at?: string | null;
   engine?: string | null;
+  mode?: string | null;
   session_status?: "completed" | "pending" | string;
 }
 
@@ -123,6 +124,7 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
   const [projectRunsLoading, setProjectRunsLoading] = useState<boolean>(false);
   const [projectRunsError, setProjectRunsError] = useState<string | null>(null);
   const [savingRunId, setSavingRunId] = useState<string>("");
+  const [deletingRunId, setDeletingRunId] = useState<string>("");
 
   const [detail, setDetail] = useState<ModelLineageDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState<boolean>(false);
@@ -287,6 +289,8 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
       if ((run.session_status || "").toLowerCase() !== "completed") return false;
       const engine = String(run.engine || "gsplat").toLowerCase();
       if (engine && engine !== "gsplat") return false;
+      const mode = String(run.mode || "").toLowerCase();
+      if (mode === "baseline") return false;
       const key = `${projectId}::${runId}`;
       return !elevatedSourceKeys.has(key);
     });
@@ -427,6 +431,27 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
       setModelActionError(err instanceof Error ? err.message : "Failed to save reusable model");
     } finally {
       setSavingRunId("");
+    }
+  };
+
+  const deleteProjectSession = async (run: ProjectRunItem) => {
+    const runId = String(run.run_id || "").trim();
+    if (!runId || deletingRunId || savingRunId) return;
+
+    const displayName = String(run.run_name || runId).trim() || runId;
+    const confirmed = window.confirm(`Delete session '${displayName}'? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeletingRunId(runId);
+    setModelActionError(null);
+    try {
+      await api.delete(`/projects/${projectId}/runs/${encodeURIComponent(runId)}`);
+      await loadProjectRuns();
+      await loadModels();
+    } catch (err) {
+      setModelActionError(err instanceof Error ? err.message : "Failed to delete session");
+    } finally {
+      setDeletingRunId("");
     }
   };
 
@@ -616,6 +641,7 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
                   <p className="mt-0.5 text-blue-800">
                     Choose a completed gsplat session and click <span className="font-semibold">Save as reusable</span>.
                   </p>
+                  <p className="mt-0.5 text-blue-800">Baseline sessions are hidden here because they are reference-only and not reusable session models.</p>
                 </div>
                 <div className="h-64 overflow-auto rounded-md border border-slate-200 divide-y divide-slate-100 bg-white">
                   {projectRunsLoading ? (
@@ -629,15 +655,26 @@ export default function ModelRegistryTab({ projectId }: ModelRegistryTabProps) {
                           <p className="text-xs font-semibold text-slate-800 truncate">{run.run_name || run.run_id}</p>
                           <p className="text-[11px] text-slate-500 truncate">{run.run_id} • {toLocaleDate(run.saved_at)}</p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => void saveRunAsReusableModel(run)}
-                          disabled={Boolean(savingRunId) || modelActionLoading}
-                          className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border border-blue-300 text-[11px] font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
-                        >
-                          <Upload className="w-3 h-3" />
-                          {savingRunId === run.run_id ? "Saving..." : "Save as reusable"}
-                        </button>
+                        <div className="shrink-0 inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void deleteProjectSession(run)}
+                            disabled={Boolean(savingRunId) || Boolean(deletingRunId) || modelActionLoading}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-rose-300 text-[11px] font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            {deletingRunId === run.run_id ? "Deleting..." : "Delete"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void saveRunAsReusableModel(run)}
+                            disabled={Boolean(savingRunId) || Boolean(deletingRunId) || modelActionLoading}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-blue-300 text-[11px] font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                          >
+                            <Upload className="w-3 h-3" />
+                            {savingRunId === run.run_id ? "Saving..." : "Save as reusable"}
+                          </button>
+                        </div>
                       </div>
                     ))
                   )}

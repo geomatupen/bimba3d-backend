@@ -874,6 +874,74 @@ def _record_project_model_series_run(
     _write_project_model_state(project_dir, state)
 
 
+def _sanitize_project_model_state(project_dir: Path) -> dict:
+    """Remove stale series entries that no longer map to existing runs."""
+    state = _read_project_model_state(project_dir)
+    models = state.get("models") if isinstance(state.get("models"), dict) else {}
+    if not isinstance(models, dict):
+        return state
+
+    runs_root = project_dir / "runs"
+
+    def _run_exists(run_id: str) -> bool:
+        rid = str(run_id or "").strip()
+        if not rid:
+            return False
+        run_dir = runs_root / rid
+        return run_dir.exists() and run_dir.is_dir()
+
+    cleaned_models: dict[str, dict] = {}
+    for raw_key, raw_record in models.items():
+        key = str(raw_key or "").strip()
+        if not key or not isinstance(raw_record, dict):
+            continue
+
+        history_raw = raw_record.get("run_history") if isinstance(raw_record.get("run_history"), list) else []
+        history: list[str] = []
+        for item in history_raw:
+            run_id = str(item or "").strip()
+            if run_id and _run_exists(run_id) and run_id not in history:
+                history.append(run_id)
+
+        last_run_id = str(raw_record.get("last_run_id") or "").strip()
+        if not _run_exists(last_run_id):
+            last_run_id = history[-1] if history else ""
+
+        if not history and not last_run_id:
+            continue
+
+        if last_run_id and last_run_id not in history:
+            history.append(last_run_id)
+
+        cleaned_models[key] = {
+            "project_model_key": key,
+            "project_model_name": str(raw_record.get("project_model_name") or "").strip() or key,
+            "last_run_id": last_run_id,
+            "run_history": history[-100:],
+            "updated_at": str(raw_record.get("updated_at") or "").strip() or (datetime.utcnow().isoformat() + "Z"),
+            "scope": str(raw_record.get("scope") or "project").strip() or "project",
+        }
+
+    active_key = str(state.get("active_project_model_key") or "").strip()
+    if active_key not in cleaned_models:
+        active_key = next(iter(cleaned_models.keys()), "")
+
+    next_state = dict(state)
+    next_state["models"] = cleaned_models
+    if active_key:
+        next_state["active_project_model_key"] = active_key
+        active_name = str((cleaned_models.get(active_key) or {}).get("project_model_name") or "").strip()
+        next_state["active_project_model_name"] = active_name or active_key
+    else:
+        next_state["active_project_model_key"] = ""
+        next_state["active_project_model_name"] = ""
+    next_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    if next_state != state:
+        _write_project_model_state(project_dir, next_state)
+    return next_state
+
+
 def _prune_run_config_history(run_configs_dir: Path, keep: int = RUN_CONFIG_HISTORY_KEEP) -> None:
     """Keep only the most recent versioned run_config snapshots."""
     try:
@@ -4749,6 +4817,10 @@ def list_project_runs(project_id: str):
         runs_root = project_dir / "runs"
         project_status = status.get_status(project_id)
         base_session_id = project_status.get("base_session_id") if isinstance(project_status, dict) else None
+        try:
+            _sanitize_project_model_state(project_dir)
+        except Exception as exc:
+            logger.warning("Failed to sanitize project model state for %s while listing runs: %s", project_id, exc)
         base_colmap_ready = _base_session_colmap_ready(project_dir, base_session_id)
         can_create_session = bool(base_colmap_ready)
         can_create_session_reason = None if can_create_session else "Complete COLMAP on the base session before creating new sessions."
@@ -5458,6 +5530,11 @@ def delete_project_run(project_id: str, run_id: str):
 
         if isinstance(current_status, dict) and current_status.get("current_run_id") == run_id:
             status.update_status(project_id, current_status.get("status", "pending"), current_run_id=None)
+
+        try:
+            _sanitize_project_model_state(project_dir)
+        except Exception as exc:
+            logger.warning("Failed to sanitize project model state after run delete for %s: %s", project_id, exc)
 
         return {"status": "deleted", "run_id": run_id, "base_session_id": new_base_session_id}
     except HTTPException:

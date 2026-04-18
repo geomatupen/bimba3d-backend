@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bimba3D Model Reuse and Checkpoint Reference</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #4b5563;
+      --accent: #0f766e;
+      --line: #d1d5db;
+      --code-bg: #f3f4f6;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 100%);
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 28px 16px 48px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px;
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: 1.7rem;
+      color: #0b3b66;
+    }
+
+    h2 {
+      margin: 0 0 8px;
+      font-size: 1.15rem;
+      color: var(--accent);
+    }
+
+    p { margin: 0 0 10px; }
+
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li { margin: 4px 0; }
+
+    .muted {
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    code {
+      background: var(--code-bg);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.92rem;
+    }
+
+    .flow {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-top: 10px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Model Reuse and Checkpoint Reference</h1>
+      <p class="muted">Purpose: quick reference for what appears in Model Library, what reuse does, and what files are updated.</p>
+    </div>
+
+    <div class="card">
+      <h2>Core Definitions</h2>
+      <ul>
+        <li><strong>Checkpoint</strong>: a binary training snapshot file with learned tensors, typically <code>.pt</code> for gsplat (and <code>.pth</code> may appear in litegs paths).</li>
+        <li><strong>Model entry</strong>: a registry item with id, name, source, and metadata that points to one checkpoint path.</li>
+        <li><strong>Project model state</strong>: internal lineage metadata used to find the latest project checkpoint for reuse when no global model is selected.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>What You See in Model Library</h2>
+      <ul>
+        <li>The tab shows model entries, not all raw checkpoint files.</li>
+        <li>One model entry can correspond to many checkpoints across runs in its lineage.</li>
+        <li>Baseline sessions are hidden in Session Models view because they are reference sessions, not reusable model entries.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Reuse Behavior</h2>
+      <ul>
+        <li>If you select a global elevated model, that specific model id is used.</li>
+        <li>If you do not select a global model and start mode is reuse, backend resolves the active project model lineage and picks the latest usable checkpoint.</li>
+        <li>Training then loads that checkpoint and continues optimization.</li>
+      </ul>
+      <div class="flow">load previous checkpoint - train - save new checkpoint(s) in the new run</div>
+    </div>
+
+    <div class="card">
+      <h2>Does Reuse Update the Same Elevated Model File?</h2>
+      <ul>
+        <li>No, not automatically.</li>
+        <li>New runs save new checkpoints under that run folder.</li>
+        <li>The selected elevated model remains the same snapshot unless you elevate again from a newer run.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Which File Types Store What</h2>
+      <ul>
+        <li><code>.pt</code> or <code>.pth</code>: model weights and tensor state used for training reuse.</li>
+        <li><code>.json</code>: metadata, lineage, run config, and model index.</li>
+      </ul>
+      <p class="muted">Best practice used here: binary checkpoints for weights, JSON for metadata and traceability.</p>
+    </div>
+  </div>
+</body>
+</html>
