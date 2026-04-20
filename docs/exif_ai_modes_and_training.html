@@ -1,0 +1,1295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EXIF-Based AI Optimization: Three Modes & Training Framework</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            border-bottom: 4px solid #3498db;
+            padding-bottom: 20px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #7f8c8d;
+            margin-bottom: 40px;
+            font-style: italic;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 40px;
+            margin-bottom: 20px;
+            border-left: 5px solid #3498db;
+            padding-left: 15px;
+            font-size: 1.8em;
+        }
+        h3 {
+            color: #34495e;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+        h4 {
+            color: #555;
+            margin-top: 15px;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        .mode-box {
+            background: linear-gradient(135deg, #ecf0f1 0%, #f5f7fa 100%);
+            border: 2px solid #3498db;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        .mode-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .mode-badge {
+            background: #3498db;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-right: 15px;
+            font-size: 0.9em;
+        }
+        .mode-badge.mode1 {
+            background: #e74c3c;
+        }
+        .mode-badge.mode2 {
+            background: #f39c12;
+        }
+        .mode-badge.mode3 {
+            background: #27ae60;
+        }
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .feature-tag {
+            background: white;
+            border: 1px solid #bdc3c7;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            color: #2c3e50;
+        }
+        .feature-tag.primary {
+            background: #d4efff;
+            border-color: #3498db;
+            color: #2980b9;
+            font-weight: bold;
+        }
+        .feature-tag.secondary {
+            background: #fff3cd;
+            border-color: #f39c12;
+            color: #d68910;
+        }
+        .feature-tag.tertiary {
+            background: #d4edda;
+            border-color: #27ae60;
+            color: #1e7e34;
+        }
+        .math-box {
+            background: #f8f9fa;
+            border-left: 4px solid #2980b9;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95em;
+            color: #2c3e50;
+            overflow-x: auto;
+        }
+        .math-label {
+            font-weight: bold;
+            color: #2980b9;
+            margin-bottom: 5px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            background: white;
+        }
+        th {
+            background: #34495e;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: bold;
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        tr:hover {
+            background: #f5f7fa;
+        }
+        .section-divider {
+            height: 2px;
+            background: linear-gradient(to right, #3498db, #2980b9);
+            margin: 40px 0;
+        }
+        .formula-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .formula-card {
+            background: #f8f9fa;
+            border: 1px solid #bdc3c7;
+            border-radius: 6px;
+            padding: 15px;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 20px;
+            border-radius: 6px;
+            border-left: 4px solid #f39c12;
+            margin: 20px 0;
+        }
+        .code-block {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        .preset-comparison {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+        .preset-card {
+            background: white;
+            border: 2px solid #bdc3c7;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .preset-card.conservative {
+            border-color: #3498db;
+            background: #ecf7ff;
+        }
+        .preset-card.balanced {
+            border-color: #27ae60;
+            background: #ecfdf4;
+        }
+        .preset-card.geometry_fast {
+            border-color: #f39c12;
+            background: #fffbea;
+        }
+        .preset-card.appearance_fast {
+            border-color: #e74c3c;
+            background: #ffe5e5;
+        }
+        .preset-name {
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+        .preset-desc {
+            font-size: 0.85em;
+            color: #555;
+            line-height: 1.4;
+        }
+        .training-flow {
+            background: #f8f9fa;
+            border: 2px solid #3498db;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .flow-step {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            border-left: 4px solid #3498db;
+        }
+        .flow-number {
+            background: #3498db;
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        .note {
+            background: #e8f4f8;
+            border-left: 4px solid #3498db;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            color: #2c3e50;
+        }
+        .warning {
+            background: #ffe5e5;
+            border-left: 4px solid #e74c3c;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            color: #a93226;
+        }
+        .success {
+            background: #ecfdf4;
+            border-left: 4px solid #27ae60;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            color: #145a32;
+        }
+        .grid-2col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        @media (max-width: 768px) {
+            .grid-2col {
+                grid-template-columns: 1fr;
+            }
+            .formula-grid {
+                grid-template-columns: 1fr;
+            }
+            h1 {
+                font-size: 1.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>EXIF-Based AI Optimization Modes</h1>
+        <p class="subtitle">Three-Layer Framework for Intelligent Parameter Selection in 3D Reconstruction</p>
+
+        <h2>1. Overview & Architecture</h2>
+        <p>
+            The EXIF-based AI optimization system uses <strong>reward-optimized bandit learning</strong> to select Gaussian Splatting 
+            (GSPLAT) training parameters. The system operates in three progressive feature-extraction layers, each adding 
+            complexity and richness to the feature space. However, <strong>features are mostly ignored during selection</strong>—parameter 
+            choices are driven by global learned preferences (bias/means) updated via reward feedback.
+        </p>
+        <div class="warning">
+            <strong>Architectural Clarification:</strong> This is <strong>NOT a traditional supervised regression</strong>. 
+            The system does not learn weights that map features → parameters (i.e., no y = f(x; W) function). 
+            Instead, it learns global parameter preferences (bias or means) via trial-and-error reward optimization. 
+            Features x are extracted for context, but parameter selection is mostly context-agnostic (except small heuristic bonuses in discrete mode).
+        </div>
+        <div class="highlight">
+            <strong>Core Philosophy:</strong> Extract intrinsic properties from source imagery → Apply global learned parameter preferences 
+            (via bandit learning) → Continuously refine preferences through observed reward signals (final quality × speed trade-off).
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>2. Three Optimization Modes</h2>
+
+        <!-- MODE 1 -->
+        <div class="mode-box">
+            <div class="mode-header">
+                <span class="mode-badge mode1">MODE 1</span>
+                <h3 style="margin: 0;">EXIF-Only (Base Layer)</h3>
+            </div>
+            <p><strong>Purpose:</strong> Camera and capture metadata only. Lightweight baseline suitable for datasets with standard EXIF information.</p>
+            
+            <h4>Input Features (x) — 25 features</h4>
+            <div class="feature-list">
+                <div class="feature-tag primary">camera_make</div>
+                <div class="feature-tag primary">camera_model</div>
+                <div class="feature-tag primary">lens_model</div>
+                <div class="feature-tag primary">focal_length_mm</div>
+                <div class="feature-tag primary">aperture_f</div>
+                <div class="feature-tag primary">shutter_s</div>
+                <div class="feature-tag primary">iso</div>
+                <div class="feature-tag primary">camera_angle_bucket</div>
+                <div class="feature-tag secondary">gps_lat_mean</div>
+                <div class="feature-tag secondary">gps_lon_mean</div>
+                <div class="feature-tag secondary">gps_alt_mean</div>
+                <div class="feature-tag secondary">timestamp_mode</div>
+                <div class="feature-tag secondary">img_width_median</div>
+                <div class="feature-tag secondary">img_height_median</div>
+                <div class="feature-tag secondary">img_orientation</div>
+                <div class="feature-tag secondary">camera_meta_missing</div>
+                <div class="feature-tag secondary">lens_missing</div>
+                <div class="feature-tag secondary">focal_missing</div>
+                <div class="feature-tag secondary">aperture_missing</div>
+                <div class="feature-tag secondary">shutter_missing</div>
+                <div class="feature-tag secondary">iso_missing</div>
+                <div class="feature-tag secondary">angle_missing</div>
+                <div class="feature-tag secondary">gps_missing</div>
+                <div class="feature-tag secondary">timestamp_missing</div>
+                <div class="feature-tag secondary">orientation_missing</div>
+            </div>
+
+            <h4>Characteristics</h4>
+            <ul>
+                <li><strong>Scope:</strong> Camera equipment (make, model, lens), shooting parameters (ISO, aperture, shutter), spatial context (GPS, angle)</li>
+                <li><strong>Dependencies:</strong> None; works with standard image EXIF</li>
+                <li><strong>Complexity:</strong> Low (~25D feature space)</li>
+                <li><strong>Use Case:</strong> Consumer/prosumer cameras with complete EXIF; rapid baseline training</li>
+            </ul>
+        </div>
+
+        <!-- MODE 2 -->
+        <div class="mode-box">
+            <div class="mode-header">
+                <span class="mode-badge mode2">MODE 2</span>
+                <h3 style="margin: 0;">EXIF + Flight Plan (Extended Layer)</h3>
+            </div>
+            <p><strong>Purpose:</strong> Adds drone flight and coverage metadata. Ideal for UAV/drone photogrammetry datasets.</p>
+            
+            <h4>Additional Input Features (x) — 37 features total</h4>
+            <p>Inherits all 25 EXIF features, plus 12 flight plan features:</p>
+            <div class="feature-list">
+                <div class="feature-tag secondary">flight_type</div>
+                <div class="feature-tag secondary">flight_type_missing</div>
+                <div class="feature-tag secondary">camera_angle_profile</div>
+                <div class="feature-tag secondary">angle_profile_missing</div>
+                <div class="feature-tag secondary">average_altitude</div>
+                <div class="feature-tag secondary">altitude_missing</div>
+                <div class="feature-tag secondary">heading_consistency</div>
+                <div class="feature-tag secondary">heading_missing</div>
+                <div class="feature-tag secondary">coverage_spread</div>
+                <div class="feature-tag secondary">coverage_missing</div>
+                <div class="feature-tag secondary">overlap_proxy</div>
+                <div class="feature-tag secondary">overlap_missing</div>
+            </div>
+
+            <h4>Characteristics</h4>
+            <ul>
+                <li><strong>Scope:</strong> Flight trajectory analysis; altitude profiles; coverage uniformity; heading stability; image overlap estimation</li>
+                <li><strong>Dependencies:</strong> EXIF complete + flight metadata (altitude, heading, coverage computed from GPS traces)</li>
+                <li><strong>Complexity:</strong> Medium (~37D feature space)</li>
+                <li><strong>Use Case:</strong> UAV datasets with GPS traces or mission logs; consistent flight patterns; terrain-aware optimization</li>
+            </ul>
+        </div>
+
+        <!-- MODE 3 -->
+        <div class="mode-box">
+            <div class="mode-header">
+                <span class="mode-badge mode3">MODE 3</span>
+                <h3 style="margin: 0;">EXIF + Flight Plan + External (Full Layer)</h3>
+            </div>
+            <p><strong>Purpose:</strong> Adds image content analysis (vegetation, terrain, blur detection). Most comprehensive feature set.</p>
+            
+            <h4>Additional Input Features (x) — 47 features total</h4>
+            <p>Inherits all 37 previous features, plus 10 external/content features:</p>
+            <div class="feature-list">
+                <div class="feature-tag tertiary">vegetation_cover_percentage</div>
+                <div class="feature-tag tertiary">green_area_missing</div>
+                <div class="feature-tag tertiary">vegetation_complexity_score</div>
+                <div class="feature-tag tertiary">veg_complexity_missing</div>
+                <div class="feature-tag tertiary">terrain_roughness_proxy</div>
+                <div class="feature-tag tertiary">roughness_missing</div>
+                <div class="feature-tag tertiary">texture_density</div>
+                <div class="feature-tag tertiary">texture_missing</div>
+                <div class="feature-tag tertiary">blur_motion_risk</div>
+                <div class="feature-tag tertiary">blur_missing</div>
+            </div>
+
+            <h4>Characteristics</h4>
+            <ul>
+                <li><strong>Scope:</strong> Pixel-level analysis; green channel histograms (vegetation); Laplacian variance (texture/blur); edge density (terrain roughness)</li>
+                <li><strong>Dependencies:</strong> All previous layers + image content analysis (requires pixel processing)</li>
+                <li><strong>Complexity:</strong> High (~47D feature space)</li>
+                <li><strong>Use Case:</strong> Mixed landscape datasets (urban + vegetation); texture-rich scenes; challenging lighting; high-accuracy reconstruction</li>
+            </ul>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <div class="section-divider"></div>
+
+        <h2>Learning Paradigm: Discrete vs. Continuous</h2>
+        <p>
+            The system supports two fundamentally different learning approaches for parameter selection. 
+            Both leverage the same EXIF feature layers, but differ in how they model and optimize parameters.
+        </p>
+
+        <div class="mode-box">
+            <div class="mode-header">
+                <span class="mode-badge mode1">DISCRETE</span>
+                <h3 style="margin: 0;">Preset-Based Selection</h3>
+            </div>
+            <p><strong>Approach:</strong> Select one of 4 fixed presets (conservative, balanced, geometry_fast, appearance_fast)</p>
+            <p><strong>Model:</strong> Bias accumulator per preset + competitive credit assignment</p>
+            <p><strong>Best for:</strong> Categorical decision making; interpretable presets; stable learning</p>
+        </div>
+
+        <div class="mode-box">
+            <div class="mode-header">
+                <span class="mode-badge mode2">CONTINUOUS</span>
+                <h3 style="margin: 0;">Continuous Bandit (Linear)</h3>
+            </div>
+            <p><strong>Approach:</strong> Sample continuous multiplier values for 8 parameters independently</p>
+            <p><strong>Model:</strong> Gaussian sampling from learned means + direct mean gradient updates</p>
+            <p><strong>Best for:</strong> Fine-grained parameter tuning; exploring continuous space; high dimensionality</p>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>3. Model Structure: Inputs, Outputs, and Predictions</h2>
+
+        <h3>A. Input Space (x)</h3>
+        <p>
+            <strong>x</strong> ∈ ℝ^D where D ∈ {25, 37, 47} depending on selected EXIF mode.
+        </p>
+        <div class="math-box">
+            <div class="math-label">Feature Vector x:</div>
+            x = [x₁, x₂, ..., x_D]ᵀ
+            <br><br>
+            where each x_i represents:
+            <br>— Equipment/capture metadata (EXIF Mode 1)
+            <br>— + Flight trajectory properties (EXIF Mode 2)
+            <br>— + Scene content characteristics (EXIF Mode 3)
+        </div>
+
+        <h3>B. Output Space & Prediction Mechanisms</h3>
+        <p>
+            The output differs fundamentally based on learning paradigm.
+        </p>
+
+        <h4>Discrete Preset-Based Mode</h4>
+        <div class="math-box">
+            <div class="math-label">Target y (discrete):</div>
+            y ∈ {conservative, balanced, geometry_fast, appearance_fast}
+            <br><br>
+            Selected preset applied to base parameters:
+            <br>y_applied = base_params × preset_multipliers[y]
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Predictions ŷ (yhat_scores):</div>
+            ŷ = [score_conservative, score_balanced, score_geometry_fast, score_appearance_fast]ᵀ
+            <br><br>
+            ŷ_i = bias[i] + (heuristic_bonus if i == heuristic_preset else 0)
+            <br><br>
+            k* = argmax_i (ŷ_i)   [selected preset = highest-scoring preset]
+        </div>
+
+        <h4>Continuous Bandit Mode</h4>
+        <div class="math-box">
+            <div class="math-label">Target y (continuous):</div>
+            y = [m₁, m₂, ..., m₈] where m_j ∈ ℝ (continuous multipliers)
+            <br><br>
+            y ∈ {feature_lr_mult, position_lr_init_mult, scaling_lr_mult, opacity_lr_mult,
+            <br>    rotation_lr_mult, densify_grad_threshold_mult, opacity_threshold_mult, lambda_dssim_mult}
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Predictions ŷ (yhat_scores via Gaussian sampling):</div>
+            ŷ_j ~ Gaussian(μ_j, σ²_j) for each multiplier j
+            <br><br>
+            μ_j = learned mean for multiplier j
+            <br>
+            σ²_j = exploration_std = max(0.03, min(0.18, 0.18 / √(runs + 1)))
+            <br><br>
+            k* = "continuous_bandit_linear"   [fixed method name; specific values sampled]
+        </div>
+
+        <h3>C. Model Parameters</h3>
+
+        <h4>Discrete Preset-Based Model State</h4>
+        <table>
+            <tr>
+                <th>Parameter</th>
+                <th>Dimensionality</th>
+                <th>Purpose</th>
+                <th>Update Rule</th>
+            </tr>
+            <tr>
+                <td><strong>bias[preset]</strong></td>
+                <td>ℝ⁴ (one per preset)</td>
+                <td>Accumulated preference scores for each preset</td>
+                <td>Gradient ascent on reward signal (learning_rate = 0.10)</td>
+            </tr>
+            <tr>
+                <td><strong>reward_mean</strong></td>
+                <td>ℝ¹</td>
+                <td>Running mean of observed rewards</td>
+                <td>Exponential moving average (α = 1/(runs+1))</td>
+            </tr>
+            <tr>
+                <td><strong>runs</strong></td>
+                <td>ℤ⁺</td>
+                <td>Count of training runs completed</td>
+                <td>Incremented per run update</td>
+            </tr>
+        </table>
+
+        <h4>Continuous Bandit Model State</h4>
+        <table>
+            <tr>
+                <th>Parameter</th>
+                <th>Dimensionality</th>
+                <th>Purpose</th>
+                <th>Update Rule</th>
+            </tr>
+            <tr>
+                <td><strong>means[j]</strong> (j=1..8)</td>
+                <td>ℝ⁸ (one per multiplier)</td>
+                <td>Center of Gaussian distribution for each parameter</td>
+                <td>Direct gradient ascent: μ += η × δ × (action - μ)</td>
+            </tr>
+            <tr>
+                <td><strong>reward_mean</strong></td>
+                <td>ℝ¹</td>
+                <td>Running mean of observed rewards</td>
+                <td>Exponential moving average (α = 1/(runs+1))</td>
+            </tr>
+            <tr>
+                <td><strong>runs</strong></td>
+                <td>ℤ⁺</td>
+                <td>Count of training runs completed</td>
+                <td>Incremented per run update</td>
+            </tr>
+            <tr>
+                <td><strong>exploration_std</strong></td>
+                <td>ℝ¹</td>
+                <td>Gaussian sampling standard deviation (decay schedule)</td>
+                <td>σ = max(0.03, min(0.18, 0.18/√(runs+1)))</td>
+            </tr>
+        </table>
+
+        <div class="section-divider"></div>
+
+        <h2>4. Training & Learning Framework</h2>
+
+        <h3>Common Foundation (Both Modes)</h3>
+        <p>
+            Regardless of learning paradigm, both modes use the same score computation pipeline based on visual metrics and runtime.
+        </p>
+
+        <h3>A. Score Computation (Quality, Time, Loss)</h3>
+        <p>
+            At each evaluation step, a composite score <strong>s(step)</strong> is computed from visual metrics and runtime.
+        </p>
+
+        <h4>Metric Normalization</h4>
+        <div class="math-box">
+            <div class="math-label">Joint Normalization (shared scale with baseline):</div>
+            For metric M ∈ {PSNR, SSIM, LPIPS, Loss}:
+            <br><br>
+            all_vals = [run_values] ⊕ [baseline_values]
+            <br>
+            normalized = (M - min(all_vals)) / (max(all_vals) - min(all_vals))
+            <br><br>
+            <strong>Direction:</strong>
+            <br>— PSNR, SSIM: higher is better (direct normalization)
+            <br>— LPIPS, Loss: lower is better (inverted: 1 - normalized)
+        </div>
+
+        <h4>Quality Score Composition</h4>
+        <div class="math-box">
+            <div class="math-label">Quality Score q(step):</div>
+            q = 0.40 × PSNR_norm + 0.30 × SSIM_norm + 0.30 × LPIPS_norm_inverted
+            <br><br>
+            Weights: Loss=40%, Appearance(PSNR+SSIM)=30% each, Geometry(LPIPS)=30%
+        </div>
+
+        <h4>Time Score</h4>
+        <div class="math-box">
+            <div class="math-label">Time Score t_score(step):</div>
+            t_ratio = elapsed_seconds(step) / time_reference
+            <br>
+            t_score = 1.0 - clamp(t_ratio, 0, 1)
+            <br><br>
+            time_reference = max(baseline_elapsed) if baseline exists, else max(run_elapsed)
+        </div>
+
+        <h4>Composite Score</h4>
+        <div class="math-box">
+            <div class="math-label">Composite Score s(step):</div>
+            s = 0.50 × loss_norm + 0.25 × q + 0.25 × t_score
+            <br><br>
+            Weights: Loss convergence=50%, Quality=25%, Speed=25%
+        </div>
+
+        <h3>B. Run-Level Metrics (s_best, s_end, s_run)</h3>
+        <div class="math-box">
+            <div class="math-label">Anchor Steps:</div>
+            t_best = step with minimum loss (best optimization point)
+            <br>
+            t_eval_best = first eval step ≥ t_best (closest eval after best loss)
+            <br>
+            t_end = final evaluation step (convergence point)
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Run Scores:</div>
+            s_best = s(t_eval_best)     [quality at best loss point]
+            <br>
+            s_end = s(t_end)             [quality at convergence]
+            <br>
+            s_run = max(s_best, s_end)  [best achieved score]
+        </div>
+
+        <h3>C. Baseline Comparison & Reward Signal (Shared)</h3>
+        <div class="math-box">
+            <div class="math-label">Baseline Scores (when baseline run available):</div>
+            s_base_best = s_baseline(t_eval_best_aligned)
+            <br>
+            s_base_end = s_baseline(t_end_aligned)
+            <br>
+            s_base = max(s_base_best, s_base_end)
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Reward Signal r:</div>
+            IF baseline_comparison exists:
+            <br>    r = s_run - s_base         [relative improvement]
+            <br>ELSE:
+            <br>    r = s_run                  [absolute quality; baseline missing]
+            <br><br>
+            Sign Convention:
+            <br>r > 0  → Run outperformed baseline (positive learning)
+            <br>r ≤ 0  → Run matched or underperformed baseline
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>5. Learning Updates: Discrete vs. Continuous Bandits</h2>
+
+        <p>
+            <strong>Key Insight:</strong> Both modes are <strong>reward-optimized bandits</strong>, not regression models.
+            The system learns <strong>which actions performed well historically</strong>, not <strong>how features predict optimal actions</strong>.
+        </p>
+        <ul>
+            <li><strong>What IS learned:</strong> Bias/means (global parameter preferences); reward signal (empirical quality metric)</li>
+            <li><strong>What is NOT learned:</strong> Feature-to-parameter mapping; weights that depend on image content</li>
+            <li><strong>Selection mechanism:</strong> Choose actions based on learned preferences, with minimal feature dependence (except discrete heuristic bonus)</li>
+        </ul>
+
+        <h3>Mode 1: Discrete Preset-Based Bandit</h3>
+
+        <h4>A. Reward Mean Update</h4>
+        <div class="math-box">
+            <div class="math-label">Exponential Moving Average:</div>
+            runs = number of completed training runs
+            <br>
+            α = 1.0 / (runs + 1)         [decreasing step size with experience]
+            <br>
+            reward_mean ← reward_mean + α × (r - reward_mean)
+        </div>
+
+        <h4>B. Bias Update Rule (Competitive Credit Assignment)</h4>
+
+        <div class="training-flow">
+            <div class="flow-step">
+                <div class="flow-number">1</div>
+                <div>Compute running reward mean (exponential average)</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">2</div>
+                <div>Calculate delta: δ = r - reward_mean</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">3</div>
+                <div>Update selected preset: bias[k*] += learning_rate × δ</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">4</div>
+                <div>Update non-selected presets: bias[others] -= learning_rate × decay × δ</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">5</div>
+                <div>Clamp bias values to [-3.0, 3.0] to prevent divergence</div>
+            </div>
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Bias Update (gradient ascent on selected preset):</div>
+            learning_rate = 0.10
+            <br>
+            decay_factor = 0.15
+            <br><br>
+            FOR each preset ∈ {conservative, balanced, geometry_fast, appearance_fast}:
+            <br>
+                IF preset == selected_preset k*:
+            <br>    bias[preset] ← clamp(bias[preset] + lr × δ, -3.0, 3.0)
+            <br>    ELSE:
+            <br>    bias[preset] ← clamp(bias[preset] - lr × decay × δ, -3.0, 3.0)
+        </div>
+
+        <div class="note">
+            <strong>Interpretation:</strong> If reward is positive (δ > 0), the selected preset's bias increases, making it more likely 
+            to be chosen in future runs with similar imagery. Non-selected presets have their bias reduced slightly 
+            (penalty is scaled by decay factor 0.15), implementing competitive credit assignment.
+        </div>
+
+        <hr style="margin: 30px 0; border: 1px solid #bdc3c7;">
+
+        <h3>Mode 2: Continuous Parameter Bandit</h3>
+
+        <h4>A. Exploration & Sampling</h4>
+        <div class="math-box">
+            <div class="math-label">Exploration Standard Deviation (decays with experience):</div>
+            σ = max(0.03, min(0.18, 0.18 / √(runs + 1)))
+            <br><br>
+            Interpretation:
+            <br>— Starts at 0.18 (high exploration early)
+            <br>— Floor at 0.03 (maintain minimum exploration)
+            <br>— Decays as √(runs) to allow fine-tuning later
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Per-Parameter Sampling:</div>
+            FOR each multiplier j ∈ {1..8}:
+            <br>    μ_j = means[j]           [learned center]
+            <br>    sampled_j ~ Gaussian(μ_j, σ²)
+            <br>    sampled_j ← clamp(sampled_j, lo_j, hi_j)   [safe bounds]
+        </div>
+
+        <h4>B. Mean Update Rule (Bandit Policy Gradient — NOT Feature-Conditional)</h4>
+
+        <div class="training-flow">
+            <div class="flow-step">
+                <div class="flow-number">1</div>
+                <div>Compute running reward mean (exponential average)</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">2</div>
+                <div>Calculate delta: δ = r - reward_mean</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">3</div>
+                <div>Compute learning rate: η = max(0.03, min(0.20, 0.20 / √(runs + 1)))</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">4</div>
+                <div>FOR each parameter: μ_j ← μ_j + η × δ × (action_j - μ_j)  [global update, independent of features]</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">5</div>
+                <div>Clamp updated means to safe bounds [lo_j, hi_j]</div>
+            </div>
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Mean Update (Bandit algorithm, NOT regression):</div>
+            η = max(0.03, min(0.20, 0.20 / √(runs + 1)))
+            <br><br>
+            FOR each multiplier j:
+            <br>    μ_j ← clamp(μ_j + η × δ × (a_j - μ_j), lo_j, hi_j)
+            <br><br>
+            where a_j = action sampled in this run (actual multiplier used)
+            <br><br>
+            <strong>Critical Insight:</strong> μ_j is GLOBAL, independent of input features x. 
+            All images (regardless of EXIF/flight/content) sample from the same Gaussian(μ_j, σ²). 
+            The system learns "what multiplier values worked well in the past" but NOT "what multiplier values work best for THIS image."
+        </div>
+
+        <div class="math-box">
+            <div class="math-label">Safe Bounds per Multiplier:</div>
+            feature_lr_mult:                 [0.5, 1.5]
+            <br>
+            position_lr_init_mult:          [0.5, 1.5]
+            <br>
+            scaling_lr_mult:                [0.5, 1.5]
+            <br>
+            opacity_lr_mult:                [0.5, 1.5]
+            <br>
+            rotation_lr_mult:               [0.5, 1.5]
+            <br>
+            densify_grad_threshold_mult:    [0.7, 1.3]
+            <br>
+            opacity_threshold_mult:         [0.7, 1.3]
+            <br>
+            lambda_dssim_mult:              [0.7, 1.3]
+        </div>
+
+        <div class="note">
+            <strong>Key Insight (Continuous Mode):</strong> The update rule μ += η × δ × (a - μ) is a bandit policy gradient step. 
+            If the sampled action a_j was above the mean (a_j > μ_j) and reward is positive (δ > 0), the mean shifts toward a_j. 
+            <br><br>
+            <strong>Critical Limitation:</strong> The means μ are GLOBAL and do NOT condition on features x. 
+            All images (regardless of EXIF/flight/content) sample from the same distribution. 
+            This is fundamentally a trial-and-error bandit, not feature-conditioned learning.
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>6. Preset Configurations (Discrete Mode Only)</h2>
+        <p>
+            Each preset applies multiplicative adjustments to base GSPLAT parameters. The selection mechanism 
+            learns which preset is best suited to the input imagery characteristics. This section applies only to 
+            <strong>Discrete Preset-Based</strong> learning mode.
+        </p>
+
+        <div class="preset-comparison">
+            <div class="preset-card conservative">
+                <div class="preset-name">Conservative</div>
+                <div class="preset-desc">
+                    Reduces learning rates, increases densification thresholds.
+                    <br><br>
+                    Best for: Challenging lighting, sparse features
+                </div>
+            </div>
+            <div class="preset-card balanced">
+                <div class="preset-name">Balanced</div>
+                <div class="preset-desc">
+                    1.0× multiplier on all parameters (baseline).
+                    <br><br>
+                    Best for: Standard datasets, mixed content
+                </div>
+            </div>
+            <div class="preset-card geometry_fast">
+                <div class="preset-name">Geometry Fast</div>
+                <div class="preset-desc">
+                    Increases position/scale LR, reduces densification threshold.
+                    <br><br>
+                    Best for: Clear geometry, high overlap
+                </div>
+            </div>
+            <div class="preset-card appearance_fast">
+                <div class="preset-name">Appearance Fast</div>
+                <div class="preset-desc">
+                    Increases feature LR and SH dimensions.
+                    <br><br>
+                    Best for: Rich texture, well-lit scenes
+                </div>
+            </div>
+        </div>
+
+        <table>
+            <tr>
+                <th>Parameter</th>
+                <th>Conservative</th>
+                <th>Balanced</th>
+                <th>Geometry Fast</th>
+                <th>Appearance Fast</th>
+            </tr>
+            <tr>
+                <td>feature_lr_mult</td>
+                <td>0.80</td>
+                <td>1.00</td>
+                <td>0.90</td>
+                <td>1.20</td>
+            </tr>
+            <tr>
+                <td>position_lr_init_mult</td>
+                <td>0.80</td>
+                <td>1.00</td>
+                <td>1.16</td>
+                <td>0.96</td>
+            </tr>
+            <tr>
+                <td>scaling_lr_mult</td>
+                <td>0.84</td>
+                <td>1.00</td>
+                <td>1.16</td>
+                <td>0.96</td>
+            </tr>
+            <tr>
+                <td>opacity_lr_mult</td>
+                <td>0.84</td>
+                <td>1.00</td>
+                <td>0.96</td>
+                <td>1.16</td>
+            </tr>
+            <tr>
+                <td>rotation_lr_mult</td>
+                <td>0.90</td>
+                <td>1.00</td>
+                <td>1.12</td>
+                <td>0.98</td>
+            </tr>
+            <tr>
+                <td>densify_grad_threshold_mult</td>
+                <td>1.40</td>
+                <td>1.00</td>
+                <td>0.84</td>
+                <td>1.10</td>
+            </tr>
+            <tr>
+                <td>opacity_threshold_mult</td>
+                <td>1.30</td>
+                <td>1.00</td>
+                <td>0.84</td>
+                <td>1.04</td>
+            </tr>
+            <tr>
+                <td>lambda_dssim_mult</td>
+                <td>1.10</td>
+                <td>1.00</td>
+                <td>0.96</td>
+                <td>1.16</td>
+            </tr>
+        </table>
+
+        <div class="section-divider"></div>
+
+        <h2>7. Learning Behavior & Convergence</h2>
+
+        <h3>Test Runs (Both Modes)</h3>
+        <p>
+            When <code>apply_update = False</code> (test/compare-only mode), the system:
+        </p>
+        <ul>
+            <li>✓ Extracts features x from test imagery (for context/logging only)</li>
+            <li>✓ Selects/samples parameters from global learned preferences (bias or means), mostly ignoring x</li>
+            <li>✓ Computes reward signal for comparison</li>
+            <li>✗ Does NOT update learned preferences (bias/means)</li>
+            <li>✗ Does NOT persist model changes</li>
+        </ul>
+        <div class="note">
+            <strong>Use:</strong> Validation of bandit choices; testing new imagery; A/B comparison with baseline.
+            <br><br>
+            <strong>Note:</strong> Features x are computed but largely ignored during selection. Parameter choices driven by global learned preferences, 
+            not feature-to-parameter regression.
+        </div>
+
+        <h3>Training Runs (Both Modes)</h3>
+        <p>
+            When <code>apply_update = True</code> (training mode), the system additionally:
+        </p>
+        <ul>
+            <li>✓ Updates global learned preferences (bias or means) based on reward signal</li>
+            <li>✓ Persists updated model to disk</li>
+            <li>✓ Tracks cumulative runs and reward mean</li>
+            <li>✓ Applies exploration strategy (heuristic bonus in discrete; Gaussian variance decay in continuous)</li>
+            <li><strong>✗ Does NOT learn feature-conditioned parameter mappings (no y = f(x; W))</strong></li>
+        </ul>
+        <div class="warning">
+            <strong>This is a key architectural limitation:</strong> The system is a <strong>context-free bandit</strong>, 
+            not a context-aware policy learner. Features improve interpretability and heuristic guidance, but do not drive parameter selection through learned weights.
+        </div>
+
+        <h3>Discrete Mode Convergence</h3>
+        <div class="math-box">
+            <div class="math-label">Effective Learning Rate (decreases with experience):</div>
+            α_reward = 1.0 / (runs + 1)
+            <br><br>
+            After 10 runs:   α ≈ 0.091  (9% step size)
+            <br>
+            After 100 runs:  α ≈ 0.010  (1% step size)
+            <br>
+            After 1000 runs: α ≈ 0.001  (0.1% step size)
+        </div>
+
+        <h3>Continuous Mode Convergence</h3>
+        <div class="math-box">
+            <div class="math-label">Effective Learning Rate (decreases with experience):</div>
+            η = max(0.03, min(0.20, 0.20 / √(runs + 1)))
+            <br>
+            σ = max(0.03, min(0.18, 0.18 / √(runs + 1)))
+            <br><br>
+            After 10 runs:   η ≈ 0.063,  σ ≈ 0.057
+            <br>
+            After 100 runs:  η ≈ 0.020,  σ ≈ 0.018
+            <br>
+            After 1000 runs: η ≈ 0.006,  σ ≈ 0.006
+        </div>
+
+        <div class="warning">
+            <strong>Important:</strong> Neither system is a classical regression model y = f(x). 
+            <br><br>
+            <strong>Discrete:</strong> Maintains preset-specific bias accumulators reflecting which presets historically performed well.
+            <br><br>
+            <strong>Continuous:</strong> Maintains per-parameter Gaussian means reflecting which parameter ranges yielded high rewards.
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>8. End-to-End Bandit Learning Pipeline (Common to Both Modes)</h2>
+
+        <div class="training-flow">
+            <div class="flow-step">
+                <div class="flow-number">1</div>
+                <div><strong>Feature Extraction:</strong> Extract features x from image EXIF, flight plan, and/or content 
+                    <br><em>(for context/logging; mostly ignored in selection)</em></div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">2</div>
+                <div><strong>Parameter Selection (Context-Free Bandit):</strong> 
+                    <br><strong>Discrete:</strong> Load global bias, compute scores ŷ = bias + heuristic_bonus, select argmax
+                    <br><strong>Continuous:</strong> Load global means, sample ŷ ~ Gaussian(means, σ²) <em>[no conditioning on x]</em></div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">3</div>
+                <div><strong>Apply Parameters:</strong> Multiply base GSPLAT parameters by selected/sampled multipliers</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">4</div>
+                <div><strong>Training:</strong> Run GSPLAT with selected parameters; collect eval_history (PSNR, SSIM, LPIPS, loss)</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">5</div>
+                <div><strong>Score Computation:</strong> Compute s(step) for each eval step using normalized metrics; aggregate to s_run</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">6</div>
+                <div><strong>Reward Signal:</strong> Compute r = s_run - s_base (or r = s_run if baseline unavailable) 
+                    <br><em>[reward is global, not feature-conditioned]</em></div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">7</div>
+                <div><strong>Bandit Update (training only):</strong>
+                    <br><strong>Discrete:</strong> Update global bias and reward_mean; persist model
+                    <br><strong>Continuous:</strong> Update global means and reward_mean; persist model</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">8</div>
+                <div><strong>Logging:</strong> Record transition (x, ŷ, action, r) for analysis and future improvements</div>
+            </div>
+        </div>
+            <div class="flow-step">
+                <div class="flow-number">4</div>
+                <div><strong>Training:</strong> Run GSPLAT with selected parameters; collect eval_history (PSNR, SSIM, LPIPS, loss)</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">5</div>
+                <div><strong>Score Computation:</strong> Compute s(step) for each eval step; aggregate to s_run</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">6</div>
+                <div><strong>Reward Signal:</strong> Compute r = s_run - s_base (or r = s_run if no baseline)</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">7</div>
+                <div><strong>Model Update (training only):</strong>
+                    <br><strong>Discrete:</strong> Update bias and reward_mean; persist model
+                    <br><strong>Continuous:</strong> Update means and reward_mean; persist model</div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-number">8</div>
+                <div><strong>Logging:</strong> Record transition (x, ŷ, k*, r) for analysis</div>
+            </div>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>9. Key Design Principles (Both Modes)</h2>
+
+        <div class="grid-2col">
+            <div>
+                <h4>1. Context-Free Bandit (NOT Regression)</h4>
+                <p>
+                    The system learns <strong>which actions were historically good</strong> via reward feedback (bandit learning), 
+                    NOT <strong>how features predict optimal actions</strong> (supervised regression). 
+                    Model state (bias/means) is global and does NOT condition on input features x.
+                </p>
+            </div>
+            <div>
+                <h4>2. Decaying Learning Rates</h4>
+                <p>
+                    Both modes use schedules that decay as 1/√(runs). Early exploration when data is sparse; 
+                    fine-tuning when patterns are clear. Prevents divergence in later stages.
+                </p>
+            </div>
+        </div>
+
+        <div class="grid-2col">
+            <div>
+                <h4>3. Joint Metric Normalization</h4>
+                <p>
+                    When baseline exists, metrics normalized on shared (run ∪ baseline) scale to prevent 
+                    misleading reward signals from independent scaling. If baseline missing, reward = s_run (absolute).
+                </p>
+            </div>
+            <div>
+                <h4>4. Minimal Feature Utilization</h4>
+                <p>
+                    Features x extracted for logging/interpretability but mostly ignored in selection. 
+                    <strong>Discrete:</strong> +0.002 heuristic bonus only.
+                    <br><strong>Continuous:</strong> Features ignored entirely.
+                </p>
+            </div>
+        </div>
+
+        <div class="success">
+            <strong>Result:</strong> Two lightweight, highly interpretable bandit systems that refine parameter selection 
+            based on empirical rewards. <strong>Trade-off:</strong> Simplicity/interpretability vs. feature-conditioned optimization (no learned x→y mapping).
+        </div>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <h2>10. Comprehensive Comparison: EXIF Modes + Learning Paradigms</h2>
+
+        <table>
+            <tr>
+                <th>Dimension</th>
+                <th>EXIF-Only</th>
+                <th>EXIF + Flight</th>
+                <th>EXIF + Flight + External</th>
+            </tr>
+            <tr>
+                <td><strong>Feature Count</strong></td>
+                <td>25</td>
+                <td>37</td>
+                <td>47</td>
+            </tr>
+            <tr>
+                <td><strong>Primary Info</strong></td>
+                <td>Camera equipment, capture settings</td>
+                <td>+ Flight altitude, heading, coverage</td>
+                <td>+ Vegetation, terrain, texture, blur</td>
+            </tr>
+            <tr>
+                <td><strong>Complexity</strong></td>
+                <td>Low</td>
+                <td>Medium</td>
+                <td>High</td>
+            </tr>
+            <tr>
+                <td><strong>Dependencies</strong></td>
+                <td>EXIF only</td>
+                <td>EXIF + GPS/flight logs</td>
+                <td>Full image analysis + flight data</td>
+            </tr>
+            <tr>
+                <td><strong>Processing Time</strong></td>
+                <td>~10ms per dataset</td>
+                <td>~50ms per dataset</td>
+                <td>~500ms per dataset (image sampling)</td>
+            </tr>
+            <tr>
+                <td><strong>Best Use Case</strong></td>
+                <td>Standard camera datasets, rapid prototyping</td>
+                <td>UAV/drone missions, consistent flight patterns</td>
+                <td>Complex terrain, mixed landscape, high precision</td>
+            </tr>
+            <tr>
+                <td><strong>Typical Improvement</strong></td>
+                <td>+3–5% quality</td>
+                <td>+5–8% quality</td>
+                <td>+8–12% quality (scene-dependent)</td>
+            </tr>
+        </table>
+
+        <table>
+            <tr>
+                <th>Dimension</th>
+                <th>Discrete (Preset-Based Bandit)</th>
+                <th>Continuous (Parameter Bandit)</th>
+            </tr>
+            <tr>
+                <td><strong>Action Space</strong></td>
+                <td>Discrete: 4 presets (categorical)</td>
+                <td>Continuous: ℝ⁸ (8 real-valued multipliers)</td>
+            </tr>
+            <tr>
+                <td><strong>Model State (Learned)</strong></td>
+                <td>Bias[4], reward_mean, runs<br>(global preset preferences)</td>
+                <td>Means[8], reward_mean, runs<br>(global parameter preferences)</td>
+            </tr>
+            <tr>
+                <td><strong>Feature Conditioning</strong></td>
+                <td>Weak: +0.002 heuristic bonus only<br>(features x mostly ignored)</td>
+                <td>None: purely context-free<br>(features x completely ignored)</td>
+            </tr>
+            <tr>
+                <td><strong>Selection Mechanism</strong></td>
+                <td>Deterministic: k* = argmax(bias + heuristic)</td>
+                <td>Stochastic: a_j ~ Gaussian(μ_j, σ²) per j</td>
+            </tr>
+            <tr>
+                <td><strong>Update Rule</strong></td>
+                <td>Competitive multi-armed bandit:<br>selected ↑, others ↓ (decay factor 0.15)</td>
+                <td>Bandit policy gradient:<br>μ += η × δ × (a - μ) per parameter</td>
+            </tr>
+            <tr>
+                <td><strong>Exploration Strategy</strong></td>
+                <td>Via heuristic bonus (+0.002 for suggested presets)</td>
+                <td>Via Gaussian sampling with decaying σ<br>σ = max(0.03, min(0.18, 0.18/√(runs+1)))</td>
+            </tr>
+            <tr>
+                <td><strong>Interpretability</strong></td>
+                <td>Very high: bias[preset] ∈ [-3, 3] shows preference ranking</td>
+                <td>Medium: means[j] show learned optimal multiplier centers</td>
+            </tr>
+            <tr>
+                <td><strong>Search Dimensionality</strong></td>
+                <td>Low: 4-dimensional discrete space</td>
+                <td>High: 8-dimensional continuous space</td>
+            </tr>
+            <tr>
+                <td><strong>Convergence Speed</strong></td>
+                <td>Fast: ~10–50 runs to stabilize bias ranking</td>
+                <td>Slower: ~50–200 runs to converge means</td>
+            </tr>
+            <tr>
+                <td><strong>Best Use Case</strong></td>
+                <td>Interpretability, stability, categorical decisions<br>When presets are sufficient abstractions</td>
+                <td>Fine-grained tuning, high precision<br>When parameter ranges require continuous exploration</td>
+            </tr>
+            <tr>
+                <td><strong>What it CANNOT do</strong></td>
+                <td colspan="2"><strong>Learn feature-to-parameter mapping.</strong> Not a supervised regression model (y = f(x; W)). 
+                Cannot adapt parameters based on specific image characteristics. Global preferences only.</td>
+            </tr>
+        </table>
+        </table>
+
+        <div class="section-divider"></div>
+
+        <h2>11. Future Extensions (Path to Feature-Conditioned Learning)</h2>
+
+        <ul>
+            <li><strong>Contextual Bandits (High Priority):</strong> Extend to μ(x) and bias(x) — learn feature-conditioned means/biases. 
+            Enable parameters to adapt to specific image characteristics. Requires more training data and feature-specific reward tracking.</li>
+            <li><strong>Neural Policy Network:</strong> Replace context-free bandit with learned policy π(y | x; θ). End-to-end supervised learning 
+            from (image, parameter, reward) triplets. Requires substantial labeled dataset.</li>
+            <li><strong>Hybrid Approach:</strong> Combine discrete preset selection with continuous fine-tuning (preset + perturbations). 
+            Coarse preset choice (4 options) + fine parameter adjustment (8 multipliers).</li>
+            <li><strong>Multi-task Learning:</strong> Jointly predict multiple parameter vectors and preset probabilities from features. 
+            Better utilization of feature information.</li>
+            <li><strong>Transfer Learning:</strong> Pre-train on large external photogrammetry dataset; fine-tune on project-specific data. 
+            Reduce data requirements for feature-conditioned learning.</li>
+            <li><strong>Uncertainty Quantification:</strong> Predict confidence intervals on parameter selections (Bayesian approaches). 
+            Flag ambiguous scenarios; escalate to human review when confidence low.</li>
+        </ul>
+
+        <br><br>
+        <div style="text-align: center; color: #7f8c8d; font-size: 0.9em; margin-top: 40px;">
+            <p><strong>Document Generated:</strong> April 19, 2026</p>
+            <p><strong>System:</strong> Bimba3D EXIF-Based AI Optimization Framework v1.0</p>
+        </div>
+    </div>
+</body>
+</html>
