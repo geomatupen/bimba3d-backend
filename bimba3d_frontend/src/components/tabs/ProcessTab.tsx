@@ -172,7 +172,7 @@ type TrainingEngine = "gsplat" | "litegs";
 type TuneScope = "core_individual" | "core_only" | "core_ai_optimization" | "core_individual_plus_strategy";
 type TrendScope = "run" | "phase";
 type AiInputMode = "" | "exif_only" | "exif_plus_flight_plan" | "exif_plus_flight_plan_plus_external";
-type AiSelectorStrategy = "preset_bias" | "continuous_bandit_linear";
+type AiSelectorStrategy = "preset_bias" | "continuous_bandit_linear" | "contextual_continuous";
 type RunJitterMode = "fixed" | "random";
 type TuneScopeDropdownValue =
   | TuneScope
@@ -577,7 +577,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       : ""
   );
   const [aiSelectorStrategy, setAiSelectorStrategy] = useState<AiSelectorStrategy>(
-    cfg.ai_selector_strategy === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias"
+    cfg.ai_selector_strategy === "contextual_continuous"
+      ? "contextual_continuous"
+      : cfg.ai_selector_strategy === "continuous_bandit_linear"
+      ? "continuous_bandit_linear"
+      : "preset_bias"
   );
   const [baselineSessionIdForAi, setBaselineSessionIdForAi] = useState<string>(cfg.baseline_session_id ?? "");
   const [warmupAtStart, setWarmupAtStart] = useState<boolean>(cfg.warmup_at_start ?? false);
@@ -751,7 +755,7 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     tune_scope: 'Rule tuning scope: Core individual updates only LR groups. Core only updates LR groups + core strategy threshold. Core AI optimization uses AI input-mode preset selection and run-end best/end-anchor learning updates. Core individual + strategy updates LR groups and full strategy controls.',
     trend_scope: 'Core AI optimization trend scope setting retained for compatibility with existing payloads.',
     ai_input_mode: 'Initial preset mode for Core AI optimization. Leave empty to use the legacy controller-only flow. EXIF only uses image metadata, EXIF + flight plan adds sequence-derived flight features, and + external adds cheap image-derived scene features (no manual external inputs).',
-    ai_selector_strategy: 'Core AI optimization selector strategy. Preset bias uses discrete preset learning. Continuous bandit linear predicts bounded continuous multipliers per run.',
+    ai_selector_strategy: 'Core AI optimization selector strategy. Preset bias: discrete preset learning (4 presets). Continuous bandit (context-free): predicts multipliers using global means. Contextual continuous (NEW): predicts multipliers based on input context (EXIF/flight/scene features) using linear regression.',
     baseline_session_id: 'Completed baseline gsplat session used as reference for baseline-relative scoring in Core AI optimization modes. Required in train mode, optional in test mode.',
     warmup_at_start: 'Runs an automatic 3-phase warmup from this project base-session config (keeps base max_steps and densify_until_iter). Phase A forces rotating presets (balanced, conservative, geometry_fast, appearance_fast) with wider random jitter; Phases B and C switch back to adaptive preset selection with tighter jitter. Manual batch jitter controls are ignored while enabled.',
     run_count: 'Total sessions in this batch, including the selected session as run 1. Default 1 keeps manual behavior.',
@@ -933,7 +937,13 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
     setTuneScope(defaults.tune_scope ?? "core_individual_plus_strategy");
     setTrendScope(defaults.trend_scope === "phase" ? "phase" : "run");
     setAiInputMode(defaults.ai_input_mode ?? "");
-    setAiSelectorStrategy(defaults.ai_selector_strategy === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias");
+    setAiSelectorStrategy(
+      defaults.ai_selector_strategy === "contextual_continuous"
+        ? "contextual_continuous"
+        : defaults.ai_selector_strategy === "continuous_bandit_linear"
+        ? "continuous_bandit_linear"
+        : "preset_bias"
+    );
     setBaselineSessionIdForAi(defaults.baseline_session_id ?? "");
     setWarmupAtStart(defaults.warmup_at_start ?? false);
     setRunCount(defaults.run_count ?? 1);
@@ -1019,7 +1029,11 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
       ) {
         setAiInputMode(resolved.ai_input_mode as AiInputMode);
       }
-      if (resolved.ai_selector_strategy === "preset_bias" || resolved.ai_selector_strategy === "continuous_bandit_linear") {
+      if (
+        resolved.ai_selector_strategy === "preset_bias" ||
+        resolved.ai_selector_strategy === "continuous_bandit_linear" ||
+        resolved.ai_selector_strategy === "contextual_continuous"
+      ) {
         setAiSelectorStrategy(resolved.ai_selector_strategy as AiSelectorStrategy);
       }
       if (typeof resolved.baseline_session_id === "string") setBaselineSessionIdForAi(resolved.baseline_session_id);
@@ -5223,13 +5237,20 @@ export default function ProcessTab({ projectId }: ProcessTabProps) {
                                       </label>
                                       <select
                                         value={aiSelectorStrategy}
-                                        onChange={(e) => setAiSelectorStrategy(e.target.value === "continuous_bandit_linear" ? "continuous_bandit_linear" : "preset_bias")}
+                                        onChange={(e) => setAiSelectorStrategy(e.target.value as AiSelectorStrategy)}
                                         className="w-full px-2 py-1.5 text-xs border border-slate-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                                       >
                                         <option value="preset_bias">Preset bias</option>
-                                        <option value="continuous_bandit_linear">Continuous bandit (linear)</option>
+                                        <option value="continuous_bandit_linear">Continuous bandit (context-free)</option>
+                                        <option value="contextual_continuous">Contextual continuous (NEW)</option>
                                       </select>
-                                      <p className="mt-1 text-[10px] text-slate-500">Continuous bandit uses bounded continuous multipliers instead of fixed preset templates.</p>
+                                      <p className="mt-1 text-[10px] text-slate-500">
+                                        {aiSelectorStrategy === "contextual_continuous"
+                                          ? "Contextual continuous: Predicts multipliers based on EXIF/flight/scene context using linear regression."
+                                          : aiSelectorStrategy === "continuous_bandit_linear"
+                                          ? "Continuous bandit (context-free): Uses global means, ignores input context."
+                                          : "Preset bias: Discrete preset learning (conservative, balanced, geometry_fast, appearance_fast)."}
+                                      </p>
                                     </div>
                                   )}
                                   {hasAiInputModeCompareFlow && (

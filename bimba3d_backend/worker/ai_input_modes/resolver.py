@@ -12,6 +12,7 @@ from .exif_plus_flight_plan_plus_external import (
     build_preset as build_exif_plus_flight_plan_plus_external_preset,
 )
 from .continuous_learner import select_continuous
+from .contextual_continuous_learner import select_contextual_continuous
 from .learner import select_preset
 
 VALID_AI_INPUT_MODES = {
@@ -22,7 +23,7 @@ VALID_AI_INPUT_MODES = {
 
 CACHE_VERSION = 1
 VALID_PRESET_OVERRIDES = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
-VALID_SELECTOR_STRATEGIES = {"preset_bias", "continuous_bandit_linear"}
+VALID_SELECTOR_STRATEGIES = {"preset_bias", "continuous_bandit_linear", "contextual_continuous"}
 
 
 def _normalize_preset_override(value: Any) -> str:
@@ -230,7 +231,18 @@ def apply_initial_preset(
             },
         )
 
-    if selector_strategy == "continuous_bandit_linear":
+    if selector_strategy == "contextual_continuous":
+        selection = select_contextual_continuous(
+            project_dir=project_dir,
+            mode=mode,
+            x_features=result_features,
+            params=params,
+            exploration_mode="thompson",
+        )
+        selected_updates = dict(selection.get("updates") or {})
+        selected_preset = str(selection.get("selected_preset") or "contextual_continuous")
+        preset_forced = False
+    elif selector_strategy == "continuous_bandit_linear":
         selection = select_continuous(
             project_dir=project_dir,
             mode=mode,

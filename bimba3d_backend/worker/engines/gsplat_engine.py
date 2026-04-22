@@ -18,6 +18,10 @@ from ..ai_input_modes.continuous_learner import (
     record_run_penalty_continuous,
     update_from_run_continuous,
 )
+from ..ai_input_modes.contextual_continuous_learner import (
+    record_run_penalty_contextual_continuous,
+    update_from_run_contextual_continuous,
+)
 from ..ai_input_modes.learner import record_run_penalty, update_from_run
 
 
@@ -1643,7 +1647,19 @@ def run_training(
                 selector_strategy = str((preset_summary or {}).get("selector_strategy") or "preset_bias")
                 if selected_preset and mode_name:
                     try:
-                        if selector_strategy == "continuous_bandit_linear":
+                        if selector_strategy == "contextual_continuous":
+                            input_mode_learning_payload = record_run_penalty_contextual_continuous(
+                                project_dir=project_dir,
+                                mode=mode_name,
+                                selected_preset=selected_preset,
+                                yhat_scores=yhat_scores,
+                                penalty_reward=-1.5,
+                                x_features=dict((preset_summary or {}).get("features") or {}),
+                                reason="gaussian_hard_cap_reached",
+                                run_id=run_session_id,
+                                logger=logger,
+                            )
+                        elif selector_strategy == "continuous_bandit_linear":
                             input_mode_learning_payload = record_run_penalty_continuous(
                                 project_dir=project_dir,
                                 mode=mode_name,
@@ -1873,7 +1889,22 @@ def run_training(
                         logger.warning("Failed loading baseline eval history from %s: %s", baseline_eval_path, exc)
             if selected_preset and mode_name:
                 try:
-                    if selector_strategy == "continuous_bandit_linear":
+                    if selector_strategy == "contextual_continuous":
+                        input_mode_learning_payload = update_from_run_contextual_continuous(
+                            project_dir=project_dir,
+                            mode=mode_name,
+                            selected_preset=selected_preset,
+                            yhat_scores=yhat_scores,
+                            eval_history=eval_history,
+                            baseline_eval_history=baseline_eval_history,
+                            loss_by_step={int(k): float(v) for k, v in (loss_by_step or {}).items()},
+                            elapsed_by_step={int(k): float(v) for k, v in (elapsed_by_step or {}).items()},
+                            x_features=dict((preset_summary or {}).get("features") or {}),
+                            run_id=run_session_id,
+                            logger=logger,
+                            apply_update=allow_input_mode_learning_updates,
+                        )
+                    elif selector_strategy == "continuous_bandit_linear":
                         input_mode_learning_payload = update_from_run_continuous(
                             project_dir=project_dir,
                             mode=mode_name,
