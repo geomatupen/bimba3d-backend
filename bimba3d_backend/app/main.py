@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from bimba3d_backend.app.api.projects import router as projects_router
+from bimba3d_backend.app.api.training_pipeline import router as training_pipeline_router
 from bimba3d_backend.app.config import ALLOWED_ORIGINS
 from bimba3d_backend.app.config import DATA_DIR
 import json
@@ -38,6 +39,7 @@ app.add_middleware(
 )
 
 app.include_router(projects_router, prefix="/projects")
+app.include_router(training_pipeline_router, prefix="/training-pipeline")
 
 
 @app.on_event("startup")
