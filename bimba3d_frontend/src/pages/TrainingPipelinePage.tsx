@@ -22,7 +22,7 @@ interface PhaseConfig {
   preset_override?: string;
   update_model: boolean;
   context_jitter: boolean;
-  context_jitter_percent: number;
+  context_jitter_mode: string;  // "uniform", "mild", "gaussian"
   shuffle_order: boolean;
   session_execution_mode: string;
 }
@@ -56,7 +56,7 @@ export default function TrainingPipelinePage() {
       preset_override: "balanced",
       update_model: false,
       context_jitter: false,
-      context_jitter_percent: 0,
+      context_jitter_mode: "uniform",
       shuffle_order: false,
       session_execution_mode: "test",
     },
@@ -67,7 +67,7 @@ export default function TrainingPipelinePage() {
       passes: 1,
       update_model: true,
       context_jitter: false,
-      context_jitter_percent: 0,
+      context_jitter_mode: "uniform",
       shuffle_order: true,
       session_execution_mode: "train",
     },
@@ -78,7 +78,7 @@ export default function TrainingPipelinePage() {
       passes: 5,
       update_model: true,
       context_jitter: true,
-      context_jitter_percent: 5,
+      context_jitter_mode: "uniform",  // Sample uniformly from feature bounds
       shuffle_order: true,
       session_execution_mode: "train",
     },

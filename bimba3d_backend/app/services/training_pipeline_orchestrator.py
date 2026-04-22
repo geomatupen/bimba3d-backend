@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from bimba3d_backend.app.config import DATA_DIR
 from bimba3d_backend.app.services import training_pipeline_storage
+from bimba3d_backend.app.services.context_jitter import apply_context_jitter, apply_mild_jitter
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,8 @@ class PipelineOrchestrator:
         # Context jitter for multi-pass learning
         if phase.get("context_jitter", False):
             run_config["context_jitter_enabled"] = True
-            run_config["context_jitter_percent"] = phase.get("context_jitter_percent", 5)
+            # Jitter mode: "uniform" (sample from bounds), "mild" (±10%), or "gaussian" (±15%)
+            run_config["context_jitter_mode"] = phase.get("context_jitter_mode", "uniform")
 
         # Session execution mode
         run_config["session_execution_mode"] = phase.get("session_execution_mode", "train")

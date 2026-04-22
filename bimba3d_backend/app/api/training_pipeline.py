@@ -57,7 +57,7 @@ class PhaseConfig(BaseModel):
     preset_override: Optional[str] = None  # For baseline phase
     update_model: bool = True
     context_jitter: bool = False
-    context_jitter_percent: int = 5
+    context_jitter_mode: str = "uniform"  # "uniform" (sample bounds), "mild" (±10%), "gaussian" (±15%)
     shuffle_order: bool = True
     session_execution_mode: str = "train"
 
