@@ -430,13 +430,19 @@ async def elevate_learner_model(pipeline_id: str, request: ElevateLearnerModelRe
                 detail=f"Learner model for mode '{request.mode}' not found. Has the pipeline completed any training runs?"
             )
 
-        # Elevate the model
+        # Get pipeline projects and shared config for lineage tracking
+        pipeline_projects = config.get("projects", [])
+        shared_config = config.get("shared_config", {})
+
+        # Elevate the model with lineage
         model_record = model_registry.elevate_learner_model(
             shared_model_dir=shared_model_dir,
             mode=request.mode,
             model_name=request.model_name,
             pipeline_id=pipeline["id"],
             pipeline_name=pipeline["name"],
+            pipeline_projects=pipeline_projects,
+            shared_config=shared_config,
         )
 
         logger.info(f"Elevated learner model from pipeline {pipeline_id}: {model_record['model_id']}")

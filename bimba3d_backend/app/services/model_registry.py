@@ -403,6 +403,8 @@ def elevate_learner_model(
     model_name: str,
     pipeline_id: str,
     pipeline_name: str,
+    pipeline_projects: list[dict] = None,
+    shared_config: dict = None,
 ) -> dict:
     """
     Elevate a shared contextual continuous learner model to global model registry.
@@ -413,6 +415,8 @@ def elevate_learner_model(
         model_name: User-friendly name for the elevated model
         pipeline_id: Pipeline ID for provenance
         pipeline_name: Pipeline name for provenance
+        pipeline_projects: List of project configs from pipeline (for lineage tracking)
+        shared_config: Shared training configuration used across all pipeline projects
 
     Returns:
         Model record with model_id and paths
@@ -466,6 +470,47 @@ def elevate_learner_model(
 
     write_json_atomic(model_dir / "provenance.json", provenance)
 
+    # Build lineage from pipeline projects (simplified - no per-run configs)
+    # Pipeline uses ONE shared config for all projects, unlike manual projects
+    contributors = []
+    if pipeline_projects:
+        for project in pipeline_projects:
+            contributor = {
+                "project_name": project.get("name"),
+                "dataset_path": project.get("dataset_path"),
+                "source": "training_pipeline",
+                "image_count": project.get("image_count"),
+            }
+            contributors.append(contributor)
+
+    lineage = {
+        "contributors": contributors,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "total_runs": model_data.get("runs", 0),
+        "reward_mean": model_data.get("reward_mean", 0.0),
+        "note": "Pipeline uses shared config across all projects (stored in config/ directory)"
+    }
+
+    write_json_atomic(model_dir / "lineage.json", lineage)
+
+    # Store shared config used by pipeline (single config for all projects)
+    if shared_config:
+        config_dir = model_dir / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(config_dir / "shared_config.json", shared_config)
+
+    # Build provenance summary
+    project_names = [p.get("name") for p in (pipeline_projects or []) if p.get("name")]
+    provenance_summary = {
+        "mode": mode,
+        "runs": model_data.get("runs", 0),
+        "reward_mean": model_data.get("reward_mean", 0.0),
+        "contributor_count": len(contributors),
+        "unique_project_count": len(contributors),
+        "project_names": project_names[:10],  # First 10 for display
+    }
+
     # Register in global index with ai_profile for filtering
     model_record = {
         "model_id": model_id,
@@ -487,11 +532,7 @@ def elevate_learner_model(
             "ai_selector_strategy": "contextual_continuous",
             "context_dim": model_data.get("context_dim"),
         },
-        "provenance_summary": {
-            "mode": mode,
-            "runs": model_data.get("runs", 0),
-            "reward_mean": model_data.get("reward_mean", 0.0),
-        },
+        "provenance_summary": provenance_summary,
     }
 
     records = load_models_index()
