@@ -397,6 +397,104 @@ def summarize_lineage(contributors: list[dict]) -> dict:
     }
 
 
+def elevate_learner_model(
+    shared_model_dir: Path,
+    mode: str,
+    model_name: str,
+    pipeline_id: str,
+    pipeline_name: str,
+) -> dict:
+    """
+    Elevate a shared contextual continuous learner model to global model registry.
+
+    Args:
+        shared_model_dir: Path to pipeline's shared_models directory
+        mode: AI input mode (e.g., "exif_only", "exif_plus_flight_plan")
+        model_name: User-friendly name for the elevated model
+        pipeline_id: Pipeline ID for provenance
+        pipeline_name: Pipeline name for provenance
+
+    Returns:
+        Model record with model_id and paths
+    """
+    # Locate source learner model file
+    source_model_path = shared_model_dir / "contextual_continuous_selector" / f"{mode}.json"
+    if not source_model_path.exists():
+        raise FileNotFoundError(f"Learner model not found: {source_model_path}")
+
+    # Read model to validate and get metadata
+    try:
+        with open(source_model_path, "r", encoding="utf-8") as f:
+            model_data = json.load(f)
+    except Exception as e:
+        raise ValueError(f"Failed to read learner model: {e}")
+
+    if not isinstance(model_data, dict) or model_data.get("version") != 2:
+        raise ValueError("Invalid learner model format")
+
+    # Create model entry
+    model_id = build_model_id(f"{model_name}_{mode}")
+    model_dir = MODELS_DIR / model_id
+    model_dir.mkdir(parents=True, exist_ok=True)
+    created_at = utc_now_iso()
+
+    # Copy learner model file
+    target_model_path = model_dir / f"learner_{mode}.json"
+    shutil.copy2(source_model_path, target_model_path)
+
+    # Create metadata
+    metadata = {
+        "model_type": "contextual_continuous_learner",
+        "ai_input_mode": mode,
+        "context_dim": model_data.get("context_dim"),
+        "runs": model_data.get("runs"),
+        "reward_mean": model_data.get("reward_mean"),
+        "lambda_ridge": model_data.get("lambda_ridge"),
+        "last_update": model_data.get("last", {}).get("run_id"),
+    }
+
+    write_json_atomic(model_dir / "metadata.json", metadata)
+
+    # Create provenance
+    provenance = {
+        "source_type": "training_pipeline",
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "mode": mode,
+        "elevated_at": created_at,
+    }
+
+    write_json_atomic(model_dir / "provenance.json", provenance)
+
+    # Register in global index
+    model_record = {
+        "model_id": model_id,
+        "model_name": model_name,
+        "engine": "contextual_continuous_learner",
+        "created_at": created_at,
+        "source": {
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline_name,
+        },
+        "paths": {
+            "model_dir": model_dir.as_posix(),
+            "learner_model": target_model_path.as_posix(),
+        },
+        "artifact_format": "learner_json",
+        "provenance_summary": {
+            "mode": mode,
+            "runs": model_data.get("runs", 0),
+            "reward_mean": model_data.get("reward_mean", 0.0),
+        },
+    }
+
+    records = load_models_index()
+    records.append(model_record)
+    save_models_index(records)
+
+    return model_record
+
+
 def write_lineage(
     model_dir: Path,
     model_id: str,

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from bimba3d_backend.app.config import DATA_DIR
 from bimba3d_backend.app.services import training_pipeline_storage
 from bimba3d_backend.app.services import training_pipeline_orchestrator
+from bimba3d_backend.app.services import model_registry
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -379,3 +380,81 @@ async def delete_pipeline(pipeline_id: str):
         raise HTTPException(status_code=404, detail="Pipeline not found")
 
     return {"message": "Pipeline deleted successfully"}
+
+
+class ElevateLearnerModelRequest(BaseModel):
+    model_name: str = Field(..., description="User-friendly name for the elevated model")
+    mode: str = Field(..., description="AI input mode (e.g., exif_only, exif_plus_flight_plan)")
+
+
+@router.post("/{pipeline_id}/elevate-learner-model")
+async def elevate_learner_model(pipeline_id: str, request: ElevateLearnerModelRequest):
+    """
+    Elevate a pipeline's shared learner model to global model registry.
+
+    This allows the learned parameter selection model to be reused across
+    other projects and pipelines.
+    """
+    try:
+        # Get pipeline
+        pipeline = training_pipeline_storage.get_pipeline(pipeline_id)
+        if not pipeline:
+            raise HTTPException(status_code=404, detail="Pipeline not found")
+
+        config = pipeline["config"]
+        pipeline_folder = Path(config.get("pipeline_folder"))
+        if not pipeline_folder.exists():
+            raise HTTPException(status_code=404, detail="Pipeline folder not found")
+
+        # Locate shared_models directory
+        shared_model_dir = pipeline_folder / "shared_models"
+        if not shared_model_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="Shared models directory not found. Has the pipeline trained any projects?"
+            )
+
+        # Validate mode
+        valid_modes = ["exif_only", "exif_plus_flight_plan", "exif_plus_flight_plan_plus_external"]
+        if request.mode not in valid_modes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid mode. Must be one of: {', '.join(valid_modes)}"
+            )
+
+        # Check if learner model exists
+        learner_model_path = shared_model_dir / "contextual_continuous_selector" / f"{request.mode}.json"
+        if not learner_model_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Learner model for mode '{request.mode}' not found. Has the pipeline completed any training runs?"
+            )
+
+        # Elevate the model
+        model_record = model_registry.elevate_learner_model(
+            shared_model_dir=shared_model_dir,
+            mode=request.mode,
+            model_name=request.model_name,
+            pipeline_id=pipeline["id"],
+            pipeline_name=pipeline["name"],
+        )
+
+        logger.info(f"Elevated learner model from pipeline {pipeline_id}: {model_record['model_id']}")
+
+        return {
+            "success": True,
+            "model_id": model_record["model_id"],
+            "model_name": model_record["model_name"],
+            "mode": request.mode,
+            "created_at": model_record["created_at"],
+            "paths": model_record["paths"],
+            "provenance": model_record.get("provenance_summary", {}),
+        }
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to elevate learner model for pipeline {pipeline_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
