@@ -28,6 +28,9 @@ interface Project {
   modified_at?: string | null;
   has_outputs: boolean;
   session_count?: number;
+  created_by?: string | null;
+  pipeline_id?: string | null;
+  pipeline_name?: string | null;
 }
 
 export default function Dashboard() {
@@ -41,7 +44,7 @@ export default function Dashboard() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"modified" | "created" | "name" | "sessions" | "status">("modified");
+  const [sortBy, setSortBy] = useState<"modified" | "created" | "name" | "sessions" | "status" | "pipeline">("modified");
   const navigate = useNavigate();
   const [confirmProject, setConfirmProject] = useState<Project | null>(null);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
@@ -122,6 +125,28 @@ export default function Dashboard() {
         const aTs = a.modified_at ? Date.parse(a.modified_at) : 0;
         const bTs = b.modified_at ? Date.parse(b.modified_at) : 0;
         return bTs - aTs;
+      }
+      if (sortBy === "pipeline") {
+        // Pipeline projects first, then manual projects
+        const aPipeline = a.pipeline_name || "";
+        const bPipeline = b.pipeline_name || "";
+        const aIsPipeline = Boolean(aPipeline);
+        const bIsPipeline = Boolean(bPipeline);
+
+        if (aIsPipeline !== bIsPipeline) {
+          return aIsPipeline ? -1 : 1;
+        }
+
+        // Within pipeline projects, sort by pipeline name
+        if (aIsPipeline && bIsPipeline) {
+          const pipelineCompare = aPipeline.localeCompare(bPipeline, undefined, { sensitivity: "base" });
+          if (pipelineCompare !== 0) return pipelineCompare;
+        }
+
+        // Within same group, sort by name
+        const aName = (a.name || a.project_id).toLowerCase();
+        const bName = (b.name || b.project_id).toLowerCase();
+        return aName.localeCompare(bName, undefined, { sensitivity: "base", numeric: true });
       }
       const aDateRaw = sortBy === "modified" ? (a.modified_at || a.created_at) : a.created_at;
       const bDateRaw = sortBy === "modified" ? (b.modified_at || b.created_at) : b.created_at;
@@ -353,7 +378,7 @@ export default function Dashboard() {
               />
               <select
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as "modified" | "created" | "name" | "sessions" | "status")}
+                onChange={(e) => setSortBy(e.target.value as "modified" | "created" | "name" | "sessions" | "status" | "pipeline")}
                 className="px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="modified">Sort: Date Modified</option>
@@ -361,6 +386,7 @@ export default function Dashboard() {
                 <option value="name">Sort: Project Name</option>
                 <option value="sessions">Sort: Sessions in Project</option>
                 <option value="status">Sort: Status</option>
+                <option value="pipeline">Sort: Pipeline</option>
               </select>
             </div>
             <div className="space-y-4">
@@ -450,6 +476,14 @@ export default function Dashboard() {
 
                       {/* Metadata */}
                       <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500">
+                        {project.pipeline_name && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-purple-50 text-purple-700 font-medium border border-purple-200">
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                            </svg>
+                            {project.pipeline_name}
+                          </span>
+                        )}
                         {project.created_at && (
                           <span className="flex items-center gap-1.5">
                             <Clock className="w-3.5 h-3.5" />

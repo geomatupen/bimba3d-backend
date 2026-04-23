@@ -3290,6 +3290,22 @@ def list_projects():
                 modified_at = datetime.utcfromtimestamp(mtime_source.stat().st_mtime).isoformat() + "Z"
             except Exception:
                 modified_at = None
+
+            # Read pipeline metadata from config.json if exists
+            created_by = None
+            pipeline_id = None
+            pipeline_name = None
+            config_path = project_dir / "config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                        created_by = config.get("created_by")
+                        pipeline_id = config.get("pipeline_id")
+                        pipeline_name = config.get("pipeline_name")
+                except Exception:
+                    pass
+
             projects.append(
                 ProjectListItem(
                     project_id=project_id,
@@ -3300,6 +3316,9 @@ def list_projects():
                     modified_at=modified_at,
                     has_outputs=has_outputs,
                     session_count=session_count,
+                    created_by=created_by,
+                    pipeline_id=pipeline_id,
+                    pipeline_name=pipeline_name,
                 )
             )
 

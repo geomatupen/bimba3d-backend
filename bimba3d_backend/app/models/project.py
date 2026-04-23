@@ -17,6 +17,9 @@ class ProjectListItem(BaseModel):
     modified_at: Optional[str] = None
     has_outputs: bool = False
     session_count: int = 0
+    created_by: Optional[str] = None
+    pipeline_id: Optional[str] = None
+    pipeline_name: Optional[str] = None
 
 
 class CreateProjectRequest(BaseModel):
