@@ -34,6 +34,23 @@ def create_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     """
     pipeline_id = f"pipeline_{uuid.uuid4().hex[:12]}"
 
+    # Determine where to create pipeline folder
+    pipeline_directory = config.get("pipeline_directory")
+    if pipeline_directory:
+        # User specified custom location
+        pipeline_root = Path(pipeline_directory)
+    else:
+        # Default: same location as DATA_DIR
+        pipeline_root = DATA_DIR
+
+    # Create pipeline folder: {pipeline_root}/{pipeline_name}/
+    pipeline_name = config.get("name", f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    pipeline_folder = pipeline_root / pipeline_name
+    pipeline_folder.mkdir(parents=True, exist_ok=True)
+
+    # Store pipeline folder path in config for orchestrator
+    config["pipeline_folder"] = str(pipeline_folder)
+
     # Calculate total runs
     total_runs = 0
     for phase in config.get("phases", []):

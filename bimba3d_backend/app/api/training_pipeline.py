@@ -74,6 +74,7 @@ class ProjectConfig(BaseModel):
 class CreatePipelineRequest(BaseModel):
     name: str
     base_directory: str
+    pipeline_directory: Optional[str] = None  # Where to create pipeline folder (default: DATA_DIR)
     projects: list[ProjectConfig]
     shared_config: dict[str, Any]  # Training parameters shared across all runs
     phases: list[PhaseConfig]

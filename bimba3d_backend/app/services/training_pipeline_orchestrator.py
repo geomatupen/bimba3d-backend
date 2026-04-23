@@ -1,10 +1,12 @@
 """Training pipeline orchestrator - executes cross-project training with thermal management."""
 from __future__ import annotations
 
+import json
 import logging
 import random
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -136,6 +138,46 @@ class PipelineOrchestrator:
         finally:
             _running_orchestrators.pop(self.pipeline_id, None)
 
+    def _get_or_create_project_dir(self, pipeline: dict, project: dict) -> Path:
+        """Get or create project directory within pipeline folder.
+
+        Structure:
+          {pipeline_folder}/
+            ├── {project1_name}/  ← Project directory (COLMAP, runs, models)
+            ├── {project2_name}/
+            └── ...
+
+        Projects reference original data via config.json source_dir
+        """
+        config = pipeline["config"]
+        pipeline_folder = Path(config["pipeline_folder"])
+        project_name = project["name"]
+        project_dir = pipeline_folder / project_name
+
+        # Create project directory if it doesn't exist
+        if not project_dir.exists():
+            project_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create config.json with reference to source data
+            config_data = {
+                "id": str(uuid.uuid4()),
+                "name": project_name,
+                "source_dir": project["dataset_path"],  # Points to read-only data folder
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "created_by": "training_pipeline",
+                "pipeline_id": pipeline["id"],
+                "pipeline_name": config.get("name"),
+                **config.get("shared_config", {})
+            }
+
+            config_path = project_dir / "config.json"
+            with open(config_path, "w") as f:
+                json.dump(config_data, f, indent=2)
+
+            logger.info(f"Created project directory: {project_dir}")
+
+        return project_dir
+
     def _execute_run(self, pipeline: dict, project: dict, phase: dict, pass_num: int):
         """Execute a single training run."""
         project_name = project["name"]
@@ -144,6 +186,9 @@ class PipelineOrchestrator:
         logger.info(f"Pipeline {self.pipeline_id}: Running {project_name}, phase {phase['phase_number']}, pass {pass_num}")
 
         try:
+            # Get/create project directory in pipeline folder
+            project_dir = self._get_or_create_project_dir(pipeline, project)
+
             # Build run configuration
             run_config = self._build_run_config(pipeline, project, phase, pass_num)
 

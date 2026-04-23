@@ -33,6 +33,7 @@ export default function TrainingPipelinePage() {
 
   // Step 1: Dataset Selection
   const [baseDirectory, setBaseDirectory] = useState("");
+  const [pipelineDirectory, setPipelineDirectory] = useState("");
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [scanning, setScanning] = useState(false);
 
@@ -159,6 +160,7 @@ export default function TrainingPipelinePage() {
       const config = {
         name: pipelineName,
         base_directory: baseDirectory,
+        pipeline_directory: pipelineDirectory || null, // null = use default
         projects: selectedDatasets.map((d) => ({
           name: d.name,
           dataset_path: d.path,
@@ -250,7 +252,9 @@ export default function TrainingPipelinePage() {
           <h2>Step 1: Dataset Selection</h2>
 
           <div style={{ marginBottom: "15px" }}>
-            <label style={{ display: "block", marginBottom: "5px" }}>Base Directory:</label>
+            <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
+              Source Data Directory (Read-Only):
+            </label>
             <div style={{ display: "flex", gap: "10px" }}>
               <input
                 type="text"
@@ -263,6 +267,26 @@ export default function TrainingPipelinePage() {
                 {scanning ? "Scanning..." : "Scan Directory"}
               </button>
             </div>
+            <p style={{ fontSize: "12px", color: "#666", marginTop: "5px" }}>
+              Directory containing dataset folders with images (will NOT be modified)
+            </p>
+          </div>
+
+          <div style={{ marginBottom: "15px" }}>
+            <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
+              Pipeline Output Directory:
+            </label>
+            <input
+              type="text"
+              value={pipelineDirectory}
+              onChange={(e) => setPipelineDirectory(e.target.value)}
+              placeholder="Leave empty to use default projects directory"
+              style={{ width: "100%", padding: "8px" }}
+            />
+            <p style={{ fontSize: "12px", color: "#666", marginTop: "5px" }}>
+              Where to create the pipeline folder. Leave empty to use default location (same as manual projects).
+              Pipeline will create: {pipelineDirectory || "[default]"}/{pipelineName}/
+            </p>
           </div>
 
           {datasets.length > 0 && (
