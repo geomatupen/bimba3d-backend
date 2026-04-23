@@ -466,11 +466,11 @@ def elevate_learner_model(
 
     write_json_atomic(model_dir / "provenance.json", provenance)
 
-    # Register in global index
+    # Register in global index with ai_profile for filtering
     model_record = {
         "model_id": model_id,
         "model_name": model_name,
-        "engine": "contextual_continuous_learner",
+        "engine": "gsplat",  # Compatible with gsplat engine for UI filtering
         "created_at": created_at,
         "source": {
             "pipeline_id": pipeline_id,
@@ -481,6 +481,12 @@ def elevate_learner_model(
             "learner_model": target_model_path.as_posix(),
         },
         "artifact_format": "learner_json",
+        "ai_profile": {
+            "pipeline_kind": "contextual_continuous",
+            "ai_input_mode": mode,
+            "ai_selector_strategy": "contextual_continuous",
+            "context_dim": model_data.get("context_dim"),
+        },
         "provenance_summary": {
             "mode": mode,
             "runs": model_data.get("runs", 0),
