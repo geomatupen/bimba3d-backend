@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Optimization Input Modes Specification</title>
+  <title>AI Optimization Input Modes - Implementation Reference</title>
   <style>
     :root {
       --paper: #f7f6f2;
@@ -117,7 +117,7 @@
       border-bottom: 1px solid var(--line);
       color: #18396f;
       font-weight: 700;
-      font-size: 1.08rem;
+      font-size: 1.58rem;
     }
 
     .chapter-body {
@@ -264,979 +264,362 @@
   <div class="frame">
     <article class="book">
       <header class="cover">
-        <h1>AI Optimization Input Modes Specification</h1>
+        <h1>AI Optimization Input Modes - Implementation Reference</h1>
         <p>
-          This document defines the implemented three-mode input pipeline for modified-mode AI optimization.
-          The purpose is to select the best initial learning-rate preset from scene and flight signals,
-          while keeping feature extraction fast and reliable from uploaded images.
+          Reference documentation for the implemented EXIF-based AI optimization system.
+          Features three input modes (EXIF-only, flight plan, external features) and two selector strategies
+          (preset-bias and contextual-continuous) for automatic training parameter selection.
         </p>
       </header>
 
       <div class="content">
         <nav class="toc" aria-label="Table of contents">
           <h2>Contents</h2>
-          <a href="#chapter-1">Chapter 1 - Purpose and Scope</a>
-          <a href="#chapter-2">Chapter 2 - The Three Modes</a>
-          <a href="#chapter-3">Chapter 3 - What Goes Into x</a>
-          <a href="#chapter-4">Chapter 4 - What y and yhat Mean</a>
-          <a href="#chapter-4b">Chapter 4B - Learning Loop After yhat</a>
-          <a href="#chapter-4c">Chapter 4C - Parameters Learned and Updated</a>
-          <a href="#chapter-5">Chapter 5 - Example Cases</a>
-          <a href="#chapter-6">Chapter 6 - Implementation Summary</a>
-          <a href="#chapter-7">Chapter 7 - Implementation Constraints</a>
-          <a href="#chapter-8">Chapter 8 - Data Strategy</a>
-          <a href="#chapter-9">Chapter 9 - Initialization Warmup Behavior</a>
+          <a href="#chapter-1">1 - System Overview</a>
+          <a href="#chapter-2">2 - Input Modes (EXIF Features)</a>
+          <a href="#chapter-3">3 - Selector: Preset-Bias</a>
+          <a href="#chapter-4">4 - Selector: Contextual-Continuous</a>
+          <a href="#chapter-5">5 - Reward Formula (Common)</a>
+          <a href="#chapter-6">6 - Training Pipeline</a>
         </nav>
 
         <main>
           <section id="chapter-1" class="chapter">
-            <div class="chapter-head">Chapter 1 - Purpose and Scope</div>
+            <div class="chapter-head">1 - System Overview</div>
             <div class="chapter-body">
               <p>
-                This specification defines an input-driven initialization strategy for modified-mode AI optimization with two practical targets: first, reduce the time required to match or beat the loss reached by the baseline run; second, improve final reconstruction quality whenever possible after that point. In this document, baseline explicitly means the normal gsplat run without modified-mode optimization. Evaluation is therefore performed on both time and quality, while feature extraction remains lightweight so most compute stays focused on training.
+                The AI optimization system automatically adjusts training parameters based on scene characteristics.
+                It has two independent dimensions: input modes (what features to use) and selector strategies (how to choose parameters).
               </p>
 
-              <h3>Evaluation Method</h3>
-              <p>
-                The evaluation procedure is designed to verify both target factors, time and quality, in a repeatable way.
-              </p>
-              <ol>
-                <li>Run a baseline reference first using normal gsplat with no modified-mode optimization.</li>
-                <li>Record baseline metrics: time-to-target-loss, loss at fixed checkpoints (for example 1k, 3k, 5k), and final loss at the selected stop step.</li>
-                <li>Run modified mode 1 (<code>exif_only</code>) in a batch sequence (for example 10 runs) so the model can keep learning and propose different initial learning-rate presets across runs.</li>
-                <li>Keep comparison conditions fixed across baseline and modified runs: same project data, same max steps, same compute environment, and comparable seed policy.</li>
-                <li>For each run, record both anchors: best-loss anchor (first eval at or after <code>t_best</code>) and end-step anchor.</li>
-                <li>Compute quality score and time score at both anchors, then compute the run decision score using the larger anchor score.</li>
-                <li>Compare baseline against intermediate checkpoints (for example run 5 and run 6) and the later checkpoint (run 10) using the same scoring policy.</li>
-                <li>Mark the approach successful when time-to-baseline-quality is reduced; treat additional quality improvement beyond baseline as an additional gain.</li>
-              </ol>
+              <h3>Input Modes (Orthogonal to Selectors)</h3>
+              <table>
+                <thead>
+                  <tr><th>Mode</th><th>Features</th><th>Context Dim</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>exif_only</code></td>
+                    <td>Camera metadata only</td>
+                    <td>9</td>
+                  </tr>
+                  <tr>
+                    <td><code>exif_plus_flight_plan</code></td>
+                    <td>Camera + GPS/orientation</td>
+                    <td>19</td>
+                  </tr>
+                  <tr>
+                    <td><code>exif_plus_flight_plan_plus_external</code></td>
+                    <td>Camera + GPS + image analysis</td>
+                    <td>29</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h3>Selector Strategies (Independent Choice)</h3>
+              <table>
+                <thead>
+                  <tr><th>Strategy</th><th>Approach</th><th>File</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>preset_bias</code></td>
+                    <td>4 discrete presets with learned bias</td>
+                    <td><code>learner.py</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>contextual_continuous</code></td>
+                    <td>8 continuous multipliers (linear bandit)</td>
+                    <td><code>contextual_continuous_learner.py</code></td>
+                  </tr>
+                </tbody>
+              </table>
+
               <div class="tip">
-                Suggested reporting format: baseline vs run 5 vs run 6 vs run 10, with columns for time-to-target-loss,
-                best-loss step, best-anchored quality, end-step quality, and final run decision score.
-                For detailed equations and operator-level decision logic, see Chapter 4B.
+                <strong>Key insight:</strong> Input modes and selector strategies are independent. Any input mode can work with
+                any selector. Reward calculation (Chapter 5) is shared by both selectors.
               </div>
             </div>
           </section>
 
           <section id="chapter-2" class="chapter">
-            <div class="chapter-head">Chapter 2 - The Three Modes</div>
+            <div class="chapter-head">2 - Input Modes (EXIF Features)</div>
             <div class="chapter-body">
               <p>
-                Modified mode uses three stacked input modes in config.
+                Input modes define which features are extracted from images. All modes are <strong>independent of the selector strategy</strong>.
+                Modes are hierarchical - each builds on the previous.
               </p>
+
+              <h3>Mode 1: <code>exif_only</code> (9 features)</h3>
+              <p><strong>Context vector:</strong> [1.0 intercept, focal_norm, shutter_norm, iso_norm, width_norm, height_norm,
+                focal_missing, shutter_missing, iso_missing]</p>
               <table>
                 <thead>
-                  <tr>
-                    <th>Mode</th>
-                    <th>Input Policy</th>
-                    <th>Use Case</th>
-                  </tr>
+                  <tr><th>Feature</th><th>Source</th><th>Normalization</th></tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td><code>exif_only</code></td>
-                    <td>Use only direct EXIF and file metadata from the uploaded images.</td>
-                    <td>Fastest AI-only mode. Suitable for minimal processing and no scene inference.</td>
-                  </tr>
-                  <tr>
-                    <td><code>exif_plus_flight_plan</code></td>
-                    <td>Use EXIF plus cheap sequence-derived flight-plan features from the same images.</td>
-                    <td>Best balance between accuracy and cost when the image set already contains GPS/time/orientation data.</td>
-                  </tr>
-                  <tr>
-                    <td><code>exif_plus_flight_plan_plus_external</code></td>
-                    <td>Use EXIF + flight-plan features + extra cheap image features like vegetation proxy and roughness proxy.</td>
-                    <td>Best for richer scene understanding without requiring manual external inputs.</td>
-                  </tr>
+                  <tr><td>Focal length</td><td>EXIF metadata</td><td>(focal - 50) / 150</td></tr>
+                  <tr><td>Shutter speed</td><td>EXIF metadata</td><td>log10(shutter + 1e-6) / 3</td></tr>
+                  <tr><td>ISO</td><td>EXIF metadata</td><td>(log10(iso) - 2) / 3</td></tr>
+                  <tr><td>Image width/height</td><td>Image dimensions</td><td>(w - 4000) / 2000, (h - 3000) / 1500</td></tr>
+                  <tr><td>Missing flags</td><td>Binary indicators</td><td>0 or 1 for each EXIF field</td></tr>
                 </tbody>
               </table>
+
+              <h3>Mode 2: <code>exif_plus_flight_plan</code> (19 features)</h3>
+              <p><strong>Adds:</strong> [gsd_norm, overlap, coverage, angle_norm, heading, gsd_missing, overlap_missing, coverage_missing, angle_missing, heading_missing]</p>
+              <table>
+                <thead>
+                  <tr><th>Feature</th><th>Source</th><th>Normalization</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>GSD median</td><td>Computed from altitude + focal length</td><td>gsd / 0.5</td></tr>
+                  <tr><td>Overlap proxy</td><td>Image spacing vs footprint</td><td>[0-1] range</td></tr>
+                  <tr><td>Coverage spread</td><td>GPS bounding box diagonal</td><td>bbox_diag / 600</td></tr>
+                  <tr><td>Camera angle</td><td>COLMAP pose analysis</td><td>bucket / 3 (0=miss, 1=nadir, 2=oblique, 3=mixed)</td></tr>
+                  <tr><td>Heading consistency</td><td>Movement direction stability</td><td>[0-1] range</td></tr>
+                </tbody>
+              </table>
+
+              <h3>Mode 3: <code>exif_plus_flight_plan_plus_external</code> (29 features)</h3>
+              <p><strong>Adds:</strong> [veg_cover, veg_complexity, terrain_rough, texture, blur_risk, green_missing, veg_complexity_missing, roughness_missing, texture_missing, blur_missing]</p>
+              <table>
+                <thead>
+                  <tr><th>Feature</th><th>Source</th><th>Normalization</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Vegetation cover</td><td>Green pixel percentage</td><td>[0-1] range</td></tr>
+                  <tr><td>Vegetation complexity</td><td>Green texture entropy</td><td>[0-1] range</td></tr>
+                  <tr><td>Terrain roughness</td><td>Luminance variance</td><td>[0-1] range</td></tr>
+                  <tr><td>Texture density</td><td>Edge density (Sobel)</td><td>[0-1] range</td></tr>
+                  <tr><td>Blur/motion risk</td><td>Laplacian sharpness (inverted)</td><td>[0-1] range</td></tr>
+                </tbody>
+              </table>
+
               <div class="tip">
-                The three modes are stacked. Mode 2 adds on top of Mode 1. Mode 3 adds on top of Mode 2.
+                <strong>Implementation:</strong> See <code>build_context_vector()</code> in <code>contextual_continuous_learner.py</code> (line 143).
+                The intercept term (1.0) allows non-zero baseline predictions.
               </div>
             </div>
           </section>
 
           <section id="chapter-3" class="chapter">
-            <div class="chapter-head">Chapter 3 - What Goes Into x</div>
+            <div class="chapter-head">3 - Selector: Preset-Bias</div>
             <div class="chapter-body">
               <p>
-                <code>x</code> is the feature vector built from the uploaded image set. The key rule is that every feature
-                should be easy to read from the uploaded images or easy to derive quickly from them. No manual input.
+                <strong>File:</strong> <code>learner.py</code><br>
+                <strong>Strategy:</strong> Discrete preset selection with learned bias per mode.<br>
+                <strong>Works with:</strong> All three input modes (but doesn't use context features directly).
               </p>
+
+              <h3>How It Works</h3>
+              <ol>
+                <li>Defines 4 hardcoded presets with fixed multiplier tables</li>
+                <li>Maintains per-mode bias values for each preset</li>
+                <li>Selects preset = argmax(bias[preset] + heuristic_bonus)</li>
+                <li>After run, updates bias based on reward relative to baseline</li>
+              </ol>
+
+              <h3>The 4 Presets</h3>
+              <table>
+                <thead>
+                  <tr><th>Preset</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>conservative</code></td><td>Lower LR, safer for uncertain scene quality/blur/vegetation</td></tr>
+                  <tr><td><code>balanced</code></td><td>Default middle ground (baseline multipliers = 1.0)</td></tr>
+                  <tr><td><code>geometry_fast</code></td><td>Higher geometry LR for clean structured scenes</td></tr>
+                  <tr><td><code>appearance_fast</code></td><td>Higher appearance LR when color fitting is bottleneck</td></tr>
+                </tbody>
+              </table>
+
+              <h3>Preset Multiplier Values</h3>
+              <table>
+                <thead>
+                  <tr><th>Multiplier</th><th>conservative</th><th>balanced</th><th>geometry_fast</th><th>appearance_fast</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>feature_lr_mult</code></td><td>0.80</td><td>1.00</td><td>0.90</td><td>1.20</td></tr>
+                  <tr><td><code>position_lr_init_mult</code></td><td>0.80</td><td>1.00</td><td>1.16</td><td>0.96</td></tr>
+                  <tr><td><code>scaling_lr_mult</code></td><td>0.84</td><td>1.00</td><td>1.16</td><td>0.96</td></tr>
+                  <tr><td><code>opacity_lr_mult</code></td><td>0.84</td><td>1.00</td><td>0.96</td><td>1.16</td></tr>
+                  <tr><td><code>rotation_lr_mult</code></td><td>0.90</td><td>1.00</td><td>1.12</td><td>0.98</td></tr>
+                  <tr><td><code>densify_grad_threshold_mult</code></td><td>1.40</td><td>1.00</td><td>0.84</td><td>1.10</td></tr>
+                  <tr><td><code>opacity_threshold_mult</code></td><td>1.30</td><td>1.00</td><td>0.84</td><td>1.04</td></tr>
+                  <tr><td><code>lambda_dssim_mult</code></td><td>1.10</td><td>1.00</td><td>0.96</td><td>1.16</td></tr>
+                </tbody>
+              </table>
+
+              <h3>Bias Update Rule</h3>
+              <p>After each run with reward signal:</p>
+              <ul>
+                <li>Selected preset: <code>bias[selected] += 0.10 * (reward - reward_mean)</code></li>
+                <li>Other presets: <code>bias[others] -= 0.015 * (reward - reward_mean)</code></li>
+                <li>All bias values clamped to [-3.0, 3.0]</li>
+              </ul>
+
               <div class="tip">
-                Fallback rule used in all three modes: if a value is missing, fill it and set a missing flag.
-                "Dataset middle value" means the middle value seen in training data for that field.
-              </div>
-
-              <h3>3.1 Direct EXIF features</h3>
-              <p>
-                These are the cheapest and most reliable inputs because they come straight from image metadata.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Feature</th>
-                    <th>Why it helps</th>
-                    <th>Example</th>
-                    <th>Formula</th>
-                    <th>Fallback when missing</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>Focal length</td>
-                    <td>Changes field of view and overlap sensitivity.</td>
-                    <td><code>24.0</code> mm</td>
-                    <td><code>focal_length_mm = clamp(median(EXIF.FocalLength), 8.0, 300.0)</code></td>
-                    <td><code>24.0</code>; <code>focal_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Shutter speed</td>
-                    <td>Proxy for motion blur risk and exposure time.</td>
-                    <td><code>0.004</code> s</td>
-                    <td><code>shutter_s = clamp(median(EXIF.ExposureTime), 0.0001, 1.0)</code></td>
-                    <td><code>0.004</code>; <code>shutter_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>ISO</td>
-                    <td>Proxy for sensor noise and low-light capture conditions.</td>
-                    <td><code>100</code></td>
-                    <td><code>iso = clamp(median(EXIF.ISO), 50.0, 102400.0)</code></td>
-                    <td><code>100.0</code>; <code>iso_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Image dimensions</td>
-                    <td>Resolution affects detail density and processing scale.</td>
-                    <td><code>4000x3000</code></td>
-                    <td><code>img_width_median = clamp(median(width), 640, 8000)</code>, <code>img_height_median = clamp(median(height), 480, 6000)</code></td>
-                    <td><code>4000x3000</code> defaults; no separate size-missing flag</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <h3>3.2 Flight-plan features derived from the image set</h3>
-              <p>
-                Flight plan is usually not a single EXIF field. It is inferred cheaply from the image set by combining
-                GPS, time, and heading/orientation patterns across images.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Derived feature</th>
-                    <th>How to derive it cheaply</th>
-                    <th>What it tells the model</th>
-                    <th>Formula</th>
-                    <th>Fallback when missing</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>GSD median</td>
-                    <td>Uses effective ground resolution instead of raw altitude for stronger geometric relevance.</td>
-                    <td>Scene scale in meters-per-pixel.</td>
-                    <td><code>gsd_median = (altitude_m * sensor_width_mm) / (focal_mm * image_width_px)</code> (clamped)</td>
-                    <td><code>0.0</code>; <code>gsd_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Camera angle bucket (numeric)</td>
-                    <td>Dominant pose orientation from COLMAP camera poses, encoded numerically.</td>
-                    <td>0 = missing, 1 = nadir, 2 = oblique, 3 = mixed</td>
-                    <td><code>bucket(a): nadir if a&lt;= -80 else oblique</code>; output <code>3</code> when both classes appear, else <code>1/2</code></td>
-                    <td><code>0</code>; <code>angle_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Heading consistency</td>
-                    <td>Measure how stable the movement direction is across image order.</td>
-                    <td>Whether the flight is a straight mission or a turning mission.</td>
-                    <td><code>heading_consistency = clamp(1 - std(turn_delta_deg)/90, 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>heading_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Coverage spread</td>
-                    <td>Compute GPS bounding box and track spread.</td>
-                    <td>How broad and diverse the sampled scene is.</td>
-                    <td><code>coverage_spread = clamp(bbox_diag_m/600, 0, 1)</code></td>
-                    <td><code>0.0</code>; <code>coverage_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Overlap proxy</td>
-                    <td>Use distance between successive captures relative to estimated footprint.</td>
-                    <td>How dense the image sampling is.</td>
-                    <td><code>overlap_proxy = clamp(1 - avg_step_m / max(10, 1.2*avg_alt_m), 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>overlap_missing=1</code></td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <h3>3.3 External features derived from the images themselves</h3>
-              <p>
-                These are still internal to the dataset. They are not manual inputs; they are cheap summaries computed
-                from the images after upload.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Feature</th>
-                    <th>Why it matters</th>
-                    <th>Cheap derivation idea</th>
-                    <th>Formula</th>
-                    <th>Fallback when missing</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>Vegetation cover percentage</td>
-                    <td>Vegetation scenes often converge differently from built scenes.</td>
-                    <td>Green-area proxy from RGB images.</td>
-                    <td><code>green_cover = green_hits / pixels, green if (g&gt;1.05r and g&gt;1.05b)</code></td>
-                    <td><code>0.0</code>; <code>green_area_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Vegetation complexity score</td>
-                    <td>Dense and irregular vegetation is harder than simple flat green regions.</td>
-                    <td>Combine green texture entropy and edge density into one score.</td>
-                    <td><code>veg_complexity = clamp(0.55*green_cover + 0.45*texture_density, 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>veg_complexity_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Terrain roughness / slope proxy</td>
-                    <td>Rough terrain often needs more conservative geometry updates.</td>
-                    <td>Use image overlap geometry and local visual variance.</td>
-                    <td><code>roughness_proxy = clamp(std(luma)/64, 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>roughness_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Texture density</td>
-                    <td>Rich texture usually supports faster pose/geometry learning.</td>
-                    <td>Edge density or frequency-energy proxy.</td>
-                    <td><code>texture_density = clamp(sum(|gx|+|gy|)/((w-2)(h-2)*255), 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>texture_missing=1</code></td>
-                  </tr>
-                  <tr>
-                    <td>Blur / motion risk</td>
-                    <td>Blurred data often needs safer initial settings.</td>
-                    <td>Sharpness score from a fast Laplacian measure.</td>
-                    <td><code>blur_risk = 1 - clamp(sum(|laplacian|)/((w-2)(h-2)*255), 0, 1)</code></td>
-                    <td><code>0.5</code> neutral; <code>blur_missing=1</code></td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <div class="warn">
-                External vegetation input is defined as green-area proxy from RGB images.
+                <strong>Implementation:</strong> See <code>select_preset()</code> (line 69) and <code>update_from_run()</code> (line 120) in <code>learner.py</code>.
+                Preset multipliers defined in <code>common.py</code> <code>apply_preset_updates()</code>.
               </div>
             </div>
           </section>
 
           <section id="chapter-4" class="chapter">
-            <div class="chapter-head">Chapter 4 - What y and yhat Mean</div>
+            <div class="chapter-head">4 - Selector: Contextual-Continuous</div>
             <div class="chapter-body">
               <p>
-                The model learns which initial learning-rate preset gives the best result after a short trial,
-                such as 5k steps.
+                <strong>File:</strong> <code>contextual_continuous_learner.py</code><br>
+                <strong>Strategy:</strong> Predicts 8 continuous multipliers using linear contextual bandit (Thompson sampling).<br>
+                <strong>Works with:</strong> All three input modes (uses context vector for predictions).
               </p>
 
-              <table>
-                <thead>
-                  <tr>
-                    <th>Term</th>
-                    <th>Meaning</th>
-                    <th>Example</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><code>x</code></td>
-                    <td>Feature vector from EXIF and cheap derived scene summaries.</td>
-                    <td>focal_length_mm, shutter_s, gsd_median, camera_angle_bucket, vegetation_cover_percentage</td>
-                  </tr>
-                  <tr>
-                    <td><code>y</code></td>
-                    <td>Ground-truth best preset after running all candidate presets for 5k steps.</td>
-                    <td><code>balanced</code> or <code>geometry_fast</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>yhat</code></td>
-                    <td>Model prediction for which preset should win.</td>
-                    <td>Highest score assigned to <code>balanced</code></td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <p>
-                A simple setup is to define a small preset set and let the model score those presets. That keeps training
-                stable and makes evaluation easy.
-              </p>
-
-              <table>
-                <thead>
-                  <tr>
-                    <th>Preset</th>
-                    <th>Typical behavior</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><code>conservative</code></td>
-                    <td>Lower initial LR, safer when scene quality is uncertain or blur/vegetation is high.</td>
-                  </tr>
-                  <tr>
-                    <td><code>balanced</code></td>
-                    <td>Middle ground for mixed scenes and general-purpose flights.</td>
-                  </tr>
-                  <tr>
-                    <td><code>geometry_fast</code></td>
-                    <td>Higher geometry-related LR, useful for clean structured scenes and corridor/grid missions.</td>
-                  </tr>
-                  <tr>
-                    <td><code>appearance_fast</code></td>
-                    <td>More aggressive appearance learning, useful when color/detail fitting is the bottleneck.</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <p>
-                Exact behavior is implemented as multipliers on key run-start parameters. These multipliers are applied,
-                then values are clamped to safe ranges.
-              </p>
-
-              <p>
-                Current implementation note: preset deviations were amplified by 200% around the balanced baseline.
-                Example: +8% became +16%, and -8% became -16%.
-              </p>
-
-              <table>
-                <thead>
-                  <tr>
-                    <th>Parameter multiplier</th>
-                    <th>conservative</th>
-                    <th>balanced</th>
-                    <th>geometry_fast</th>
-                    <th>appearance_fast</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><code>feature_lr_mult</code></td>
-                    <td><code>0.80</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>0.90</code></td>
-                    <td><code>1.20</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>position_lr_init_mult</code></td>
-                    <td><code>0.80</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>1.16</code></td>
-                    <td><code>0.96</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>scaling_lr_mult</code></td>
-                    <td><code>0.84</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>1.16</code></td>
-                    <td><code>0.96</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>opacity_lr_mult</code></td>
-                    <td><code>0.84</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>0.96</code></td>
-                    <td><code>1.16</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>rotation_lr_mult</code></td>
-                    <td><code>0.90</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>1.12</code></td>
-                    <td><code>0.98</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>tune_interval_mult</code></td>
-                    <td><code>0.90</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>1.10</code></td>
-                    <td><code>1.06</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>tune_min_improvement_mult</code></td>
-                    <td><code>0.90</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>1.06</code></td>
-                    <td><code>1.04</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>densify_grad_threshold_mult</code></td>
-                    <td><code>1.40</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>0.84</code></td>
-                    <td><code>1.10</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>opacity_threshold_mult</code></td>
-                    <td><code>1.30</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>0.84</code></td>
-                    <td><code>1.04</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>lambda_dssim_mult</code></td>
-                    <td><code>1.10</code></td>
-                    <td><code>1.00</code></td>
-                    <td><code>0.96</code></td>
-                    <td><code>1.16</code></td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <div class="tip">
-                If a later version requires a continuous target, y can become a regression target over LR multipliers.
-                For the first version, classification over presets is simpler and cheaper.
-              </div>
-            </div>
-          </section>
-
-          <section id="chapter-4b" class="chapter">
-            <div class="chapter-head">Chapter 4B - Learning Loop After yhat</div>
-            <div class="chapter-body">
-              <p>
-                This section defines how the AI decides after <code>yhat</code> is produced. The flow is fixed and repeatable.
-                It compares quality and time against the normal gsplat baseline.
-              </p>
-              <ol class="method-steps">
-                <li>
-                  <span class="step-title">Step 1. Predict and pick one preset.</span>
-                  The model outputs scores over all preset candidates and selects the highest score.
-                  <div class="equation"><span class="eq-main"><span class="v">k</span><sup>*</sup> = argmax<sub><span class="v">k</span></sub>(<span class="v">s</span><sub><span class="v">k</span></sub>), with <span class="v">y</span><sub>hat</sub> = [<span class="v">s</span><sub>1</sub>, <span class="v">s</span><sub>2</sub>, ..., <span class="v">s</span><sub><span class="v">K</span></sub>]</span><span class="eq-no">(4B.1)</span></div>
-                  In the current implementation, the heuristic preset receives a small fixed score bonus before selection (<code>+0.002</code>), while learned bias remains mode-specific and persistent.
-                  Meaning: <code>argmax</code> means "pick the index of the largest value". <code>yhat</code> is the model score vector, <code>s_k</code> is the score of preset <code>k</code>, and <code>k*</code> is the selected preset index.
-                  Example: if <code>yhat = [0.12, 0.41, 0.33, 0.14]</code>, then <code>k* = 2</code> because <code>0.41</code> is the largest score.
-                </li>
-                <li>
-                  <span class="step-title">Step 2. Run training and find the best-loss step.</span>
-                  Training runs with preset <code>k^*</code>. The best-loss step is the step with minimum training loss.
-                  <div class="equation"><span class="eq-main"><span class="v">t</span><sub>best</sub> = argmin<sub><span class="v">t</span></sub> <span class="v">L</span>(<span class="v">t</span>)</span><span class="eq-no">(4B.2)</span></div>
-                  Meaning: <code>argmin</code> means "pick the index of the smallest value". <code>L(t)</code> is training loss at step <code>t</code>. <code>t_best</code> is the step where loss is lowest.
-                  Example: if loss at steps <code>[1000, 1200, 1400, 1600]</code> is <code>[0.081, 0.073, 0.069, 0.071]</code>, then <code>t_best = 1400</code>.
-                </li>
-                <li>
-                  <span class="step-title">Step 3. Select the best-anchored evaluation checkpoint.</span>
-                  The checkpoint is the first eval step at or after <code>t_best</code>. If that does not exist, the last eval step is used.
-                  <div class="equation"><span class="eq-main"><span class="v">t</span><sub>eval,best</sub> = min { <span class="v">t</span> &isin; <span class="v">E</span> | <span class="v">t</span> &ge; <span class="v">t</span><sub>best</sub> }; else <span class="v">t</span><sub>eval,best</sub> = max(<span class="v">E</span>)</span><span class="eq-no">(4B.3)</span></div>
-                  Meaning: <code>E</code> is the set of eval steps. <code>min{...}</code> means "the smallest value that satisfies the condition". <code>max(E)</code> means "the largest eval step".
-                  Example: if <code>E = [1000, 2000, 3000]</code> and <code>t_best = 1400</code>, then <code>t_eval,best = 2000</code>.
-                </li>
-                <li>
-                  <span class="step-title">Step 4. Compute loss, quality, and time scores.</span>
-                  Loss score uses normalized loss (inverted), quality uses normalized PSNR/SSIM/LPIPS, and time uses normalized runtime to a reference.
-                  <div class="equation"><span class="eq-main">Norm(v) = (v - min(M)) / (max(M) - min(M)), where M = run_values &cup; baseline_values</span><span class="eq-no">(4B.4a)</span></div>
-                  <div class="equation"><span class="eq-main">If max(M) = min(M), then Norm(v) = 0.5 for all values in M</span><span class="eq-no">(4B.4b)</span></div>
-                  <div class="equation"><span class="eq-main">For lower-is-better metrics (Loss, LPIPS): Norm<sub>inv</sub>(v) = 1 - Norm(v)</span><span class="eq-no">(4B.4c)</span></div>
-                  <div class="equation"><span class="eq-main"><span class="v">L</span><sub>score</sub>(<span class="v">t</span>) = 1 - Loss<sub>norm</sub>(<span class="v">t</span>)</span><span class="eq-no">(4B.4)</span></div>
-                  <div class="equation"><span class="eq-main"><span class="v">Q</span>(<span class="v">t</span>) = <span class="v">w</span><sub>psnr</sub> PSNR<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>ssim</sub> SSIM<sub>norm</sub>(<span class="v">t</span>) + <span class="v">w</span><sub>lpips</sub> (1 - LPIPS<sub>norm</sub>(<span class="v">t</span>))</span><span class="eq-no">(4B.4)</span></div>
-                  <div class="equation"><span class="eq-main"><span class="v">T</span>(<span class="v">t</span>) = 1 - clamp( time_to_step(<span class="v">t</span>) / time<sub>ref</sub>, 0, 1 )</span><span class="eq-no">(4B.5)</span></div>
-                  Meaning: normalization is computed on a shared run+baseline range per metric so both sides use the same scale before comparison. <code>L_score(t)</code> is the inverted normalized loss score, <code>Q(t)</code> is quality score, and <code>T(t)</code> is time score. <code>clamp(x,0,1)</code> means force <code>x</code> into the range <code>[0,1]</code>. LPIPS is inverted by <code>(1 - LPIPS_norm)</code> so larger is better, like PSNR and SSIM.
-                  Example: if <code>time_to_step(t)/time_ref = 1.2</code>, then <code>clamp = 1</code> and <code>T(t) = 0</code>. If ratio is <code>0.6</code>, then <code>T(t) = 0.4</code>.
-                </li>
-                <li>
-                  <span class="step-title">Step 5. Compute composite score at both anchors.</span>
-                  The score at any checkpoint combines loss score, quality score, and time score.
-                  <div class="equation"><span class="eq-main"><span class="v">S</span>(<span class="v">t</span>) = 0.5 <span class="v">L</span><sub>score</sub>(<span class="v">t</span>) + 0.25 <span class="v">Q</span>(<span class="v">t</span>) + 0.25 <span class="v">T</span>(<span class="v">t</span>)</span><span class="eq-no">(4B.6)</span></div>
-                  Meaning: <code>S(t)</code> is one final score at step <code>t</code>. Loss receives 50% weight, quality 25%, and time 25%.
-                  Example: with <code>L_score=0.70</code>, <code>Q=0.80</code>, <code>T=0.40</code>, then <code>S=0.5*0.70 + 0.25*0.80 + 0.25*0.40 = 0.65</code>.
-                </li>
-                <li>
-                  <span class="step-title">Step 6. Decide run score from best-anchor and end-step.</span>
-                  One score is computed at <code>t_eval,best</code>. Another score is computed at <code>t_end</code>. The larger one is used.
-                  <div class="equation"><span class="eq-main"><span class="v">S</span><sub>run</sub> = max( <span class="v">S</span>(<span class="v">t</span><sub>eval,best</sub>), <span class="v">S</span>(<span class="v">t</span><sub>end</sub>) )</span><span class="eq-no">(4B.7)</span></div>
-                  Baseline anchor scores are computed with the same rule, and learning reward uses <code>S_run - S_base</code>.
-                  <div class="equation"><span class="eq-main"><span class="v">S</span><sub>base</sub> = max( <span class="v">S</span><sub>base</sub>(<span class="v">t</span><sub>eval,best</sub>), <span class="v">S</span><sub>base</sub>(<span class="v">t</span><sub>end</sub>) )</span><span class="eq-no">(4B.8)</span></div>
-                  <div class="equation"><span class="eq-main">reward = <span class="v">S</span><sub>run</sub> - <span class="v">S</span><sub>base</sub></span><span class="eq-no">(4B.9)</span></div>
-                  Meaning: <code>max(a,b)</code> means choose the larger value. <code>S_run</code> is the run decision score and <code>S_base</code> is the baseline decision score under the same anchor rule.
-                  Example: if <code>S(t_eval,best)=0.68</code> and <code>S(t_end)=0.63</code>, then <code>S_run=0.68</code>.
-                </li>
-                <li>
-                  <span class="step-title">Step 7. Write transition and update the model.</span>
-                  Baseline is always the normal gsplat run without modified mode. The transition
-                  <code>(x, yhat, k^*, outcomes, S_{run})</code> is saved, and model weights are updated from accumulated transitions.
-                  Example: one stored row can be <code>(x_project_021, [0.12,0.41,0.33,0.14], 2, outcomes_run10, 0.68)</code>.
-                </li>
-              </ol>
-
-              <div class="tip">
-                <code>yhat</code> is the decision signal. Observed run outcomes and baseline-relative scores are the learning signal.
-              </div>
-            </div>
-          </section>
-
-          <section id="chapter-4c" class="chapter">
-            <div class="chapter-head">Chapter 4C - Parameters Learned and Updated</div>
-            <div class="chapter-body">
-              <p>
-                This chapter clarifies the implemented behavior for the three input modes
-                (<code>exif_only</code>, <code>exif_plus_flight_plan</code>, and
-                <code>exif_plus_flight_plan_plus_external</code>). The system has two update stages.
-              </p>
-
+              <h3>How It Works</h3>
               <ol>
-                <li>
-                  <strong>Stage A (before training):</strong> a preset is selected and concrete training parameters are applied
-                  to the run config.
-                </li>
-                <li>
-                  <strong>Stage B (after training):</strong> the selector model is updated so the next run can choose a better preset.
-                </li>
+                <li>Builds context vector x from input mode features (9, 19, or 29 dimensions)</li>
+                <li>For each of 8 multipliers, maintains ridge regression model (A, b matrices)</li>
+                <li>Predicts multiplier using θ = A⁻¹b, with Thompson sampling for exploration</li>
+                <li>After run, updates all 8 models: A += x⊗x, b += reward·x</li>
               </ol>
 
-              <h3>4C.1 Parameters applied to the run (Stage A)</h3>
-              <p>
-                Once the selected preset is known, these parameters are written into the current run settings.
-              </p>
-
+              <h3>The 8 Multipliers (Continuous Range)</h3>
               <table>
                 <thead>
                   <tr>
-                    <th>Parameter</th>
-                    <th>How it is updated</th>
-                    <th>Notes</th>
+                    <th>Multiplier</th>
+                    <th>Range</th>
+                    <th>Controls</th>
                   </tr>
                 </thead>
                 <tbody>
+                  <tr><td><code>feature_lr_mult</code></td><td>[0.5, 1.5]</td><td>SH/appearance learning speed</td></tr>
+                  <tr><td><code>position_lr_init_mult</code></td><td>[0.5, 1.5]</td><td>Gaussian position updates</td></tr>
+                  <tr><td><code>scaling_lr_mult</code></td><td>[0.5, 1.5]</td><td>Gaussian scale updates</td></tr>
+                  <tr><td><code>opacity_lr_mult</code></td><td>[0.5, 1.5]</td><td>Opacity adaptation</td></tr>
+                  <tr><td><code>rotation_lr_mult</code></td><td>[0.5, 1.5]</td><td>Rotation/quaternion updates</td></tr>
+                  <tr><td><code>densify_grad_threshold_mult</code></td><td>[0.7, 1.3]</td><td>Densification trigger sensitivity</td></tr>
+                  <tr><td><code>opacity_threshold_mult</code></td><td>[0.7, 1.3]</td><td>Pruning aggressiveness</td></tr>
+                  <tr><td><code>lambda_dssim_mult</code></td><td>[0.7, 1.3]</td><td>DSSIM vs photometric loss weight</td></tr>
+                </tbody>
+              </table>
+
+              <h3>Model Update (Ridge Regression)</h3>
+              <p>Each multiplier has independent model parameters updated after each run:</p>
+              <div class="equation"><span class="eq-main">A ← A + x ⊗ x, &nbsp;&nbsp; b ← b + reward · x</span><span class="eq-no">(Ridge update)</span></div>
+              <div class="equation"><span class="eq-main">θ = A<sup>-1</sup>b, &nbsp;&nbsp; multiplier = clamp(x<sup>T</sup>θ, range)</span><span class="eq-no">(Prediction)</span></div>
+
+              <h3>Exploration vs Exploitation</h3>
+              <table>
+                <thead>
                   <tr>
-                    <td><code>feature_lr</code></td>
-                    <td>Multiplied by preset-specific factor and clamped.</td>
-                    <td>Affects SH/appearance feature learning speed.</td>
+                    <th>Mode</th>
+                    <th>Behavior</th>
                   </tr>
-                  <tr>
-                    <td><code>position_lr_init</code></td>
-                    <td>Multiplied by preset-specific factor and clamped.</td>
-                    <td>Controls initial position optimization aggressiveness.</td>
-                  </tr>
-                  <tr>
-                    <td><code>scaling_lr</code></td>
-                    <td>Multiplied by preset-specific factor and clamped.</td>
-                    <td>Controls gaussian scale updates.</td>
-                  </tr>
-                  <tr>
-                    <td><code>opacity_lr</code></td>
-                    <td>Multiplied by preset-specific factor and clamped.</td>
-                    <td>Controls opacity adaptation speed.</td>
-                  </tr>
-                  <tr>
-                    <td><code>rotation_lr</code></td>
-                    <td>Multiplied by preset-specific factor and clamped.</td>
-                    <td>Controls quaternion/rotation updates.</td>
-                  </tr>
-                  <tr>
-                    <td><code>tune_interval</code></td>
-                    <td>Scaled by preset-specific factor and clamped to integer range.</td>
-                    <td>Modifies tuning cadence in modified mode.</td>
-                  </tr>
-                  <tr>
-                    <td><code>tune_min_improvement</code></td>
-                    <td>Scaled by preset-specific factor and clamped.</td>
-                    <td>Modifies minimum relative-improvement threshold.</td>
-                  </tr>
-                  <tr>
-                    <td><code>densify_grad_threshold</code></td>
-                    <td>Scaled by preset-specific factor and clamped.</td>
-                    <td>Controls densification trigger aggressiveness.</td>
-                  </tr>
-                  <tr>
-                    <td><code>opacity_threshold</code></td>
-                    <td>Scaled by preset-specific factor and clamped.</td>
-                    <td>Controls pruning threshold aggressiveness.</td>
-                  </tr>
-                  <tr>
-                    <td><code>lambda_dssim</code></td>
-                    <td>Scaled by preset-specific factor and clamped.</td>
-                    <td>Balances DSSIM versus photometric loss.</td>
-                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>thompson</code></td><td>Sample θ ~ N(θ_mean, σ²A⁻¹) where σ² = 1/(n+1)</td></tr>
+                  <tr><td><code>greedy</code></td><td>Use posterior mean θ_mean = A⁻¹b directly</td></tr>
                 </tbody>
               </table>
 
               <div class="tip">
-                Important: in the input-mode learner path, updates are preset-based at run start.
-                The learner does not directly rewrite arbitrary gsplat parameters at run end.
+                <strong>Key advantage:</strong> Learns continuous adjustments tailored to context. With more data,
+                can discover parameter combinations beyond the 4 discrete presets.
               </div>
-
-              <h3>4C.2 Values learned/updated after the run (Stage B)</h3>
-              <p>
-                After eval history is available, the selector state for that mode is updated. These values are persisted
-                and influence the next preset selection.
-              </p>
-
-              <table>
-                <thead>
-                  <tr>
-                    <th>Stored field</th>
-                    <th>Update rule</th>
-                    <th>Purpose</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><code>modes[mode].runs</code></td>
-                    <td><code>runs = runs + 1</code></td>
-                    <td>Tracks number of learned transitions for the mode.</td>
-                  </tr>
-                  <tr>
-                    <td><code>modes[mode].reward_mean</code></td>
-                    <td><code>reward_mean = reward_mean + alpha * (reward_signal - reward_mean)</code>, with <code>alpha = 1/(runs+1)</code></td>
-                    <td>Maintains running reward baseline per mode.</td>
-                  </tr>
-                  <tr>
-                    <td><code>modes[mode].bias[preset]</code></td>
-                    <td>
-                      Selected preset: <code>+0.10 * delta</code>.<br />
-                      Non-selected presets: <code>-0.10 * 0.15 * delta</code>.<br />
-                      Clamp each bias to <code>[-3.0, 3.0]</code>.
-                    </td>
-                    <td>Shifts future <code>yhat</code> scores toward better-performing presets.</td>
-                  </tr>
-                  <tr>
-                    <td><code>modes[mode].last</code></td>
-                    <td>Overwrite with latest run snapshot: <code>run_id</code>, <code>selected_preset</code>, anchor steps, scores, transition, and reward.</td>
-                    <td>Audit trail for the most recent learning event.</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <h3>4C.3 Practical interpretation</h3>
-              <ul>
-                <li>The three input modes learn by improving preset selection, not by directly training a large parameter regressor.</li>
-                <li>The immediate run receives ten preset-driven parameter updates from Section 4C.1.</li>
-                <li>After the run, bias/reward statistics are updated, which changes the next run's selected preset and therefore next run's parameters.</li>
-              </ul>
             </div>
           </section>
 
           <section id="chapter-5" class="chapter">
-            <div class="chapter-head">Chapter 5 - Example Cases</div>
+            <div class="chapter-head">5 - Reward Formula (Common to Both Selectors)</div>
             <div class="chapter-body">
-              <h3>5.1 EXIF-only example</h3>
               <p>
-                Input images show stable focal length, shutter speed, ISO, and resolution.
-                This mode intentionally stays lightweight and uses only reduced EXIF-derived numeric fields.
-              </p>
-              <p>
-                Example x:
-              </p>
-              <ul>
-                <li>Focal length: 24.0mm</li>
-                <li>ISO: 100</li>
-                <li>Shutter: 1/250</li>
-                <li>Image width median: 4000</li>
-                <li>Image height median: 3000</li>
-              </ul>
-              <p>
-                Example y: <code>balanced</code> if the run is general-purpose.
-                Example yhat: the model places the highest score on <code>balanced</code>.
+                Both selector strategies (preset-bias and contextual-continuous) use <strong>the same reward calculation</strong>.
+                The reward compares the current run's composite score against the baseline gsplat run.
               </p>
 
-              <h3>5.2 Flight-plan embedded example</h3>
-              <p>
-                The same EXIF data plus GPS order reveals a corridor-like mission with steady headings and high overlap.
-              </p>
-              <p>
-                Example x adds:
-              </p>
-              <ul>
-                <li>GSD median: 0.03 m/pixel</li>
-                <li>Heading consistency: high</li>
-                <li>Camera angle bucket code: 2 (oblique)</li>
-                <li>Coverage spread: narrow</li>
-                <li>Overlap proxy: high</li>
-              </ul>
-              <p>
-                Example y: <code>geometry_fast</code> if geometry stabilizes fastest.
-                Example yhat: the model predicts <code>geometry_fast</code> as top score.
-              </p>
+              <h3>Step 1: Find Best Quality Step</h3>
+              <p>For each eval step, compute quality score:</p>
+              <div class="equation"><span class="eq-main">Q(t) = 0.4·PSNR + 0.3·SSIM + 0.3·(1-LPIPS)</span><span class="eq-no">(Quality)</span></div>
+              <p>Best step <code>t_best</code> = step with highest Q(t).</p>
 
-              <h3>5.3 External-features example</h3>
-              <p>
-                The image set is mostly vegetation with visible blur risk and uneven terrain proxy.
-              </p>
-              <p>
-                Example x adds:
-              </p>
-              <ul>
-                <li>Vegetation cover: 78%</li>
-                <li>Texture density: medium</li>
-                <li>Blur risk: medium-high</li>
-                <li>Terrain roughness proxy: high</li>
-              </ul>
-              <p>
-                Example y: <code>conservative</code>.
-                Example yhat: the model assigns the highest score to <code>conservative</code>.
-              </p>
+              <h3>Step 2: Normalize Metrics (Joint Scaling)</h3>
+              <p>For each metric, normalize using <strong>run + baseline joint range</strong>:</p>
+              <div class="equation"><span class="eq-main">Norm(v) = (v - min(all)) / (max(all) - min(all))</span><span class="eq-no">(Joint normalization)</span></div>
+              <p>This prevents independent scaling artifacts. LPIPS and loss are inverted (1 - Norm) so higher is better.</p>
+
+              <h3>Step 3: Compute Composite Score</h3>
+              <p>At each eval step t:</p>
+              <div class="equation"><span class="eq-main">S(t) = 0.75·Q_norm(t) + 0.25·T_norm(t)</span><span class="eq-no">(Composite)</span></div>
+              <p>Where <code>T_norm(t) = 1 - clamp(elapsed(t) / baseline_time_ref, 0, 1)</code></p>
+
+              <h3>Step 4: Run Decision Score</h3>
+              <div class="equation"><span class="eq-main">S_run = max(S(t_best), S(t_end))</span><span class="eq-no">(Best of two anchors)</span></div>
+              <div class="equation"><span class="eq-main">S_baseline = max(S_base(t_best_base), S_base(t_end))</span><span class="eq-no">(Same for baseline)</span></div>
+
+              <h3>Step 5: Reward Signal</h3>
+              <div class="equation"><span class="eq-main">reward = S_run - S_baseline</span><span class="eq-no">(Relative improvement)</span></div>
+              <p>Positive reward = better than baseline. Negative = worse than baseline.</p>
+
+              <h3>Model Updates</h3>
+              <table>
+                <thead><tr><th>Selector</th><th>Update Rule</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td><code>preset_bias</code></td>
+                    <td>bias[selected] += 0.10·δ; bias[others] -= 0.015·δ; where δ = reward - reward_mean</td>
+                  </tr>
+                  <tr>
+                    <td><code>contextual_continuous</code></td>
+                    <td>For each multiplier: A += x⊗x, b += reward·x</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="tip">
+                <strong>Implementation:</strong> See <code>update_from_run()</code> in <code>learner.py</code> (line 120)
+                and <code>update_from_run_contextual_continuous()</code> in <code>contextual_continuous_learner.py</code> (line 400).
+                Both use identical reward calculation logic.
+              </div>
             </div>
           </section>
 
           <section id="chapter-6" class="chapter">
-            <div class="chapter-head">Chapter 6 - Implementation Summary</div>
+            <div class="chapter-head">6 - Training Pipeline</div>
             <div class="chapter-body">
+              <p>
+                <strong>File:</strong> <code>training_pipeline_orchestrator.py</code><br>
+                Cross-project training pipelines enable shared model learning across multiple projects.
+              </p>
+
+              <h3>How It Works</h3>
               <ol>
-                <li>Use the three explicit stacked modes in config.</li>
-                <li>Keep the feature extractor cheap and deterministic.</li>
-                <li>Cache per-project summaries so the input vector is built once, not repeatedly.</li>
-                <li>Use a small preset set first, then train the selector to pick the best preset after the 5k-step trial.</li>
-                <li>Use a data strategy with a 10-project cap and balanced coverage across camera profile, flight geometry, scene content, and capture conditions.</li>
-                <li>Apply 7 train projects and 3 final test projects as the primary split for this phase.</li>
-                <li>Only add more features if they improve test behavior on unseen scenes.</li>
+                <li>Create pipeline with multiple projects and training configuration</li>
+                <li>Set <code>shared_model_dir</code> in each project's config.json</li>
+                <li>Pipeline orchestrator runs projects in phases with optional pass repetitions</li>
+                <li>Each project trains with shared model state (updated after each run)</li>
+                <li>File locking (filelock) prevents concurrent write conflicts</li>
               </ol>
-              <p>
-                This provides a low-cost system that can still learn which kind of scene prefers which initial learning
-                rate pattern.
-              </p>
-            </div>
-          </section>
 
-          <section id="chapter-7" class="chapter">
-            <div class="chapter-head">Chapter 7 - Implementation Constraints</div>
-            <div class="chapter-body">
-              <ul>
-                <li>EXIF alone can give camera and exposure data, but not a full flight plan.</li>
-                <li>Flight plan must be inferred from the sequence of images, usually using GPS and timestamps.</li>
-                <li>External vegetation input is green-area proxy from RGB imagery.</li>
-                <li>Use only cheap preprocessing in the first version so feature extraction does not become the bottleneck.</li>
-                <li>Camera angle should be included with flight type; flight type alone is not enough.</li>
-              </ul>
-              <div class="tip">
-                Mode stack: <code>exif_only</code> -> <code>exif_plus_flight_plan</code> -> <code>exif_plus_flight_plan_plus_external</code>.
-              </div>
-            </div>
-          </section>
-
-          <section id="chapter-8" class="chapter">
-            <div class="chapter-head">Chapter 8 - Data Strategy</div>
-            <div class="chapter-body">
-              <p>
-                Data design for this phase prioritizes diversity over volume. With a capped dataset size,
-                coverage across scene and flight conditions is more important than adding near-duplicate projects.
-              </p>
-
-              <h3>Dataset Size (Current Phase)</h3>
-              <ul>
-                <li>Maximum in this phase: 10 projects.</li>
-                <li>Minimum workable set: 8 projects.</li>
-                <li>Target set for this phase: 10 projects with strong variety.</li>
-              </ul>
-
-              <h3>Required Variety Groups</h3>
+              <h3>Shared Model Storage</h3>
               <table>
-                <thead>
-                  <tr>
-                    <th>Group</th>
-                    <th>What to vary</th>
-                    <th>Target coverage</th>
-                    <th>Why this matters</th>
-                  </tr>
-                </thead>
+                <thead><tr><th>Selector</th><th>Shared Path</th></tr></thead>
                 <tbody>
-                  <tr>
-                    <td>Group A - Camera Profile</td>
-                    <td>Different camera models, focal lengths, and exposure ranges.</td>
-                    <td>At least 2 camera families.</td>
-                    <td>Initial LR behavior can change with optics and sensor response.</td>
-                  </tr>
-                  <tr>
-                    <td>Group B - Flight Geometry</td>
-                    <td>Grid, corridor, mixed paths, plus angle mix (nadir and oblique).</td>
-                    <td>At least 4 projects with strong oblique coverage.</td>
-                    <td>Path shape and angle directly affect convergence dynamics.</td>
-                  </tr>
-                  <tr>
-                    <td>Group C - Scene Content</td>
-                    <td>Built-up areas, dense vegetation, sparse vegetation, and mixed scenes.</td>
-                    <td>At least 2 built-up, 2 vegetation, 2 mixed scenes.</td>
-                    <td>Scene complexity shifts the best preset and learning speed.</td>
-                  </tr>
-                  <tr>
-                    <td>Group D - Capture Conditions</td>
-                    <td>Stable lighting, high contrast, mild blur, and challenging weather/light.</td>
-                    <td>At least 2 challenging-condition projects.</td>
-                    <td>Robustness requires exposure to non-ideal capture conditions.</td>
-                  </tr>
+                  <tr><td><code>preset_bias</code></td><td><code>shared_model_dir/input_mode_selector/selector_model.json</code></td></tr>
+                  <tr><td><code>contextual_continuous</code></td><td><code>shared_model_dir/contextual_continuous_selector/{mode}.json</code></td></tr>
                 </tbody>
               </table>
 
-              <h3>Evaluation Split (Primary)</h3>
-              <ul>
-                <li>Primary split: 7 train projects + 3 final test projects.</li>
-                <li>Project-level validation split is optional in this phase when in-run validation metrics are already used during training.</li>
-                <li>If explicit holdout validation is required, use 6 train + 1 validation + 3 final test.</li>
-              </ul>
-
-              <h3>Continual Learning With Limited Data</h3>
-              <p>
-                One persistent model is used and updated across runs. The model can keep learning even with a small number of projects.
-                Re-running the same project multiple times is valid and helps the model learn run-level policy behavior.
-              </p>
-              <ul>
-                <li>Repeated runs on one project provide valid policy-learning signal and can improve project-specific convergence behavior.</li>
-                <li>Project-specific gains do not guarantee cross-project performance; multi-project diversity is required for generalization.</li>
-                <li>Heavy reuse of one project increases overfitting risk, so repeated same-project runs should remain in development and be excluded from final test evidence.</li>
-              </ul>
+              <h3>Pipeline Execution Flow</h3>
+              <ol>
+                <li><strong>Phase 1 - Exploration:</strong> Forced preset rotation if warmup enabled</li>
+                <li><strong>Phase 2 - Stability:</strong> Adaptive selection with medium jitter</li>
+                <li><strong>Phase 3 - Convergence:</strong> Adaptive selection with minimal jitter</li>
+              </ol>
 
               <div class="tip">
-                With a 10-project cap, prioritize diversity of camera profile, flight geometry, and scene type over project count.
-              </div>
-            </div>
-          </section>
-
-          <section id="chapter-8b" class="chapter">
-            <div class="chapter-head">Chapter 8B - Model Selection Rationale and Next Trial Path</div>
-            <div class="chapter-body">
-              <h3>8B.1 Selector Strategies (Current Implementation)</h3>
-              <p>
-                Two independent selector strategies are available in Core AI optimization. They are switchable from
-                frontend config and do not fallback into each other.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Strategy key</th>
-                    <th>Behavior</th>
-                    <th>State location</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><code>preset_bias</code></td>
-                    <td>Discrete preset selection over conservative/balanced/geometry_fast/appearance_fast.</td>
-                    <td><code>models/input_mode_selector/selector_model.json</code></td>
-                  </tr>
-                  <tr>
-                    <td><code>continuous_bandit_linear</code></td>
-                    <td>Continuous bounded multiplier sampling and online mean updates from run reward.</td>
-                    <td><code>models/input_mode_selector_continuous/selector_model.json</code></td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <h3>8B.2 Why the preset-bias selector remains useful</h3>
-              <p>
-                The current phase uses a lightweight preset selector with mode-level bias updates because the dataset size
-                is intentionally small (8 to 10 projects, target 10) and diversity-constrained.
-                Under this condition, simple online updates are preferred over high-capacity models.
-              </p>
-              <ul>
-                <li>Sample efficiency: useful learning signal can be extracted from limited project count and repeated runs.</li>
-                <li>Low overfitting risk: small parameter state is less likely to memorize project-specific noise.</li>
-                <li>Operational stability: deterministic update rules simplify debugging, auditing, and rollback.</li>
-                <li>Policy alignment: the action space is discrete and small (preset selection), which fits lightweight policy updates.</li>
-              </ul>
-
-              <h3>8B.3 Why a larger deep model is not preferred yet</h3>
-              <p>
-                Deep models such as MLPs usually require substantially more independent projects to generalize reliably.
-                With the current cap, deep models would likely increase variance and instability without a clear gain in
-                cross-project behavior.
-              </p>
-              <ul>
-                <li>Higher data demand for robust generalization.</li>
-                <li>Stronger sensitivity to feature drift and class imbalance.</li>
-                <li>Higher implementation and monitoring overhead for this project stage.</li>
-              </ul>
-
-              <h3>8B.4 Continuous bandit details</h3>
-              <p>
-                The continuous strategy predicts bounded multipliers per run (instead of selecting a hard-coded preset table).
-                Multipliers are sampled around learned means, applied to initial parameters, then updated online using
-                reward against baseline-relative scoring.
-              </p>
-              <ul>
-                <li>Core LR multiplier bounds: <code>[0.5, 1.5]</code> for feature/position/scaling/opacity/rotation.</li>
-                <li>Control multiplier bounds: <code>[0.7, 1.3]</code> for tune interval, tune min improvement, densify/opacity thresholds, and lambda DSSIM.</li>
-                <li>Exploration standard deviation decays with run count and is clamped to <code>[0.03, 0.18]</code>.</li>
-                <li>Final parameter values are clamped by absolute safety ranges after multiplier application.</li>
-              </ul>
-
-              <h3>8B.5 Trial guardrails</h3>
-              <ul>
-                <li>Use one strategy per run; avoid mixed-strategy fallback in a single run.</li>
-                <li>Keep safety clamps and bounded multiplier ranges enabled at all times.</li>
-                <li>Evaluate on the same project-level final test split to preserve comparability.</li>
-                <li>Promote only if quality/time composite score improves without increased instability.</li>
-              </ul>
-
-              <div class="tip">
-                Current conclusion for this phase: preset-bias and continuous bandit are both valid for experiments.
-                Continuous strategy provides dynamic values now, while deep-model transitions should wait for larger and more diverse data.
-              </div>
-            </div>
-          </section>
-
-          <section id="chapter-9" class="chapter">
-            <div class="chapter-head">Chapter 9 - Initialization Warmup Behavior</div>
-            <div class="chapter-body">
-              <p>
-                Warmup is an optional startup policy for <code>gsplat + modified + core_ai_optimization</code>.
-                Its purpose is to improve early exploration before normal adaptive preset selection dominates.
-                When warmup is disabled, standard behavior remains unchanged.
-              </p>
-
-              <h3>9.1 Activation Rules</h3>
-              <ul>
-                <li>Warmup is enabled from the frontend warmup toggle.</li>
-                <li>The run count value from frontend is used as total warmup runs.</li>
-                <li>Frontend policy while warmup is enabled: default run count is set to 30 and minimum allowed value is 10.</li>
-                <li>When warmup is disabled, run count behavior returns to normal batch rules.</li>
-              </ul>
-
-              <h3>9.2 Phase Structure</h3>
-              <p>
-                Warmup uses three phases. The phase ratio is based on <code>16:8:12</code> and is scaled to the requested total run count.
-                Therefore, if total warmup runs are changed, each phase receives a proportional allocation.
-              </p>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Phase</th>
-                    <th>Preset policy</th>
-                    <th>Jitter policy</th>
-                    <th>Intent</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>Phase A - Explore</td>
-                    <td>Forced rotating preset sequence: <code>balanced</code>, <code>conservative</code>, <code>geometry_fast</code>, <code>appearance_fast</code></td>
-                    <td>Random bounded jitter in <code>[0.5, 1.5]</code></td>
-                    <td>Guarantee preset coverage early and collect broad outcome signals</td>
-                  </tr>
-                  <tr>
-                    <td>Phase B - Stability</td>
-                    <td>Adaptive preset selection (no forced override)</td>
-                    <td>Random bounded jitter in <code>[0.75, 1.25]</code></td>
-                    <td>Verify consistency around promising regions</td>
-                  </tr>
-                  <tr>
-                    <td>Phase C - Adaptive</td>
-                    <td>Adaptive preset selection (no forced override)</td>
-                    <td>Random bounded jitter in <code>[0.9, 1.1]</code></td>
-                    <td>Consolidate learning under normal selector behavior</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <h3>9.3 Base-Config Inheritance</h3>
-              <ul>
-                <li>Warmup derives seed parameters from the project base session run config.</li>
-                <li>Training horizon is inherited from base config, including <code>max_steps</code> and <code>densify_until_iter</code>.</li>
-                <li>This keeps warmup comparable to established project defaults (for example 5k steps with densification end at 4k).</li>
-              </ul>
-
-              <h3>9.4 Operational Notes</h3>
-              <ul>
-                <li>Warmup is orchestration-level behavior; it does not replace standard non-warmup processing.</li>
-                <li><code>restart_fresh</code> is not supported together with warmup start.</li>
-                <li>Preset forcing is applied only where valid for AI input-mode flow; outside that flow, normal selection is used.</li>
-              </ul>
-
-              <div class="tip">
-                Practical default: enable warmup with total runs at 30 for initialization, then continue with normal adaptive runs after warmup completes.
+                <strong>Key feature:</strong> Cross-project learning allows the model to generalize across different scenes.
+                Models trained on diverse projects (camera profiles, flight geometries, scene content) can better predict
+                parameters for new unseen projects.
               </div>
             </div>
           </section>

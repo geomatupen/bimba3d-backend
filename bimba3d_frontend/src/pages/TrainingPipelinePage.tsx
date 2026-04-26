@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { ArrowLeft } from "lucide-react";
 import axios from "axios";
+import ConfirmModal from "../components/ConfirmModal";
 
 const API_BASE = "http://localhost:8005";
 
@@ -11,6 +13,15 @@ interface DatasetInfo {
   size_mb: number;
   has_images: boolean;
   selected?: boolean;
+  colmap_source_project_id?: string;
+}
+
+interface ExistingProject {
+  id: string;
+  name: string;
+  has_colmap: boolean;
+  dataset_path?: string;
+  pipeline_name?: string;
 }
 
 interface PhaseConfig {
@@ -32,10 +43,11 @@ export default function TrainingPipelinePage() {
   const navigate = useNavigate();
 
   // Step 1: Dataset Selection
-  const [baseDirectory, setBaseDirectory] = useState("");
-  const [pipelineDirectory, setPipelineDirectory] = useState("");
+  const [baseDirectory, setBaseDirectory] = useState("E:\\Thesis\\Training Data");
+  const [pipelineDirectory, setPipelineDirectory] = useState("E:\\Thesis\\PipelineProjects");
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [existingProjects, setExistingProjects] = useState<ExistingProject[]>([]);
 
   // Step 2: Shared Configuration
   const [aiInputMode, setAiInputMode] = useState("exif_plus_flight_plan");
@@ -45,6 +57,13 @@ export default function TrainingPipelinePage() {
   const [logInterval, setLogInterval] = useState(100);
   const [densifyUntil, setDensifyUntil] = useState(4000);
   const [imagesMaxSize, setImagesMaxSize] = useState(1600);
+
+  // Storage Management
+  const [saveEvalImages, setSaveEvalImages] = useState(true);
+  const [replaceEvalImages, setReplaceEvalImages] = useState(true);  // Default: save storage
+  const [saveCheckpoints, setSaveCheckpoints] = useState(true);
+  const [replaceCheckpoints, setReplaceCheckpoints] = useState(true);  // Default: save storage
+  const [saveFinalSplat, setSaveFinalSplat] = useState(true);  // Always recommended
 
   // Step 3: Training Schedule
   const [phases, setPhases] = useState<PhaseConfig[]>([
@@ -96,6 +115,32 @@ export default function TrainingPipelinePage() {
 
   // UI State
   const [currentStep, setCurrentStep] = useState(1);
+  const [showCreateConfirm, setShowCreateConfirm] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setToast({ message, type });
+    window.setTimeout(() => setToast(null), 5000);
+  };
+
+  // Load existing projects with COLMAP
+  const loadExistingProjects = async () => {
+    try {
+      const response = await axios.get(`${API_BASE}/projects`);
+      const projects: ExistingProject[] = (response.data || []).map((p: any) => ({
+        id: p.project_id,
+        name: p.name || p.project_id,
+        has_colmap: p.has_colmap || false,
+        dataset_path: p.dataset_path,
+        pipeline_name: p.pipeline_name,
+      }));
+      // Only show projects that have COLMAP outputs
+      setExistingProjects(projects.filter(p => p.has_colmap));
+    } catch (error: any) {
+      console.error("Failed to load projects:", error);
+      setExistingProjects([]);
+    }
+  };
 
   // Scan directory for datasets
   const handleScanDirectory = async () => {
@@ -113,9 +158,13 @@ export default function TrainingPipelinePage() {
       const scannedDatasets = response.data.datasets.map((d: DatasetInfo) => ({
         ...d,
         selected: true, // Auto-select all by default
+        colmap_source_project_id: undefined,
       }));
 
       setDatasets(scannedDatasets);
+
+      // Load existing projects for COLMAP source selection
+      await loadExistingProjects();
     } catch (error: any) {
       console.error("Failed to scan directory:", error);
       alert(`Failed to scan directory: ${error.response?.data?.detail || error.message}`);
@@ -145,8 +194,8 @@ export default function TrainingPipelinePage() {
     return { hours, minutes, totalMinutes };
   };
 
-  // Create pipeline
-  const handleCreatePipeline = async () => {
+  // Show create confirmation
+  const handleShowCreateConfirm = () => {
     const selectedDatasets = datasets.filter((d) => d.selected);
 
     if (selectedDatasets.length === 0) {
@@ -154,8 +203,16 @@ export default function TrainingPipelinePage() {
       return;
     }
 
+    setShowCreateConfirm(true);
+  };
+
+  // Create pipeline (after confirmation)
+  const handleCreatePipeline = async () => {
+    setShowCreateConfirm(false);
     setCreating(true);
     try {
+      const selectedDatasets = datasets.filter((d) => d.selected);
+
       // Build configuration
       const config = {
         name: pipelineName,
@@ -166,6 +223,7 @@ export default function TrainingPipelinePage() {
           dataset_path: d.path,
           image_count: d.image_count,
           created: false,
+          colmap_source_project_id: d.colmap_source_project_id || null,
         })),
         shared_config: {
           ai_input_mode: aiInputMode,
@@ -175,6 +233,12 @@ export default function TrainingPipelinePage() {
           log_interval: logInterval,
           densify_until_iter: densifyUntil,
           images_max_size: imagesMaxSize,
+          // Storage management options
+          save_eval_images: saveEvalImages,
+          replace_eval_images: replaceEvalImages,
+          save_checkpoints: saveCheckpoints,
+          replace_checkpoints: replaceCheckpoints,
+          save_final_splat: saveFinalSplat,
         },
         phases: phases,
         thermal_management: {
@@ -193,63 +257,104 @@ export default function TrainingPipelinePage() {
       };
 
       // Create pipeline
-      const response = await axios.post(`${API_BASE}/training-pipeline/create`, config);
+      await axios.post(`${API_BASE}/training-pipeline/create`, config);
 
-      alert(`Pipeline created successfully! ID: ${response.data.id}`);
-      navigate("/"); // Return to dashboard
+      showToast(`Pipeline "${pipelineName}" created successfully!`, "success");
+
+      // Navigate after a short delay to allow user to see the toast
+      setTimeout(() => {
+        navigate("/");
+      }, 1500);
 
     } catch (error: any) {
       console.error("Failed to create pipeline:", error);
-      alert(`Failed to create pipeline: ${error.response?.data?.detail || error.message}`);
+      showToast(`Failed to create pipeline: ${error.response?.data?.detail || error.message}`, "error");
     } finally {
       setCreating(false);
     }
   };
 
   return (
-    <div style={{ padding: "20px", maxWidth: "1200px", margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
-        <h1>Training Pipeline</h1>
-        <button onClick={() => navigate("/")} style={{ padding: "8px 16px" }}>
-          Back to Dashboard
-        </button>
-      </div>
-
-      {/* Progress Indicator */}
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "30px", padding: "10px", background: "#f5f5f5", borderRadius: "4px" }}>
-        {[1, 2, 3, 4, 5].map((step) => (
-          <div key={step} style={{ flex: 1, textAlign: "center" }}>
-            <div
-              style={{
-                width: "40px",
-                height: "40px",
-                borderRadius: "50%",
-                background: currentStep >= step ? "#4CAF50" : "#ddd",
-                color: "white",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: "bold",
-                marginBottom: "5px",
-              }}
-            >
-              {step}
-            </div>
-            <div style={{ fontSize: "12px", color: currentStep >= step ? "#333" : "#999" }}>
-              {step === 1 && "Datasets"}
-              {step === 2 && "Config"}
-              {step === 3 && "Schedule"}
-              {step === 4 && "Thermal"}
-              {step === 5 && "Review"}
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-50">
+      {/* Header */}
+      <header className="bg-gradient-to-r from-blue-600 via-blue-700 to-indigo-700 shadow-xl">
+        <div className="max-w-7xl mx-auto px-6 lg:px-8 py-7">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => navigate("/")}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 text-white text-sm font-medium transition-all duration-200 hover:scale-105"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back
+              </button>
+              <div>
+                <div className="inline-flex items-center gap-2 px-2 py-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-1">
+                  <span className="text-xs font-medium text-white uppercase tracking-wider">New Training Pipeline</span>
+                </div>
+                <h1 className="text-2xl font-bold text-white mb-1">
+                  Create Training Pipeline
+                </h1>
+                <p className="text-xs text-blue-100">
+                  Configure automated multi-phase training across projects
+                </p>
+              </div>
             </div>
           </div>
-        ))}
+        </div>
+      </header>
+
+      {/* Progress Indicator */}
+      <div className="bg-white border-b border-gray-200 shadow-sm">
+        <div className="max-w-7xl mx-auto px-6 lg:px-8">
+          <div className="flex justify-between py-4">
+            {[1, 2, 3, 4, 5].map((step) => (
+              <div key={step} className="flex flex-col items-center flex-1">
+                <div
+                  className={`w-10 h-10 rounded-full flex items-center justify-center font-bold mb-2 transition-all ${
+                    currentStep >= step
+                      ? "bg-blue-600 text-white shadow-lg"
+                      : "bg-gray-200 text-gray-400"
+                  }`}
+                >
+                  {step}
+                </div>
+                <div className={`text-xs font-medium ${currentStep >= step ? "text-gray-900" : "text-gray-400"}`}>
+                  {step === 1 && "Datasets"}
+                  {step === 2 && "Config"}
+                  {step === 3 && "Schedule"}
+                  {step === 4 && "Thermal"}
+                  {step === 5 && "Review"}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
+
+      {/* Main Content */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
 
       {/* Step 1: Dataset Selection */}
       {currentStep === 1 && (
         <div style={{ border: "1px solid #ddd", padding: "20px", borderRadius: "4px", marginBottom: "20px" }}>
           <h2>Step 1: Dataset Selection</h2>
+
+          <div style={{ marginBottom: "15px" }}>
+            <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
+              Pipeline Name:
+            </label>
+            <input
+              type="text"
+              value={pipelineName}
+              onChange={(e) => setPipelineName(e.target.value)}
+              placeholder="my_training_pipeline"
+              style={{ width: "100%", padding: "8px" }}
+            />
+            <p style={{ fontSize: "12px", color: "#666", marginTop: "5px" }}>
+              Name for this training pipeline (will be used as the folder name)
+            </p>
+          </div>
 
           <div style={{ marginBottom: "15px" }}>
             <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
@@ -302,25 +407,72 @@ export default function TrainingPipelinePage() {
                 </button>
               </div>
 
-              <div style={{ maxHeight: "300px", overflowY: "auto", border: "1px solid #ddd", padding: "10px" }}>
+              <div style={{ maxHeight: "400px", overflowY: "auto", border: "1px solid #ddd", padding: "10px" }}>
                 {datasets.map((dataset, idx) => (
-                  <div key={idx} style={{ padding: "8px", borderBottom: "1px solid #eee", display: "flex", alignItems: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={dataset.selected}
-                      onChange={(e) => {
-                        const updated = [...datasets];
-                        updated[idx].selected = e.target.checked;
-                        setDatasets(updated);
-                      }}
-                      style={{ marginRight: "10px" }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <strong>{dataset.name}</strong>
-                      <div style={{ fontSize: "12px", color: "#666" }}>
-                        Images: {dataset.image_count} | Size: {dataset.size_mb.toFixed(1)} MB
+                  <div key={idx} style={{ padding: "8px", borderBottom: "1px solid #eee" }}>
+                    <div style={{ display: "flex", alignItems: "center", marginBottom: "8px" }}>
+                      <input
+                        type="checkbox"
+                        checked={dataset.selected}
+                        onChange={(e) => {
+                          const updated = [...datasets];
+                          updated[idx].selected = e.target.checked;
+                          setDatasets(updated);
+                        }}
+                        style={{ marginRight: "10px" }}
+                      />
+                      <div style={{ flex: 1 }}>
+                        <strong>{dataset.name}</strong>
+                        <div style={{ fontSize: "12px", color: "#666" }}>
+                          Images: {dataset.image_count} | Size: {dataset.size_mb.toFixed(1)} MB
+                        </div>
                       </div>
                     </div>
+                    {dataset.selected && (
+                      <div style={{ marginLeft: "30px", marginTop: "4px" }}>
+                        <label style={{ fontSize: "12px", color: "#555", display: "block", marginBottom: "4px" }}>
+                          Copy COLMAP from existing project (optional):
+                        </label>
+                        <select
+                          value={dataset.colmap_source_project_id || ""}
+                          onChange={(e) => {
+                            const updated = [...datasets];
+                            updated[idx].colmap_source_project_id = e.target.value || undefined;
+                            setDatasets(updated);
+                          }}
+                          style={{ width: "100%", padding: "4px", fontSize: "12px" }}
+                        >
+                          <option value="">-- Run COLMAP for this dataset --</option>
+                          {existingProjects.map((proj) => (
+                            <option key={proj.id} value={proj.id}>
+                              {proj.name}{proj.pipeline_name ? `, ${proj.pipeline_name}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        {dataset.colmap_source_project_id && (() => {
+                          const selectedProject = existingProjects.find(p => p.id === dataset.colmap_source_project_id);
+                          const datasetName = dataset.name.toLowerCase();
+                          const projectName = selectedProject?.name?.toLowerCase() || '';
+                          // Check if names match (allowing for space/underscore differences)
+                          const datasetNameNormalized = datasetName.replace(/\s+/g, '_');
+                          const projectNameNormalized = projectName.replace(/\s+/g, '_');
+                          const namesMatch = projectNameNormalized === datasetNameNormalized;
+
+                          return (
+                            <>
+                              <div style={{ fontSize: "11px", color: "#0066cc", marginTop: "2px" }}>
+                                ✓ Will copy COLMAP from selected project (saves ~15-30 min)
+                              </div>
+                              {!namesMatch && selectedProject && (
+                                <div style={{ fontSize: "11px", color: "#ff6600", marginTop: "2px", fontWeight: "bold" }}>
+                                  ⚠ Warning: Project name "{selectedProject.name}" does not match dataset name "{dataset.name}". COLMAP data may be from different images.
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -364,8 +516,24 @@ export default function TrainingPipelinePage() {
               <input type="number" value={maxSteps} onChange={(e) => setMaxSteps(Number(e.target.value))} style={{ width: "100%", padding: "8px" }} />
             </div>
             <div>
-              <label style={{ display: "block", marginBottom: "5px" }}>Eval Interval:</label>
-              <input type="number" value={evalInterval} onChange={(e) => setEvalInterval(Number(e.target.value))} style={{ width: "100%", padding: "8px" }} />
+              <label style={{ display: "block", marginBottom: "5px" }}>
+                Eval Interval:
+                <span style={{ fontSize: "11px", color: "#666", fontWeight: "normal", marginLeft: "5px" }}>
+                  (Quality evaluation frequency)
+                </span>
+              </label>
+              <input
+                type="number"
+                value={evalInterval}
+                onChange={(e) => setEvalInterval(Number(e.target.value))}
+                style={{ width: "100%", padding: "8px" }}
+                min={100}
+                max={5000}
+                step={100}
+              />
+              <p style={{ fontSize: "11px", color: "#888", marginTop: "3px" }}>
+                More frequent = better quality tracking. Default: 1000
+              </p>
             </div>
             <div>
               <label style={{ display: "block", marginBottom: "5px" }}>Log Interval:</label>
@@ -378,6 +546,102 @@ export default function TrainingPipelinePage() {
             <div>
               <label style={{ display: "block", marginBottom: "5px" }}>Images Max Size:</label>
               <input type="number" value={imagesMaxSize} onChange={(e) => setImagesMaxSize(Number(e.target.value))} style={{ width: "100%", padding: "8px" }} />
+            </div>
+          </div>
+
+          {/* Storage Management Options */}
+          <div style={{ marginTop: "25px", padding: "15px", background: "#fff8dc", border: "1px solid #daa520", borderRadius: "4px" }}>
+            <h3 style={{ margin: "0 0 15px 0", fontSize: "16px", color: "#b8860b" }}>
+              Storage Management
+            </h3>
+            <p style={{ fontSize: "12px", color: "#666", marginBottom: "15px" }}>
+              Configure what gets saved to manage storage. Eval images at 200-500 step intervals can create massive storage requirements.
+            </p>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "12px" }}>
+              {/* Save Eval Images */}
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px" }}>
+                <input
+                  type="checkbox"
+                  checked={saveEvalImages}
+                  onChange={(e) => setSaveEvalImages(e.target.checked)}
+                  style={{ width: "18px", height: "18px" }}
+                />
+                <span>
+                  <strong>Save Evaluation Images</strong>
+                  <span style={{ fontSize: "11px", color: "#666", marginLeft: "8px" }}>
+                    (Renders at each eval_interval. WARNING: ~5-50MB per eval × num_evals = GBs)
+                  </span>
+                </span>
+              </label>
+
+              {/* Replace Eval Images */}
+              {saveEvalImages && (
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px", marginLeft: "30px" }}>
+                  <input
+                    type="checkbox"
+                    checked={replaceEvalImages}
+                    onChange={(e) => setReplaceEvalImages(e.target.checked)}
+                    style={{ width: "18px", height: "18px" }}
+                  />
+                  <span>
+                    <strong>Replace Eval Images</strong> (Keep only latest eval, delete previous)
+                    <span style={{ fontSize: "11px", color: "#666", marginLeft: "8px" }}>
+                      (Saves ~95% storage. Use for pipeline training, disable for final runs)
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {/* Save Checkpoints */}
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px" }}>
+                <input
+                  type="checkbox"
+                  checked={saveCheckpoints}
+                  onChange={(e) => setSaveCheckpoints(e.target.checked)}
+                  style={{ width: "18px", height: "18px" }}
+                />
+                <span>
+                  <strong>Save Training Checkpoints</strong>
+                  <span style={{ fontSize: "11px", color: "#666", marginLeft: "8px" }}>
+                    (Model weights for resuming. ~100-500MB per checkpoint)
+                  </span>
+                </span>
+              </label>
+
+              {/* Replace Checkpoints */}
+              {saveCheckpoints && (
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px", marginLeft: "30px" }}>
+                  <input
+                    type="checkbox"
+                    checked={replaceCheckpoints}
+                    onChange={(e) => setReplaceCheckpoints(e.target.checked)}
+                    style={{ width: "18px", height: "18px" }}
+                  />
+                  <span>
+                    <strong>Replace Checkpoints</strong> (Keep only latest checkpoint)
+                    <span style={{ fontSize: "11px", color: "#666", marginLeft: "8px" }}>
+                      (Recommended for pipelines. Keep only final model)
+                    </span>
+                  </span>
+                </label>
+              )}
+
+              {/* Save Final Splat */}
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "14px" }}>
+                <input
+                  type="checkbox"
+                  checked={saveFinalSplat}
+                  onChange={(e) => setSaveFinalSplat(e.target.checked)}
+                  style={{ width: "18px", height: "18px" }}
+                />
+                <span>
+                  <strong>Save Final Splat Model</strong>
+                  <span style={{ fontSize: "11px", color: "#666", marginLeft: "8px" }}>
+                    (Always recommended. ~50-200MB. Needed for viewing results)
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
 
@@ -427,6 +691,69 @@ export default function TrainingPipelinePage() {
                     }}
                     style={{ width: "100%", padding: "6px" }}
                   />
+                </div>
+              </div>
+
+              {/* Context Jitter Settings */}
+              <div style={{ marginTop: "10px", padding: "10px", background: "#fff", border: "1px solid #ddd", borderRadius: "4px" }}>
+                <div style={{ marginBottom: "8px" }}>
+                  <label style={{ display: "flex", alignItems: "center", fontSize: "12px" }}>
+                    <input
+                      type="checkbox"
+                      checked={phase.context_jitter}
+                      onChange={(e) => {
+                        const updated = [...phases];
+                        updated[idx].context_jitter = e.target.checked;
+                        setPhases(updated);
+                      }}
+                      style={{ marginRight: "8px" }}
+                    />
+                    <strong>Enable Context Jitter</strong>
+                    <span style={{ marginLeft: "8px", color: "#666", fontWeight: "normal" }}>
+                      (Vary context features for exploration)
+                    </span>
+                  </label>
+                </div>
+
+                {phase.context_jitter && (
+                  <div style={{ marginTop: "8px" }}>
+                    <label style={{ display: "block", fontSize: "12px", marginBottom: "3px" }}>Jitter Mode:</label>
+                    <select
+                      value={phase.context_jitter_mode}
+                      onChange={(e) => {
+                        const updated = [...phases];
+                        updated[idx].context_jitter_mode = e.target.value;
+                        setPhases(updated);
+                      }}
+                      style={{ width: "100%", padding: "6px", fontSize: "12px" }}
+                    >
+                      <option value="uniform">Uniform (Sample from feature bounds)</option>
+                      <option value="mild">Mild (±10% variation)</option>
+                      <option value="gaussian">Gaussian (±15% with normal distribution)</option>
+                    </select>
+                    <p style={{ fontSize: "10px", color: "#888", marginTop: "3px" }}>
+                      Uniform: Wide exploration | Mild: Gentle variation | Gaussian: Moderate spread
+                    </p>
+                  </div>
+                )}
+
+                <div style={{ marginTop: "8px" }}>
+                  <label style={{ display: "flex", alignItems: "center", fontSize: "12px" }}>
+                    <input
+                      type="checkbox"
+                      checked={phase.shuffle_order}
+                      onChange={(e) => {
+                        const updated = [...phases];
+                        updated[idx].shuffle_order = e.target.checked;
+                        setPhases(updated);
+                      }}
+                      style={{ marginRight: "8px" }}
+                    />
+                    <strong>Shuffle Project Order</strong>
+                    <span style={{ marginLeft: "8px", color: "#666", fontWeight: "normal" }}>
+                      (Randomize sequence each pass)
+                    </span>
+                  </label>
                 </div>
               </div>
 
@@ -538,15 +865,60 @@ export default function TrainingPipelinePage() {
               Back
             </button>
             <button
-              onClick={handleCreatePipeline}
+              onClick={handleShowCreateConfirm}
               disabled={creating}
               style={{ padding: "8px 24px", background: "#4CAF50", color: "white", fontWeight: "bold", border: "none", borderRadius: "4px" }}
             >
-              {creating ? "Creating..." : "▶ Start Pipeline"}
+              {creating ? "Creating..." : "Create Pipeline"}
             </button>
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={showCreateConfirm}
+        title="Create Pipeline"
+        message={
+          <>
+            You are about to create a training pipeline with:
+            <ul className="list-disc ml-5 mt-2 mb-2">
+              <li><strong>{datasets.filter(d => d.selected).length}</strong> projects</li>
+              <li><strong>{calculateTotalRuns()}</strong> total training runs</li>
+              <li><strong>~{calculateEstimatedTime().hours}h {calculateEstimatedTime().minutes}m</strong> estimated duration</li>
+            </ul>
+            The pipeline will be created with status "pending". You can start it manually from the pipeline list.
+            <br /><br />
+            Do you want to continue?
+          </>
+        }
+        confirmLabel="Create Pipeline"
+        cancelLabel="Cancel"
+        tone="default"
+        busy={creating}
+        onConfirm={handleCreatePipeline}
+        onCancel={() => setShowCreateConfirm(false)}
+      />
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: "20px",
+            right: "20px",
+            padding: "12px 20px",
+            background: toast.type === "success" ? "#4CAF50" : "#f44336",
+            color: "white",
+            borderRadius: "4px",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+            zIndex: 9999,
+            maxWidth: "400px",
+          }}
+        >
+          {toast.message}
+        </div>
+      )}
+      </main>
     </div>
   );
 }

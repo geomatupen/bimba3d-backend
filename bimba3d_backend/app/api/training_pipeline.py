@@ -70,6 +70,7 @@ class ProjectConfig(BaseModel):
     baseline_run_id: Optional[str] = None
     image_count: int
     created: bool = False
+    colmap_source_project_id: Optional[str] = None
 
 
 class CreatePipelineRequest(BaseModel):
@@ -106,6 +107,8 @@ class PipelineStatusResponse(BaseModel):
     last_error: Optional[str]
     cooldown_active: bool
     next_run_scheduled_at: Optional[str]
+    config: dict[str, Any]
+    runs: list[dict[str, Any]]
 
 
 class BatchCreateProjectsRequest(BaseModel):
@@ -341,6 +344,23 @@ async def stop_pipeline(pipeline_id: str):
     return {"status": "stopped", "message": "Pipeline stopped"}
 
 
+@router.get("/list")
+async def list_pipelines(limit: int = 50):
+    """List all pipelines."""
+    pipelines = training_pipeline_storage.list_pipelines(limit=limit)
+
+    # Convert pipeline dicts to response models
+    pipeline_responses = []
+    for p in pipelines:
+        try:
+            pipeline_responses.append(PipelineStatusResponse(**p))
+        except Exception as e:
+            logger.warning(f"Failed to serialize pipeline {p.get('id')}: {e}")
+            continue
+
+    return {"pipelines": pipeline_responses}
+
+
 @router.get("/{pipeline_id}", response_model=PipelineStatusResponse)
 async def get_pipeline(pipeline_id: str):
     """Get pipeline status and details."""
@@ -363,12 +383,318 @@ async def get_pipeline_runs(pipeline_id: str):
     return {"runs": pipeline.get("runs", [])}
 
 
-@router.get("/list")
-async def list_pipelines(limit: int = 50):
-    """List all pipelines."""
-    pipelines = training_pipeline_storage.list_pipelines(limit=limit)
+@router.get("/{pipeline_id}/learning-table")
+async def get_pipeline_learning_table(pipeline_id: str):
+    """Get aggregated AI learning table data from all projects in pipeline.
 
-    return {"pipelines": [PipelineStatusResponse(**p) for p in pipelines]}
+    This endpoint collects learning data from all projects that belong to this pipeline
+    and returns a unified table showing:
+    - All training runs across all projects
+    - Quality metrics (PSNR, SSIM, LPIPS, Loss)
+    - Learning scores (S_run, S_base, reward)
+    - Parameter selections and learned inputs
+    """
+    pipeline = training_pipeline_storage.get_pipeline(pipeline_id)
+
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    config = pipeline.get("config", {})
+    pipeline_folder = Path(config.get("pipeline_folder"))
+
+    if not pipeline_folder or not pipeline_folder.exists():
+        raise HTTPException(status_code=404, detail="Pipeline folder not found")
+
+    # Collect learning data from all project directories in pipeline folder
+    learning_rows = []
+
+    # Iterate through all project directories
+    for project_dir in pipeline_folder.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        # Skip non-project directories
+        if project_dir.name in ["shared_models", "training_pipelines"]:
+            continue
+
+        # Skip if pipeline.json marker (this is the pipeline folder itself)
+        if (project_dir / "pipeline.json").exists() and project_dir == pipeline_folder:
+            continue
+
+        # Check if it's a valid project directory with runs
+        runs_dir = project_dir / "runs"
+        if not runs_dir.exists():
+            continue
+
+        # Fetch learning data for this project
+        try:
+            # Use the same endpoint logic as /projects/{id}/ai_learning_table
+            from bimba3d_backend.app.api.projects import _read_json_if_exists, _extract_eval_rows, _extract_eval_summary
+
+            for run_dir in sorted(runs_dir.iterdir()):
+                if not run_dir.is_dir():
+                    continue
+
+                # Read run analytics (always available)
+                analytics_file = run_dir / "analytics" / "run_analytics_v1.json"
+                if not analytics_file.exists():
+                    continue
+
+                analytics_data = _read_json_if_exists(analytics_file)
+                if not analytics_data:
+                    continue
+
+                # Extract summary data
+                summary = analytics_data.get("summary", {})
+                ai_insights = analytics_data.get("ai", {}).get("input_mode_insights", {})
+
+                # Read learning results if available (only for non-baseline runs)
+                learning_file = run_dir / "outputs" / "engines" / "gsplat" / "input_mode_learning_results.json"
+                learning_data = _read_json_if_exists(learning_file) if learning_file.exists() else {}
+
+                # Determine if this is a baseline run (mode == "baseline")
+                is_baseline = summary.get("mode") == "baseline"
+
+                # Get AI selector strategy from project config
+                project_config_file = project_dir / "config.json"
+                ai_selector_strategy = None
+                if project_config_file.exists():
+                    try:
+                        with open(project_config_file, "r") as f:
+                            project_config = json.load(f)
+                            ai_selector_strategy = project_config.get("ai_selector_strategy")
+                    except Exception:
+                        pass
+
+                # Extract baseline_comparison sub-dict for score fields
+                baseline_cmp = learning_data.get("baseline_comparison") or {}
+                # Also check nested transition.baseline_comparison
+                if not baseline_cmp:
+                    baseline_cmp = (learning_data.get("transition") or {}).get("baseline_comparison") or {}
+
+                # Extract eval summary for quality metrics (PSNR, SSIM, LPIPS, Loss)
+                stats_dir = run_dir / "outputs" / "engines" / "gsplat" / "stats"
+                eval_summary = _extract_eval_summary(stats_dir) if stats_dir.exists() else {}
+
+                # Build row data structure
+                row = {
+                    "project_name": project_dir.name,
+                    "run_id": run_dir.name,
+                    "run_name": summary.get("run_name") or run_dir.name,
+                    "ai_input_mode": ai_insights.get("ai_input_mode") or learning_data.get("mode"),
+                    "ai_selector_strategy": ai_selector_strategy,
+                    "baseline_run_id": learning_data.get("baseline_run_id") or ai_insights.get("baseline_session_id"),
+                    "selected_preset": ai_insights.get("selected_preset") or learning_data.get("selected_preset"),
+                    "phase": learning_data.get("phase"),
+                    "is_baseline_row": is_baseline,
+                    "is_warmup": learning_data.get("is_warmup", False),
+                    # Quality metrics from eval stats
+                    "best_loss": eval_summary.get("best_loss"),
+                    "best_loss_step": eval_summary.get("best_loss_step"),
+                    "final_loss": eval_summary.get("final_loss") or summary.get("metrics", {}).get("final_loss"),
+                    "final_loss_step": eval_summary.get("final_loss_step") or summary.get("major_params", {}).get("total_steps_completed"),
+                    "best_psnr": eval_summary.get("best_psnr"),
+                    "best_psnr_step": eval_summary.get("best_psnr_step"),
+                    "final_psnr": eval_summary.get("final_psnr"),
+                    "final_psnr_step": eval_summary.get("final_psnr_step"),
+                    "best_ssim": eval_summary.get("best_ssim"),
+                    "best_ssim_step": eval_summary.get("best_ssim_step"),
+                    "final_ssim": eval_summary.get("final_ssim"),
+                    "final_ssim_step": eval_summary.get("final_ssim_step"),
+                    "best_lpips": eval_summary.get("best_lpips"),
+                    "best_lpips_step": eval_summary.get("best_lpips_step"),
+                    "final_lpips": eval_summary.get("final_lpips"),
+                    "final_lpips_step": eval_summary.get("final_lpips_step"),
+                    # Learning scores from input_mode_learning_results.json
+                    "t_best": learning_data.get("t_best"),
+                    "t_eval_best": learning_data.get("t_eval_best"),
+                    "t_end": learning_data.get("t_end"),
+                    "s_best": learning_data.get("s_best"),
+                    "s_end": learning_data.get("s_end"),
+                    "s_run": learning_data.get("s_run"),
+                    # s_base_best/s_base_end come from baseline_comparison sub-dict
+                    "s_base_best": baseline_cmp.get("s_base_best") or baseline_cmp.get("s_run_best"),
+                    "s_base_end": baseline_cmp.get("s_base_end") or baseline_cmp.get("s_run_end"),
+                    "s_base": baseline_cmp.get("s_base") or learning_data.get("s_base"),
+                    "reward": learning_data.get("reward") or learning_data.get("reward_signal") or ai_insights.get("reward"),
+                    # Score components: run_best/run_end (l=loss, q=quality, t=time, s=score)
+                    # These come from baseline_comparison in the learning results
+                    "run_best_l": baseline_cmp.get("run_best_l"),
+                    "run_best_q": baseline_cmp.get("run_best_q"),
+                    "run_best_t": baseline_cmp.get("run_best_t"),
+                    "run_best_s": baseline_cmp.get("s_run_best") or baseline_cmp.get("run_best_s"),
+                    "run_end_l": baseline_cmp.get("run_end_l"),
+                    "run_end_q": baseline_cmp.get("run_end_q"),
+                    "run_end_t": baseline_cmp.get("run_end_t"),
+                    "run_end_s": baseline_cmp.get("s_run_end") or baseline_cmp.get("run_end_s"),
+                    # Additional info
+                    "remarks": learning_data.get("remarks"),
+                    "learned_input_params": learning_data.get("learned_input_params") or learning_data.get("yhat_scores"),
+                    "learned_input_params_source": learning_data.get("learned_input_params_source"),
+                    "learned_input_params_status": learning_data.get("learned_input_params_status"),
+                }
+
+                learning_rows.append(row)
+
+        except Exception as e:
+            logger.warning(f"Failed to load learning data from {project_dir.name}: {e}")
+            continue
+
+    # Sort by project name, then by run timestamp
+    learning_rows.sort(key=lambda r: (r.get("project_name", ""), r.get("run_id", "")))
+
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline["name"],
+        "rows": learning_rows,
+        "total_rows": len(learning_rows)
+    }
+
+
+@router.get("/{pipeline_id}/worker-logs")
+async def get_pipeline_worker_logs(pipeline_id: str):
+    """Get worker processing logs from all projects in pipeline."""
+    pipeline = training_pipeline_storage.get_pipeline(pipeline_id)
+
+    if not pipeline:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    config = pipeline.get("config", {})
+    pipeline_folder = Path(config.get("pipeline_folder"))
+
+    if not pipeline_folder or not pipeline_folder.exists():
+        raise HTTPException(status_code=404, detail="Pipeline folder not found")
+
+    logs = []
+
+    # Collect logs from each project
+    for project_dir in pipeline_folder.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        # Skip non-project directories
+        if project_dir.name in ["shared_models", "training_pipelines"]:
+            continue
+
+        # Skip pipeline folder marker
+        if (project_dir / "pipeline.json").exists() and project_dir == pipeline_folder:
+            continue
+
+        project_name = project_dir.name
+
+        # Read processing.log directly from pipeline project folder
+        log_file = project_dir / "processing.log"
+        if log_file.exists():
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    log_content = f.read()
+                    # Get last 1000 lines to avoid huge payloads
+                    log_lines = log_content.splitlines()
+                    if len(log_lines) > 1000:
+                        log_content = "\n".join(log_lines[-1000:])
+
+                    if log_lines:  # Only add if there's content
+                        logs.append({
+                            "project": project_name,
+                            "logs": log_content,
+                            "lines": len(log_lines)
+                        })
+            except Exception as e:
+                logger.warning(f"Failed to read processing.log for {project_name}: {e}")
+
+    return {
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline["name"],
+        "logs": logs,
+        "total_projects": len(logs)
+    }
+
+
+@router.get("/{pipeline_id}/models")
+async def get_pipeline_models(pipeline_id: str):
+    """Get shared models from pipeline's shared_models directory."""
+    try:
+        pipeline = training_pipeline_storage.get_pipeline(pipeline_id)
+        if not pipeline:
+            raise HTTPException(status_code=404, detail="Pipeline not found")
+
+        config = pipeline.get("config", {})
+        pipeline_folder = Path(config.get("pipeline_folder"))
+
+        if not pipeline_folder or not pipeline_folder.exists():
+            raise HTTPException(status_code=404, detail="Pipeline folder not found")
+
+        shared_models_dir = pipeline_folder / "shared_models"
+        if not shared_models_dir.exists():
+            return {
+                "pipeline_id": pipeline_id,
+                "pipeline_name": pipeline["name"],
+                "models": [],
+                "total": 0,
+                "message": "No shared models directory found yet. Models will be created after training runs complete."
+            }
+
+        models = []
+
+        # Check for contextual_continuous_selector models
+        selector_dir = shared_models_dir / "contextual_continuous_selector"
+        if selector_dir.exists() and selector_dir.is_dir():
+            for model_file in selector_dir.glob("*.json"):
+                try:
+                    with open(model_file, "r", encoding="utf-8") as f:
+                        model_data = json.load(f)
+                    
+                    # Get file stats
+                    stats = model_file.stat()
+                    
+                    models.append({
+                        "name": model_file.stem,
+                        "type": "contextual_continuous_selector",
+                        "mode": model_file.stem,
+                        "path": str(model_file),
+                        "size_bytes": stats.st_size,
+                        "modified_at": datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                        "data": model_data
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to read model file {model_file}: {e}")
+
+        # Check for other model types in shared_models
+        for item in shared_models_dir.iterdir():
+            if item.is_dir() and item.name != "contextual_continuous_selector":
+                # Check for model files in subdirectories
+                for model_file in item.glob("*.json"):
+                    try:
+                        with open(model_file, "r", encoding="utf-8") as f:
+                            model_data = json.load(f)
+                        
+                        stats = model_file.stat()
+                        
+                        models.append({
+                            "name": model_file.stem,
+                            "type": item.name,
+                            "mode": model_file.stem,
+                            "path": str(model_file),
+                            "size_bytes": stats.st_size,
+                            "modified_at": datetime.fromtimestamp(stats.st_mtime).isoformat(),
+                            "data": model_data
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to read model file {model_file}: {e}")
+
+        return {
+            "pipeline_id": pipeline_id,
+            "pipeline_name": pipeline["name"],
+            "models": models,
+            "total": len(models),
+            "shared_models_path": str(shared_models_dir)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get pipeline models for {pipeline_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/{pipeline_id}")

@@ -1,4 +1,4 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { ArrowLeft, Images, Play, FileText, Columns2, Boxes, Clock, Check, GitBranch, Settings } from "lucide-react";
 import { api } from "../api/client";
@@ -24,6 +24,9 @@ interface ProjectStatus {
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const returnToPipeline = searchParams.get("returnToPipeline");
   const [activeTab, setActiveTab] = useState<TabType>("images");
   const [projectStatus, setProjectStatus] = useState<ProjectStatus | null>(null);
   const [hasImages, setHasImages] = useState(false);
@@ -78,13 +81,23 @@ export default function ProjectDetail() {
         <div className="max-w-7xl mx-auto px-6 lg:px-8 py-7">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <Link
-                to="/"
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 text-white text-sm font-medium transition-all duration-200 hover:scale-105"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                Back
-              </Link>
+              {returnToPipeline ? (
+                <button
+                  onClick={() => navigate(`/pipelines/${returnToPipeline}`)}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 text-white text-sm font-medium transition-all duration-200 hover:scale-105"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back to Pipeline
+                </button>
+              ) : (
+                <Link
+                  to="/"
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 text-white text-sm font-medium transition-all duration-200 hover:scale-105"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Back
+                </Link>
+              )}
               <div>
                 <div className="inline-flex items-center gap-2 px-2 py-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-1">
                   <span className="text-xs font-medium text-white uppercase tracking-wider">Project</span>

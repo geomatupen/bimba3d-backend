@@ -28,6 +28,8 @@ export default function ImagesTab({ projectId, onUploaded }: ImagesTabProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const imageRef = useRef<HTMLImageElement>(null);
+  const [isPipelineProject, setIsPipelineProject] = useState(false);
+  const [imageSourcePath, setImageSourcePath] = useState<string | null>(null);
 
   useEffect(() => {
     fetchImages();
@@ -35,6 +37,14 @@ export default function ImagesTab({ projectId, onUploaded }: ImagesTabProps) {
 
   const fetchImages = async () => {
     try {
+      // First, check if this is a pipeline project
+      const statusRes = await api.get(`/projects/${projectId}/status`);
+      const pipelineId = statusRes.data.pipeline_id;
+      const sourcePath = statusRes.data.source_dir;
+      
+      setIsPipelineProject(!!pipelineId);
+      setImageSourcePath(sourcePath || null);
+
       const res = await api.get(`/projects/${projectId}/files`);
       const imageFiles = res.data.files?.images || [];
       setImages(imageFiles.map((img: { name: string }) => ({
@@ -159,17 +169,32 @@ export default function ImagesTab({ projectId, onUploaded }: ImagesTabProps) {
   return (
     <div className="max-w-7xl">
       {/* Upload Button */}
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-bold text-gray-900">
-          Images ({images.length})
-        </h2>
-        <button
-          onClick={() => setIsUploadOpen(true)}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors shadow-md"
-        >
-          <Upload className="w-4 h-4" />
-          Upload Images
-        </button>
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-lg font-bold text-gray-900">
+            Images ({images.length})
+          </h2>
+          {!isPipelineProject && (
+            <button
+              onClick={() => setIsUploadOpen(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors shadow-md"
+            >
+              <Upload className="w-4 h-4" />
+              Upload Images
+            </button>
+          )}
+        </div>
+        {isPipelineProject && imageSourcePath && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm">
+            <p className="text-blue-900 font-medium mb-1">📁 Pipeline Project</p>
+            <p className="text-blue-700 text-xs">
+              Images are sourced from: <code className="bg-blue-100 px-1 py-0.5 rounded font-mono">{imageSourcePath}</code>
+            </p>
+            <p className="text-blue-600 text-xs mt-1">
+              This project is part of a training pipeline. Images cannot be uploaded directly.
+            </p>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -188,18 +213,24 @@ export default function ImagesTab({ projectId, onUploaded }: ImagesTabProps) {
       ) : images.length === 0 ? (
         <div className="text-center py-16 bg-white border-2 border-dashed border-slate-300 rounded-xl">
           <Upload className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-          <p className="text-sm text-slate-600 mb-4">No images uploaded yet</p>
-          <label className="inline-flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg cursor-pointer transition-colors shadow-md">
-            <Upload className="w-4 h-4" />
-            Upload Your First Images
-            <input
-              type="file"
-              multiple
-              accept="image/*"
-              onChange={handleFileChange}
-              className="hidden"
-            />
-          </label>
+          <p className="text-sm text-slate-600 mb-4">
+            {isPipelineProject 
+              ? "No images found in the pipeline source directory" 
+              : "No images uploaded yet"}
+          </p>
+          {!isPipelineProject && (
+            <label className="inline-flex items-center gap-2 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg cursor-pointer transition-colors shadow-md">
+              <Upload className="w-4 h-4" />
+              Upload Your First Images
+              <input
+                type="file"
+                multiple
+                accept="image/*"
+                onChange={handleFileChange}
+                className="hidden"
+              />
+            </label>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">

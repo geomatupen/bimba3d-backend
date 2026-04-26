@@ -1,0 +1,66 @@
+Failed to create images symlink, falling back to directory reference: Command '['mklink', '/J', 'E:\\Thesis\\Pipeline Projects\\minimal_test_20260425_125239\\podoli\\images', 'E:\\Thesis\\Training Data\\podoli']' returned non-zero exit status 1.
+mklink failed (return code 1): Local NTFS volumes are required to complete the operation.
+
+
+🚀 Starting minimal pipeline test...
+   This will create and run a small test pipeline:
+   - 1 project (podoli, 138 images)
+   - COLMAP with 800px resolution
+   - Training with only 100 steps
+   - 1 run total
+
+   Press Ctrl+C to stop at any time
+
+================================================================================
+CREATING MINIMAL TEST PIPELINE
+================================================================================
+
+Configuration:
+  Name: minimal_test_20260425_125239
+  Dataset: podoli (138 images)
+  Max steps: 100 (minimal)
+  COLMAP resolution: 800px (small)
+  Total runs: 1
+  Storage: E:\Thesis\Pipeline Projects\minimal_test_20260425_125239
+
+Creating pipeline...
+✓ Pipeline created successfully!
+  ID: pipeline_ead23c8fb1ef
+  Folder: E:\Thesis\Pipeline Projects\minimal_test_20260425_125239
+
+================================================================================
+STARTING PIPELINE
+================================================================================
+
+Starting pipeline execution...
+✓ Pipeline started in background
+
+================================================================================
+MONITORING PIPELINE EXECUTION
+================================================================================
+
+[0s] Status: failed, Progress: 0/1, Phase: 1
+
+✓ Pipeline failed
+  Completed runs: 0
+  Failed runs: 1
+  Total time: 0s
+
+================================================================================
+TEST SUMMARY
+================================================================================
+
+Pipeline: minimal_test_20260425_125239
+Status: failed
+Progress: 0/1
+
+Runs completed:
+  - Quick Test - Pass 1 Run 1: failed
+
+✓ Pipeline folder exists: E:\Thesis\Pipeline Projects\minimal_test_20260425_125239
+✓ Project folder exists: E:\Thesis\Pipeline Projects\minimal_test_20260425_125239\podoli
+  ⚠ images not found
+  ⚠ outputs/colmap/sparse not found
+  ⚠ outputs/gsplat not found
+
+Test PASSED

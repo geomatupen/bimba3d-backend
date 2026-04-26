@@ -258,6 +258,7 @@ def run_colmap_docker(project_id: str, params: dict = None) -> None:
 def run_worker_local(project_id: str, params: dict = None) -> None:
     """Run the same worker.entrypoint pipeline locally (without Docker)."""
     from bimba3d_backend.app.config import DATA_DIR
+    from pathlib import Path
 
     worker_params = dict(params or {})
     if worker_params.get("engine") == "gsplat":
@@ -266,13 +267,30 @@ def run_worker_local(project_id: str, params: dict = None) -> None:
 
     params_json = json.dumps(worker_params)
 
+    # Use user-specified project directory if provided (for pipeline projects)
+    # Otherwise use DATA_DIR (for regular projects)
+    project_dir_override = worker_params.get("project_dir_override")
+    if project_dir_override:
+        # For pipeline projects, the override IS the full project directory
+        # Pass parent as data-dir, and use project name (last part of path) as project_id
+        project_path = Path(project_dir_override)
+        data_dir = project_path.parent
+        # Use the folder name as the "project_id" for the worker
+        project_folder_name = project_path.name
+        logger.info(f"Using project directory override: {project_path}")
+        logger.info(f"  data_dir: {data_dir}")
+        logger.info(f"  project_folder: {project_folder_name}")
+    else:
+        data_dir = DATA_DIR
+        project_folder_name = project_id
+
     cmd = [
         sys.executable,
         "-m",
         "bimba3d_backend.worker.entrypoint",
-        project_id,
+        project_folder_name,  # Use folder name instead of UUID project_id
         "--data-dir",
-        str(DATA_DIR),
+        str(data_dir),
         "--params",
         params_json,
     ]

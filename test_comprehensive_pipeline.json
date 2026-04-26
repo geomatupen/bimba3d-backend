@@ -1,0 +1,79 @@
+{
+  "name": "Comprehensive Test Pipeline",
+  "base_directory": "E:/Thesis/Training Data",
+  "pipeline_directory": "E:/Thesis/Pipeline Projects",
+  "projects": [
+    {
+      "name": "podoli",
+      "dataset_path": "E:/Thesis/Training Data/podoli",
+      "image_count": 69
+    }
+  ],
+  "shared_config": {
+    "ai_input_mode": "exif_plus_flight_plan",
+    "ai_selector_strategy": "contextual_continuous",
+    "max_steps": 150,
+    "eval_interval": 50,
+    "log_interval": 10,
+    "densify_until_iter": 100,
+    "images_max_size": 1600,
+    "save_eval_images": true,
+    "replace_eval_images": true,
+    "save_checkpoints": true,
+    "replace_checkpoints": true,
+    "save_final_splat": true
+  },
+  "phases": [
+    {
+      "phase_number": 1,
+      "name": "Baseline Collection",
+      "runs_per_project": 1,
+      "passes": 1,
+      "strategy_override": "preset_bias",
+      "preset_override": "balanced",
+      "update_model": false,
+      "context_jitter": false,
+      "shuffle_order": false,
+      "session_execution_mode": "test"
+    },
+    {
+      "phase_number": 2,
+      "name": "Warmup Learning",
+      "runs_per_project": 2,
+      "passes": 1,
+      "strategy_override": null,
+      "preset_override": null,
+      "update_model": true,
+      "context_jitter": true,
+      "context_jitter_mode": "mild",
+      "shuffle_order": false,
+      "session_execution_mode": "train"
+    },
+    {
+      "phase_number": 3,
+      "name": "Full Training",
+      "runs_per_project": 3,
+      "passes": 1,
+      "strategy_override": null,
+      "preset_override": null,
+      "update_model": true,
+      "context_jitter": true,
+      "context_jitter_mode": "uniform",
+      "shuffle_order": true,
+      "session_execution_mode": "train"
+    }
+  ],
+  "thermal_management": {
+    "enabled": false,
+    "strategy": "fixed_interval",
+    "cooldown_minutes": 1,
+    "gpu_temp_threshold": 70,
+    "check_interval_seconds": 30,
+    "max_wait_minutes": 30
+  },
+  "failure_handling": {
+    "continue_on_failure": true,
+    "max_retries_per_run": 1,
+    "skip_project_after_failures": 3
+  }
+}

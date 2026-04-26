@@ -33,6 +33,7 @@ def apply_session_execution_mode_overrides(
             "batch_continue_on_failure",
             "batch_run_name_prefix",
             "warmup_phase",
+            "baseline_session_id",
         ):
             params_payload.pop(key, None)
 

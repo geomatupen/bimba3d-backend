@@ -197,13 +197,25 @@ def update_from_run_continuous(
     eval_rows.sort(key=lambda r: int(r.get("step", 0)))
     eval_steps = [int(r["step"]) for r in eval_rows]
 
-    if loss_by_step:
-        t_best = int(min(loss_by_step.keys(), key=lambda s: float(loss_by_step[s])))
+    # Find best step by quality (PSNR + SSIM + LPIPS), not by loss
+    # Quality metrics available only at eval steps
+    quality_scores_by_step: dict[int, float] = {}
+    for row in eval_rows:
+        step = int(row["step"])
+        psnr = float(row.get("convergence_speed", 0.0) or 0.0)
+        ssim = float(row.get("sharpness_mean", 0.0) or 0.0)
+        lpips = float(row.get("lpips_mean", 0.0) or 0.0)
+        # Composite quality: 40% PSNR, 30% SSIM, 30% LPIPS (lower is better, so invert)
+        # Note: using raw values here, normalization happens later
+        quality_scores_by_step[step] = psnr + ssim + (1.0 - lpips) if lpips > 0 else psnr + ssim
+
+    # Best step = highest quality score
+    if quality_scores_by_step:
+        t_best = int(max(quality_scores_by_step.keys(), key=lambda s: quality_scores_by_step[s]))
     else:
         t_best = int(eval_steps[-1])
 
-    eval_ge = [s for s in eval_steps if s >= t_best]
-    t_eval_best = int(min(eval_ge)) if eval_ge else int(max(eval_steps))
+    t_eval_best = t_best  # Already an evaluated step, no need to find nearest
     t_end = int(max(eval_steps))
 
     psnr_vals = [float(r.get("convergence_speed", 0.0) or 0.0) for r in eval_rows]
@@ -327,7 +339,8 @@ def update_from_run_continuous(
         t_ratio = safe_ratio(elapsed_vals[idx], time_ref)
         t_score = 1.0 - clamp_float(t_ratio, 0.0, 1.0)
         l_score = loss_norm[idx]
-        s = 0.5 * l_score + 0.25 * q + 0.25 * t_score
+        # New weights: 75% quality, 25% time (loss removed)
+        s = 0.75 * q + 0.25 * t_score
         by_step[step] = {"l": l_score, "q": q, "t": t_score, "s": s}
 
     s_best = float(by_step.get(t_eval_best, {}).get("s", 0.0))
@@ -338,35 +351,40 @@ def update_from_run_continuous(
     reward_signal = s_run
     if baseline_rows:
         b_by_step: dict[int, dict[str, float]] = {}
+        baseline_quality_scores: dict[int, float] = {}
         for idx, row in enumerate(baseline_rows):
             step = int(row["step"])
             q = 0.4 * b_psnr_norm[idx] + 0.3 * b_ssim_norm[idx] + 0.3 * b_lpips_norm[idx]
             t_ratio = safe_ratio(b_elapsed_vals[idx], time_ref)
             t_score = 1.0 - clamp_float(t_ratio, 0.0, 1.0)
             l_score = b_loss_norm[idx]
-            s = 0.5 * l_score + 0.25 * q + 0.25 * t_score
+            # New weights: 75% quality, 25% time (loss removed)
+            s = 0.75 * q + 0.25 * t_score
             b_by_step[step] = {"l": l_score, "q": q, "t": t_score, "s": s}
+            baseline_quality_scores[step] = q
 
-        def _anchor_step(target: int) -> int:
-            ge = [s for s in b_steps if s >= target]
-            return int(min(ge)) if ge else int(max(b_steps))
+        # Find baseline's best quality step (independent of run's best step)
+        t_base_best = int(max(baseline_quality_scores.keys(), key=lambda s: baseline_quality_scores[s]))
+        t_base_end = int(max(b_steps))
 
-        b_best_anchor_step = _anchor_step(t_eval_best)
-        b_end_anchor_step = _anchor_step(t_end)
-        s_base_best = float(b_by_step.get(b_best_anchor_step, {}).get("s", 0.0))
-        s_base_end = float(b_by_step.get(b_end_anchor_step, {}).get("s", 0.0))
+        s_base_best = float(b_by_step.get(t_base_best, {}).get("s", 0.0))
+        s_base_end = float(b_by_step.get(t_base_end, {}).get("s", 0.0))
         s_base = max(s_base_best, s_base_end)
         reward_signal = s_run - s_base
         baseline_comparison = {
-            "baseline_best_anchor_step": b_best_anchor_step,
-            "baseline_end_anchor_step": b_end_anchor_step,
+            "run_best_step": t_eval_best,
+            "run_end_step": t_end,
+            "baseline_best_step": t_base_best,
+            "baseline_end_step": t_base_end,
+            "s_run_best": s_best,
+            "s_run_end": s_end,
             "s_base_best": s_base_best,
             "s_base_end": s_base_end,
+            "s_run": s_run,
             "s_base": s_base,
             "s_run_relative": reward_signal,
             "score_weights": {
-                "loss": 0.5,
-                "quality": 0.25,
+                "quality": 0.75,
                 "time": 0.25,
             },
         }

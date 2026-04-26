@@ -41,12 +41,74 @@ from bimba3d_backend.app.models.project import (
 )
 from bimba3d_backend.app.services import status, storage, colmap, gsplat, files, sparse_edit, pointsbin
 from bimba3d_backend.app.services import model_registry
+from bimba3d_backend.app.services import training_pipeline_storage
 from bimba3d_backend.app.services.session_execution_mode import apply_session_execution_mode_overrides
 from bimba3d_backend.app.services.worker_mode import normalize_worker_mode, resolve_worker_mode
 from bimba3d_backend.worker import pipeline
 
 COLMAP_TO_OPENGL = (1.0, -1.0, -1.0)
 BEST_SPARSE_META = ".best_sparse_selection.json"
+
+
+def _find_project_dir(project_id: str) -> Optional[Path]:
+    """Find project directory - checks DATA_DIR first, then uses pipeline_path from project configs.
+
+    Returns:
+        Path to project directory if found, None otherwise
+    """
+    # First check DATA_DIR (regular projects)
+    data_dir_project = DATA_DIR / project_id
+    if data_dir_project.exists():
+        logger.debug(f"Found project {project_id} in DATA_DIR: {data_dir_project}")
+        return data_dir_project
+
+    # For pipeline projects, scan registered pipelines to find project configs with matching ID
+    # This uses pipeline_path stored in project config.json for efficient lookup
+    all_pipelines = training_pipeline_storage.list_pipelines()
+    pipeline_folders_to_scan = []
+
+    for pipeline_meta in all_pipelines:
+        pipeline_folder = Path(pipeline_meta.get("config", {}).get("pipeline_folder", ""))
+        if pipeline_folder.exists():
+            pipeline_folders_to_scan.append(pipeline_folder)
+
+    # Fallback: scan common pipeline roots if no registered pipelines or stale metadata
+    if not pipeline_folders_to_scan:
+        common_roots = [
+            Path("E:/Thesis/PipelineProjects"),
+            Path("E:/Thesis/Pipeline Projects"),
+        ]
+        for root in common_roots:
+            if root.exists():
+                for subdir in root.rglob("pipeline.json"):
+                    pipeline_folder = subdir.parent
+                    if pipeline_folder not in pipeline_folders_to_scan:
+                        pipeline_folders_to_scan.append(pipeline_folder)
+
+    # Scan all identified pipeline folders for project configs
+    for pipeline_folder in pipeline_folders_to_scan:
+        for potential_project_folder in pipeline_folder.iterdir():
+            if not potential_project_folder.is_dir():
+                continue
+
+            if potential_project_folder.name in ["shared_models", "training_pipelines", "pipeline.json"]:
+                continue
+
+            # Check config.json for matching project_id
+            config_file = potential_project_folder / "config.json"
+            if config_file.exists():
+                try:
+                    with open(config_file, "r") as f:
+                        config = json.load(f)
+                    if config.get("id") == project_id:
+                        logger.info(f"Found project {project_id} at: {potential_project_folder}")
+                        return potential_project_folder
+                except Exception as e:
+                    logger.warning(f"Error reading config from {config_file}: {e}")
+                    continue
+
+    logger.warning(f"Project {project_id} not found in any location")
+    return None
 SPARSE_IMAGE_MEMBERSHIP_META = ".sparse_image_membership.json"
 SHARED_CONFIG_FILE = "shared_config.json"
 BATCH_LINEAGE_FILE = ".batch_lineage_latest.json"
@@ -2117,7 +2179,7 @@ def _extract_eval_summary(stats_dir: Path) -> dict[str, Any]:
 def _build_project_ai_learning_table(project_id: str) -> dict[str, Any]:
     """Build run-wise AI learning comparison rows for Logs tab tables."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -2466,7 +2528,7 @@ def _run_batch_process(
 ) -> None:
     """Run multiple sessions sequentially using the same base config."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         completed_runs = max(0, int(initial_completed_runs))
         batch_connect_runs = bool(base_params.get("batch_connect_runs", True))
         previous_success_run_id: str | None = str(initial_previous_success_run_id or "") or None
@@ -2717,7 +2779,7 @@ def _build_warmup_seed_params(project_dir: Path, requested_params: dict) -> tupl
 
 
 def _run_warmup_experiment(project_id: str, requested_params: dict) -> None:
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     continue_on_failure = bool(requested_params.get("continue_on_failure", True))
     requested_total_runs = int(requested_params.get("run_count") or sum(int(p.get("runs") or 0) for p in WARMUP_PHASE_PLAN))
     warmup_plan = _resolve_warmup_phase_plan(requested_total_runs)
@@ -3081,6 +3143,46 @@ def _base_session_colmap_ready(project_dir: Path, base_session_id: str | None) -
     base_run_sparse_root = project_dir / "runs" / base_session_id / "outputs" / "sparse"
     return _has_colmap_sparse_outputs(base_run_sparse_root)
 
+
+def _resolve_effective_images_dir(project_dir: Path, images_dir: Path) -> Path | None:
+    """Resolve the effective images directory for a project.
+
+    For pipeline projects, the images directory may be a Windows junction that
+    iterdir()/glob() can traverse. If the junction is empty or inaccessible,
+    fall back to source_dir from config.json.
+
+    Returns the effective images directory path, or None if not found.
+    """
+    if images_dir.exists():
+        # Try to list files from the junction/directory
+        try:
+            has_images = any(
+                f.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS
+                for f in images_dir.iterdir()
+                if f.is_file()
+            )
+            if has_images:
+                return images_dir
+        except Exception:
+            pass
+
+    # Fall back to source_dir from config.json (pipeline projects)
+    config_file = project_dir / "config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r") as f:
+                config = json.load(f)
+            source_dir = config.get("source_dir")
+            if source_dir:
+                source_path = Path(source_dir)
+                if source_path.exists() and source_path.is_dir():
+                    return source_path
+        except Exception:
+            pass
+
+    # Return images_dir even if empty (caller handles empty case)
+    return images_dir if images_dir.exists() else None
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -3144,7 +3246,7 @@ def _infer_engine(project_id: str) -> str | None:
             return normalized
     except Exception:
         pass
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     engines_root = project_dir / "outputs" / ENGINE_SUBDIR
     if engines_root.exists() and engines_root.is_dir():
         for entry in sorted(p for p in engines_root.iterdir() if p.is_dir()):
@@ -3164,7 +3266,7 @@ def _find_existing_path(
 ) -> tuple[Path | None, str | None, str | None, str | None]:
     sanitized = _sanitize_engine(engine)
     search_order, inferred = _engine_search_order(project_id, sanitized)
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     for candidate in search_order:
         if run_id:
             candidate_path = project_dir / "runs" / run_id / "outputs"
@@ -3261,10 +3363,19 @@ def list_projects():
         if not DATA_DIR.exists():
             return projects
 
-        for project_dir in sorted(DATA_DIR.iterdir()):
-            if not project_dir.is_dir():
-                continue
+        def scan_project_dir(project_dir: Path, projects_list: list[ProjectListItem]):
+            """Helper to scan a single project directory and add to list."""
             project_id = project_dir.name
+            config_path = project_dir / "config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r") as f:
+                        config_for_id = json.load(f)
+                    config_id = str(config_for_id.get("id") or "").strip()
+                    if config_id:
+                        project_id = config_id
+                except Exception:
+                    pass
             project_status = status.get_status(project_id)
             current_status = project_status.get("status", "pending")
             progress = int(project_status.get("progress", 0) or 0)
@@ -3291,10 +3402,15 @@ def list_projects():
             except Exception:
                 modified_at = None
 
+            # Check if project has COLMAP outputs
+            has_colmap = (project_dir / "outputs" / "sparse" / "0").exists()
+
             # Read pipeline metadata from config.json if exists
             created_by = None
             pipeline_id = None
             pipeline_name = None
+            dataset_path = None
+            config_name = None
             config_path = project_dir / "config.json"
             if config_path.exists():
                 try:
@@ -3303,24 +3419,62 @@ def list_projects():
                         created_by = config.get("created_by")
                         pipeline_id = config.get("pipeline_id")
                         pipeline_name = config.get("pipeline_name")
+                        dataset_path = config.get("source_dir")
+                        config_name = config.get("name")
                 except Exception:
                     pass
 
-            projects.append(
+            # Use config name if status doesn't have a name
+            display_name = project_status.get("name") or config_name
+
+            projects_list.append(
                 ProjectListItem(
                     project_id=project_id,
-                    name=project_status.get("name"),
+                    name=display_name,
                     status=current_status,
                     progress=progress,
                     created_at=project_status.get("created_at"),
                     modified_at=modified_at,
                     has_outputs=has_outputs,
+                    has_colmap=has_colmap,
                     session_count=session_count,
                     created_by=created_by,
                     pipeline_id=pipeline_id,
                     pipeline_name=pipeline_name,
+                    dataset_path=dataset_path,
                 )
             )
+
+        # Scan regular projects in DATA_DIR
+        for project_dir in sorted(DATA_DIR.iterdir()):
+            if not project_dir.is_dir():
+                continue
+
+            # Check if this is a pipeline folder
+            if (project_dir / "pipeline.json").exists():
+                # Scan for projects inside pipeline folder
+                for sub_project_dir in sorted(project_dir.iterdir()):
+                    if sub_project_dir.is_dir() and sub_project_dir.name not in ["shared_models"]:
+                        if (sub_project_dir / "config.json").exists() or (sub_project_dir / "outputs").exists():
+                            scan_project_dir(sub_project_dir, projects)
+                continue
+
+            # Regular standalone project
+            scan_project_dir(project_dir, projects)
+
+        # Also scan pipeline projects from training_pipeline_storage
+        try:
+            all_pipelines = training_pipeline_storage.list_pipelines()
+            for pipeline_data in all_pipelines:
+                pipeline_folder = pipeline_data.get("config", {}).get("pipeline_folder")
+                if pipeline_folder and Path(pipeline_folder).exists():
+                    pipeline_path = Path(pipeline_folder)
+                    for sub_project_dir in sorted(pipeline_path.iterdir()):
+                        if sub_project_dir.is_dir() and sub_project_dir.name not in ["shared_models"]:
+                            if (sub_project_dir / "config.json").exists() or (sub_project_dir / "outputs").exists():
+                                scan_project_dir(sub_project_dir, projects)
+        except Exception as e:
+            logger.warning(f"Failed to scan pipeline projects: {e}")
 
         return projects
     except Exception as e:
@@ -3508,7 +3662,7 @@ def download_reusable_model_config_snapshot(model_id: str, project_id: str, run_
 def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateModelRequest | None = Body(None)):
     """Promote a completed gsplat run checkpoint into global reusable model storage."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -3647,7 +3801,7 @@ def elevate_project_run_model(project_id: str, run_id: str, payload: ElevateMode
 async def upload_images(project_id: str, images: list[UploadFile] = File(...)):
     """Upload images to a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         images_dir = project_dir / "images"
         thumbnails_dir = images_dir / "thumbnails"
         
@@ -3741,7 +3895,7 @@ async def upload_images(project_id: str, images: list[UploadFile] = File(...)):
 def process_project(project_id: str, params: ProcessParams | None = Body(None)):
     """Start processing a project in background thread."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         
         # Verify project exists
         if not project_dir.exists():
@@ -3838,7 +3992,7 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
             "exif_plus_flight_plan_plus_external",
         }
         valid_ai_preset_overrides = {"conservative", "balanced", "geometry_fast", "appearance_fast"}
-        valid_selector_strategies = {"preset_bias", "continuous_bandit_linear"}
+        valid_selector_strategies = {"preset_bias", "continuous_bandit_linear", "contextual_continuous"}
         if requested_ai_input_mode and requested_ai_input_mode not in valid_ai_input_modes:
             raise HTTPException(
                 status_code=400,
@@ -3936,9 +4090,83 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
         inherited_test_ai_input_mode: str | None = None
         inherited_test_ai_selector_strategy: str | None = None
 
-        start_model_mode = "reuse" if is_session_test else str(requested_params.get("start_model_mode") or "scratch").strip().lower()
+        # For test runs, default to 'reuse' so the AI profile is inherited from the
+        # source model.  However, learner_json models (pipeline-elevated contextual
+        # learner weights) do NOT contain a gsplat checkpoint — they only carry the
+        # bandit/Q-table weights that are loaded automatically by the AI selector.
+        # In that case we fall back to 'scratch' for the gsplat warm-start while
+        # still inheriting the AI profile (input_mode + selector_strategy).
+        _requested_source_model_id = str(requested_params.get("source_model_id") or "").strip()
+        _source_model_record_for_mode_check: dict | None = None
+        if _requested_source_model_id:
+            _source_model_record_for_mode_check = model_registry.resolve_reusable_model(_requested_source_model_id)
+        _source_is_learner_only = (
+            isinstance(_source_model_record_for_mode_check, dict)
+            and str(_source_model_record_for_mode_check.get("artifact_format") or "").strip().lower() == "learner_json"
+            and not (_source_model_record_for_mode_check.get("paths") or {}).get("checkpoint")
+        )
+
+        if is_session_test and _source_is_learner_only:
+            # Learner-only model: inherit AI profile but train from scratch (no checkpoint needed)
+            start_model_mode = "scratch"
+        elif is_session_test:
+            start_model_mode = "reuse"
+        else:
+            start_model_mode = str(requested_params.get("start_model_mode") or "scratch").strip().lower()
+
         if start_model_mode not in {"scratch", "reuse"}:
             raise HTTPException(status_code=400, detail="start_model_mode must be 'scratch' or 'reuse'")
+
+        # When the source model is a learner_json and we're in test mode, inherit the
+        # AI profile now (before the reuse block) so it flows into the params below.
+        # Also seed the learner weights into the project's local model directory so
+        # select_contextual_continuous() can find them during the test run.
+        if is_session_test and _source_is_learner_only and isinstance(_source_model_record_for_mode_check, dict):
+            _learner_profile = model_registry.resolve_model_ai_profile(_source_model_record_for_mode_check)
+            inherited_test_ai_input_mode = str(_learner_profile.get("ai_input_mode") or "").strip().lower() or None
+            inherited_test_ai_selector_strategy = (
+                str(_learner_profile.get("ai_selector_strategy") or "").strip().lower() or None
+            )
+            # Also inherit the contextual_continuous strategy explicitly from ai_profile
+            # since resolve_model_ai_profile only returns preset_bias/continuous_bandit_linear
+            if not inherited_test_ai_selector_strategy:
+                _ai_prof = _source_model_record_for_mode_check.get("ai_profile") or {}
+                _strat = str(_ai_prof.get("ai_selector_strategy") or "").strip().lower()
+                if _strat:
+                    inherited_test_ai_selector_strategy = _strat
+            params_payload["source_model_id"] = _requested_source_model_id
+            _learner_model_name = str(_source_model_record_for_mode_check.get("model_name") or "").strip()
+            if _learner_model_name:
+                params_payload["source_model_name"] = _learner_model_name
+            # Seed learner weights into project's local model directory so the
+            # contextual_continuous selector can load them during the test run.
+            # The selector reads from: project_dir/models/contextual_continuous_selector/{mode}.json
+            try:
+                _seeded_path = model_registry.seed_learner_weights_into_project(
+                    _source_model_record_for_mode_check,
+                    project_dir,
+                )
+                if _seeded_path:
+                    logger.info(
+                        "Seeded learner weights from model '%s' into project %s at %s",
+                        _requested_source_model_id,
+                        project_id,
+                        _seeded_path,
+                    )
+                else:
+                    logger.warning(
+                        "Could not seed learner weights from model '%s' into project %s — "
+                        "selector will start from default weights",
+                        _requested_source_model_id,
+                        project_id,
+                    )
+            except Exception as _seed_exc:
+                logger.warning(
+                    "Failed to seed learner weights from model '%s' into project %s: %s",
+                    _requested_source_model_id,
+                    project_id,
+                    _seed_exc,
+                )
 
         if start_model_mode == "reuse":
             source_model_id = str(requested_params.get("source_model_id") or "").strip()
@@ -3982,9 +4210,22 @@ def process_project(project_id: str, params: ProcessParams | None = Body(None)):
                         str(inherited_test_profile.get("ai_selector_strategy") or "").strip().lower() or None
                     )
 
-                checkpoint_path = Path(str((model_record.get("paths") or {}).get("checkpoint") or "")).expanduser()
-                if not checkpoint_path.exists():
-                    raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing")
+                raw_checkpoint = (model_record.get("paths") or {}).get("checkpoint")
+                if not raw_checkpoint or not str(raw_checkpoint).strip():
+                    artifact_fmt = str(model_record.get("artifact_format") or "").strip().lower()
+                    if artifact_fmt == "learner_json":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Model '{source_model_id}' is a contextual learner model (artifact_format=learner_json) "
+                                "and does not contain a gsplat checkpoint. "
+                                "Select a model that was elevated from a completed gsplat training run."
+                            ),
+                        )
+                    raise HTTPException(status_code=400, detail="Reusable model checkpoint file is missing (no checkpoint path registered)")
+                checkpoint_path = Path(str(raw_checkpoint).strip()).expanduser()
+                if not checkpoint_path.is_file():
+                    raise HTTPException(status_code=400, detail=f"Reusable model checkpoint file is missing or is not a file: {checkpoint_path}")
                 params_payload["source_model_id"] = source_model_id
                 if source_model_name:
                     params_payload["source_model_name"] = source_model_name
@@ -4544,25 +4785,59 @@ def get_status_endpoint(project_id: str):
     """Get project status."""
     try:
         from bimba3d_backend.app.services.resume import can_resume_project
-        
-        project_dir = DATA_DIR / project_id
-        
+
+        # Find project in DATA_DIR or pipeline folders
+        project_dir = _find_project_dir(project_id)
+
         # Verify project exists
-        if not project_dir.exists():
+        if not project_dir:
             raise HTTPException(status_code=404, detail="Project not found")
-        
+
         project_status = status.get_status(project_id)
-        
+
+        # Initialize status for pipeline projects that don't have status.json yet
         if project_status.get("status") == "not_found":
-            raise HTTPException(status_code=404, detail="Status not found")
-        
+            config_file = project_dir / "config.json"
+            if config_file.exists():
+                try:
+                    with open(config_file, "r") as f:
+                        config = json.load(f)
+                    project_name = config.get("name", project_dir.name)
+                    status.initialize_status(project_id, name=project_name)
+                    project_status = status.get_status(project_id)
+                except Exception:
+                    pass
+
+            if project_status.get("status") == "not_found":
+                raise HTTPException(status_code=404, detail="Status not found")
+
+        # For pipeline projects, populate current_run_id from most recent run if missing
+        if not project_status.get("current_run_id"):
+            runs_dir = project_dir / "runs"
+            if runs_dir.exists():
+                run_dirs = sorted(runs_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)
+                if run_dirs and run_dirs[0].is_dir():
+                    project_status["current_run_id"] = run_dirs[0].name
+
         # Add resume info
         resume_info = can_resume_project(project_id)
         project_status["can_resume"] = resume_info["can_resume"]
         project_status["last_completed_step"] = resume_info.get("last_checkpoint_step")
-        
+
+        # Add pipeline info if this is a pipeline project
+        config_file = project_dir / "config.json"
+        if config_file.exists():
+            try:
+                with open(config_file, "r") as f:
+                    config = json.load(f)
+                project_status["pipeline_id"] = config.get("pipeline_id")
+                project_status["pipeline_name"] = config.get("pipeline_name")
+                project_status["source_dir"] = config.get("source_dir")
+            except Exception:
+                pass
+
         return StatusResponse(**project_status)
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -4584,7 +4859,7 @@ def get_project_telemetry(
         from_start: 0 (default) = read from end/tail (quick status), 1 = read from beginning (complete logs).
     """
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -4890,7 +5165,7 @@ def get_project_ai_learning_table(project_id: str):
 def request_stop(project_id: str):
     """Signal an in-flight job to stop gracefully and export final artifacts."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
 
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
@@ -4950,7 +5225,7 @@ def request_stop(project_id: str):
 def list_project_runs(project_id: str):
     """List per-project run sessions with key metadata for UI run selection."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5110,7 +5385,7 @@ def list_project_runs(project_id: str):
 def get_project_run_config(project_id: str, run_id: str):
     """Return the persisted run_config payload for a given run session."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5167,7 +5442,7 @@ def update_project_run_config(
 ):
     """Persist run-level training config for a specific session."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5249,7 +5524,7 @@ def continue_batch_from_run(
 ):
     """Restart one run and continue remaining runs in its batch chain."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5399,7 +5674,7 @@ def continue_batch_from_run(
 def create_project_run(project_id: str, payload: CreateRunRequest = Body(...)):
     """Create a new run/session directory and persist draft run config."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5491,7 +5766,7 @@ def create_project_run(project_id: str, payload: CreateRunRequest = Body(...)):
 def rename_project_run(project_id: str, run_id: str, payload: RenameRunRequest = Body(...)):
     """Rename a run session directory and update its run config metadata."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5573,7 +5848,7 @@ def rename_project_run(project_id: str, run_id: str, payload: RenameRunRequest =
 def set_base_project_run(project_id: str, run_id: str):
     """Mark the selected run as the project's base session."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5600,7 +5875,7 @@ def set_base_project_run(project_id: str, run_id: str):
 def delete_project_run(project_id: str, run_id: str):
     """Delete a completed/inactive run session and reassign base session if needed."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5688,7 +5963,7 @@ def delete_project_run(project_id: str, run_id: str):
 def get_project_shared_config(project_id: str):
     """Return project-level shared config anchored to the base session."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5717,7 +5992,7 @@ def get_project_shared_config(project_id: str):
 def update_project_shared_config(project_id: str, payload: UpdateSharedConfigRequest = Body(...)):
     """Persist base-owned shared config (images/COLMAP) for the project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5762,10 +6037,10 @@ def update_project_shared_config(project_id: str, payload: UpdateSharedConfigReq
 def get_files(project_id: str, run_id: str | None = Query(None)):
     """Get list of output files for a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id)
         
         # Verify project exists
-        if not project_dir.exists():
+        if not project_dir or not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
         requested_run_id = (run_id or "").strip() or None
@@ -5802,7 +6077,7 @@ def get_preview_image(
 ):
     """Serve a specific preview PNG from outputs/previews (optionally engine-scoped)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5856,7 +6131,7 @@ def head_preview_image(
 ):
     """HEAD probe for preview PNG (used by browsers for preflight)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5900,7 +6175,7 @@ def head_preview_image(
 def get_image_locations(project_id: str):
     """Return extracted GPS locations for project images, if available."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5932,7 +6207,7 @@ def get_image_locations(project_id: str):
 def get_preview(project_id: str):
     """Get latest preview PNG."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -5960,7 +6235,7 @@ def get_preview(project_id: str):
 def get_logs(project_id: str, lines: int = 500):
     """Get processing logs for a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
@@ -5997,7 +6272,7 @@ def download_sparse_json(project_id: str):
     The returned shape is {"points": [{"x":..,"y":..,"z":..,"r":..,"g":..,"b":..}, ...]}.
     """
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6094,7 +6369,7 @@ def download_sparse_json(project_id: str):
 def get_splat_format(project_id: str, engine: str | None = Query(None)):
     """Check what splat format is available (ply or bin)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         sanitized_engine = _sanitize_engine(engine)
@@ -6128,7 +6403,7 @@ def get_splat_format(project_id: str, engine: str | None = Query(None)):
 def download_splats_splat(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download .splat file (optimized binary format for web rendering)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         splat_path, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6160,7 +6435,7 @@ def download_splats_splat(project_id: str, engine: str | None = Query(None), run
 @router.head("/{project_id}/download/splats.splat")
 def head_splats_splat(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """HEAD probe for .splat file (used by frontend to prefer native format)."""
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     splat_path, _, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6182,7 +6457,7 @@ def head_splats_splat(project_id: str, engine: str | None = Query(None), run_id:
 def download_best_splat(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download best model .splat file selected during training."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         best_path, _, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6214,7 +6489,7 @@ def download_best_splat(project_id: str, engine: str | None = Query(None), run_i
 @router.head("/{project_id}/download/best.splat")
 def head_best_splat(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """HEAD probe for best.splat file."""
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     best_path, _, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6236,7 +6511,7 @@ def head_best_splat(project_id: str, engine: str | None = Query(None), run_id: s
 def download_splats_ply(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download PLY splats file."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         ply_path, _, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6269,7 +6544,7 @@ def download_splats_ply(project_id: str, engine: str | None = Query(None), run_i
 def download_splats_bin(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download binary splats file."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         bin_path, _, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6309,7 +6584,7 @@ def download_points_bin(
     The converter writes `points.bin` into each reconstruction directory (e.g. outputs/sparse/0/points.bin).
     """
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6404,7 +6679,7 @@ def download_points_bin(
 @router.get("/{project_id}/sparse/candidates")
 def list_sparse_candidates(project_id: str):
     """Return metadata about available sparse reconstructions for UI selection."""
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6503,7 +6778,7 @@ def list_sparse_candidates(project_id: str):
 @router.get("/{project_id}/sparse/image-membership")
 def get_sparse_image_membership(project_id: str):
     """Return registered image names for each sparse candidate."""
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6556,7 +6831,7 @@ def get_sparse_merge_report(project_id: str, candidate: str | None = Query(None)
     - If `candidate` is provided, it can be either `_merged/<name>` or `<name>`.
     - If omitted, the latest merged candidate with `merge_meta.json` is returned.
     """
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6615,7 +6890,7 @@ def get_sparse_merge_report(project_id: str, candidate: str | None = Query(None)
 @router.post("/{project_id}/sparse/merge")
 def build_sparse_merge(project_id: str, payload: SparseMergeRequest | None = Body(None)):
     """Build a merged sparse model from selected candidate folders without starting training."""
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6672,7 +6947,7 @@ def edit_sparse_points(project_id: str, payload: SparseEditRequest | None = Body
     if payload is None or not payload.remove_point_ids:
         raise HTTPException(status_code=400, detail="No point ids provided")
 
-    project_dir = DATA_DIR / project_id
+    project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
     if not project_dir.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6711,7 +6986,7 @@ def edit_sparse_points(project_id: str, payload: SparseEditRequest | None = Body
 def download_splats(project_id: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download splats file (.splat format optimized for web rendering)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
@@ -6762,7 +7037,7 @@ def download_splats(project_id: str, engine: str | None = Query(None), run_id: s
 def download_snapshot(project_id: str, filename: str, engine: str | None = Query(None), run_id: str | None = Query(None)):
     """Download a specific intermediate splat snapshot exported during training."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         snapshots_dir, resolved_engine, sanitized_engine, inferred_engine = _find_existing_path(
@@ -6816,7 +7091,7 @@ def download_sparse_json(project_id: str):
     The returned shape is {"points": [{"x":..,"y":..,"z":..,"r":..,"g":..,"b":..}, ...]}.
     """
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -6903,7 +7178,7 @@ def download_sparse_json(project_id: str):
 def get_metadata(project_id: str, engine: str | None = Query(None)):
     """Get metadata.json for a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
@@ -6929,22 +7204,28 @@ def get_metadata(project_id: str, engine: str | None = Query(None)):
 def list_images(project_id: str):
     """List all images in a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id)
         
-        if not project_dir.exists():
+        if not project_dir or not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
         images_dir = project_dir / "images"
         image_list = []
         
-        if images_dir.exists():
-            for img_path in sorted(images_dir.glob("*")):
-                if img_path.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS:
-                    image_list.append({
-                        "name": img_path.name,
-                        "size": img_path.stat().st_size,
-                        "url": f"/projects/{project_id}/image/{img_path.name}"
-                    })
+        # Resolve effective images directory (handles Windows junctions for pipeline projects)
+        effective_images_dir = _resolve_effective_images_dir(project_dir, images_dir)
+        
+        if effective_images_dir and effective_images_dir.exists():
+            try:
+                for img_path in sorted(effective_images_dir.iterdir()):
+                    if img_path.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS and img_path.is_file():
+                        image_list.append({
+                            "name": img_path.name,
+                            "size": img_path.stat().st_size,
+                            "url": f"/projects/{project_id}/image/{img_path.name}"
+                        })
+            except Exception as e:
+                logger.warning(f"Failed to iterate images dir {effective_images_dir}: {e}")
         
         return {"project_id": project_id, "images": image_list}
     
@@ -6959,19 +7240,23 @@ def list_images(project_id: str):
 def get_image(project_id: str, filename: str):
     """Get a specific image from a project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id)
         
-        if not project_dir.exists():
+        if not project_dir or not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
-        image_path = project_dir / "images" / filename
+        images_dir = project_dir / "images"
+        image_path = images_dir / filename
         
         if not image_path.exists():
-            raise HTTPException(status_code=404, detail="Image not found")
-        
-        # Verify file is actually in the images directory
-        if not str(image_path).startswith(str(project_dir / "images")):
-            raise HTTPException(status_code=403, detail="Access denied")
+            # For pipeline projects, try source_dir from config.json
+            effective_dir = _resolve_effective_images_dir(project_dir, images_dir)
+            if effective_dir and effective_dir != images_dir:
+                image_path = effective_dir / filename
+                if not image_path.exists():
+                    raise HTTPException(status_code=404, detail="Image not found")
+            else:
+                raise HTTPException(status_code=404, detail="Image not found")
         
         return FileResponse(path=image_path)
     
@@ -6986,15 +7271,25 @@ def get_image(project_id: str, filename: str):
 def get_thumbnail(project_id: str, filename: str):
     """Get a thumbnail for a specific image."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id)
         
-        if not project_dir.exists():
+        if not project_dir or not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
         
-        thumbnail_path = project_dir / "images" / "thumbnails" / filename
+        images_dir = project_dir / "images"
+        thumbnail_path = images_dir / "thumbnails" / filename
         
-        # If thumbnail doesn't exist, return 404 (no fallback to full image)
+        # Pipeline projects often use existing/copied images without generated thumbnails.
+        # Fall back to the full image so the Images tab can still render thumbnails.
         if not thumbnail_path.exists():
+            image_path = images_dir / filename
+            if not image_path.exists():
+                # Try source_dir for pipeline projects
+                effective_dir = _resolve_effective_images_dir(project_dir, images_dir)
+                if effective_dir and effective_dir != images_dir:
+                    image_path = effective_dir / filename
+            if image_path.exists() and image_path.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS:
+                return FileResponse(path=image_path)
             raise HTTPException(status_code=404, detail="Thumbnail not found")
         
         # Verify file is actually in the thumbnails directory
@@ -7102,7 +7397,7 @@ def delete_project(project_id: str):
 def update_project(project_id: str, payload: UpdateProjectRequest = Body(...)):
     """Update project metadata (currently only name)."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 
@@ -7129,7 +7424,7 @@ def update_project(project_id: str, payload: UpdateProjectRequest = Body(...)):
 def get_metrics(project_id: str):
     """Get evaluation metrics for a completed project."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
@@ -7171,7 +7466,7 @@ def get_experiment_summary(
 ):
     """Return an engine-aware summary payload for comparing two runs."""
     try:
-        project_dir = DATA_DIR / project_id
+        project_dir = _find_project_dir(project_id) or (DATA_DIR / project_id)
         if not project_dir.exists():
             raise HTTPException(status_code=404, detail="Project not found")
 

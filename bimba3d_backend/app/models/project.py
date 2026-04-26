@@ -16,10 +16,12 @@ class ProjectListItem(BaseModel):
     created_at: Optional[str] = None
     modified_at: Optional[str] = None
     has_outputs: bool = False
+    has_colmap: bool = False
     session_count: int = 0
     created_by: Optional[str] = None
     pipeline_id: Optional[str] = None
     pipeline_name: Optional[str] = None
+    dataset_path: Optional[str] = None
 
 
 class CreateProjectRequest(BaseModel):
@@ -74,6 +76,10 @@ class StatusResponse(BaseModel):
     batch_total: Optional[int] = None
     batch_completed: Optional[int] = None
     batch_current_index: Optional[int] = None
+    # Pipeline project info
+    pipeline_id: Optional[str] = None
+    pipeline_name: Optional[str] = None
+    source_dir: Optional[str] = None
 
 
 class ProcessParams(BaseModel):

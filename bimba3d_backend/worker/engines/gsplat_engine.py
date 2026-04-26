@@ -163,6 +163,10 @@ def run_training(
     (engine_output_dir / "snapshots").mkdir(parents=True, exist_ok=True)
 
     p = dict(params or {})
+    save_eval_images = bool(p.get("save_eval_images", True))
+    replace_eval_images = bool(p.get("replace_eval_images", False))
+    save_checkpoints = bool(p.get("save_checkpoints", True))
+    replace_checkpoints = bool(p.get("replace_checkpoints", False))
     session_execution_mode = str(p.get("session_execution_mode") or "train").strip().lower()
     is_session_test_mode = session_execution_mode == "test"
 
@@ -1481,12 +1485,54 @@ def run_training(
     snapshots_dir = engine_output_dir / "snapshots"
     snapshots_dir.mkdir(parents=True, exist_ok=True)
 
+    def _prune_for_replace_policy(step: int | None = None) -> None:
+        """Apply pipeline storage policy after trainer writes artifacts.
+
+        The upstream trainer writes checkpoints/renders at configured intervals.  These
+        flags are pipeline-level storage policy controls, so prune after writes instead
+        of disabling trainer internals.
+        """
+        try:
+            if not save_checkpoints or replace_checkpoints:
+                ckpt_dir_policy = engine_output_dir / "ckpts"
+                ckpts_policy = sorted(ckpt_dir_policy.glob("ckpt_*.pt"), key=lambda pth: pth.stat().st_mtime)
+                keep = ckpts_policy[-1] if (save_checkpoints and replace_checkpoints and ckpts_policy) else None
+                for ckpt_path in ckpts_policy:
+                    if keep is not None and ckpt_path == keep:
+                        continue
+                    ckpt_path.unlink(missing_ok=True)
+
+            if not save_eval_images or replace_eval_images:
+                for folder_name, pattern in (("renders", "*.png"), ("previews", "preview_*.png")):
+                    folder = engine_output_dir / folder_name
+                    if not folder.exists():
+                        continue
+                    files_policy = sorted(folder.glob(pattern), key=lambda pth: pth.stat().st_mtime)
+                    keep_set: set[Path] = set()
+                    if save_eval_images and replace_eval_images and files_policy:
+                        latest_step = None
+                        if step is not None:
+                            latest_step = max(0, int(step) - 1)
+                        for file_path in files_policy:
+                            if latest_step is not None and f"val_step{latest_step}" in file_path.name:
+                                keep_set.add(file_path)
+                        if not keep_set:
+                            keep_set.add(files_policy[-1])
+                    for file_path in files_policy:
+                        if file_path in keep_set:
+                            continue
+                        file_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Failed applying gsplat storage replace policy: %s", exc)
+
     def eval_callback(step: int) -> None:
         materialize_eval_previews(engine_output_dir, eval_step=step)
+        _prune_for_replace_policy(step)
         _evaluate_early_stop_on_eval(int(step), int(max_steps))
         _write_live_analytics("processing", step=int(step), force=True)
 
     def checkpoint_callback(step: int, checkpoint_path: str) -> None:
+        _prune_for_replace_policy(step)
         if step >= best_splat_start_step and (step % best_splat_interval == 0 or step == max_steps):
             try:
                 loss_by_step = tuning_state.get("loss_by_step") if isinstance(tuning_state.get("loss_by_step"), dict) else {}
@@ -1595,6 +1641,13 @@ def run_training(
     source_model_checkpoint = str(p.get("source_model_checkpoint") or "").strip()
     if start_model_mode == "reuse" and source_model_checkpoint:
         try:
+            _ckpt_path = Path(source_model_checkpoint)
+            if not _ckpt_path.is_file():
+                raise ValueError(
+                    f"source_model_checkpoint is not a valid file: '{source_model_checkpoint}'. "
+                    "It may be a directory, empty string, or unresolved placeholder ('.'). "
+                    "Ensure the model was elevated from a completed gsplat run with a real checkpoint."
+                )
             ckpt = torch.load(source_model_checkpoint, map_location=runner.device)
             splats_state = ckpt.get("splats") if isinstance(ckpt, dict) else None
             if not isinstance(splats_state, dict):
@@ -1815,6 +1868,7 @@ def run_training(
         logger.info("Exported %d interval snapshot(s) to %s", exported_snapshots, snapshots_dir)
 
     materialize_eval_previews(engine_output_dir)
+    _prune_for_replace_policy(max_steps)
     eval_history = collect_eval_history(engine_output_dir, p, mode)
     elapsed_by_step = tuning_state.get("elapsed_by_step") if isinstance(tuning_state.get("elapsed_by_step"), dict) else {}
     loss_by_step = tuning_state.get("loss_by_step") if isinstance(tuning_state.get("loss_by_step"), dict) else {}

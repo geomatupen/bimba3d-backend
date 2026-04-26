@@ -18,6 +18,7 @@ import {
   type MouseEvent,
 } from "react";
 import { api } from "../api/client";
+import PipelinesListPage from "./PipelinesListPage";
 
 interface Project {
   project_id: string;
@@ -34,6 +35,11 @@ interface Project {
 }
 
 export default function Dashboard() {
+  const [activeTab, setActiveTab] = useState<"projects" | "pipelines">(() => {
+    // Restore last active tab from sessionStorage
+    const savedTab = sessionStorage.getItem("dashboardActiveTab");
+    return (savedTab === "pipelines" ? "pipelines" : "projects") as "projects" | "pipelines";
+  });
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -73,6 +79,11 @@ export default function Dashboard() {
     const timer = setInterval(loadProjects, 5000);
     return () => clearInterval(timer);
   }, [loadProjects]);
+
+  // Save active tab to sessionStorage whenever it changes
+  useEffect(() => {
+    sessionStorage.setItem("dashboardActiveTab", activeTab);
+  }, [activeTab]);
 
   const stats = useMemo(() => {
     const total = projects.length;
@@ -279,8 +290,42 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 lg:px-8 py-6 space-y-6">
+        {/* Tabs */}
+        <div className="-mt-12 mb-6 relative z-10">
+          <div className="inline-flex rounded-xl bg-white shadow-lg border border-slate-200 p-1">
+            <button
+              onClick={() => setActiveTab("projects")}
+              className={`px-6 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
+                activeTab === "projects"
+                  ? "bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-md"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <FolderOpen className="w-4 h-4" />
+                Projects
+              </div>
+            </button>
+            <button
+              onClick={() => setActiveTab("pipelines")}
+              className={`px-6 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
+                activeTab === "pipelines"
+                  ? "bg-gradient-to-r from-purple-600 to-purple-700 text-white shadow-md"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                Pipelines
+              </div>
+            </button>
+          </div>
+        </div>
+
         {/* Stats Cards */}
-        <div className="-mt-12 relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="-mt-6 relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="group bg-white rounded-2xl shadow-lg hover:shadow-xl transition-all duration-300 border border-slate-200/50 overflow-hidden">
             <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-blue-600/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
             <div className="relative p-4">
@@ -334,7 +379,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {loading ? (
+        {/* Render active tab content */}
+        {activeTab === "pipelines" ? (
+          <PipelinesListPage />
+        ) : (
+          <>
+            {loading ? (
           <div className="space-y-4">
             {[1, 2, 3].map((i) => (
               <div key={i} className="rounded-2xl border border-slate-200 bg-white p-6 animate-pulse flex items-center gap-6 shadow-sm">
@@ -511,6 +561,8 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
 

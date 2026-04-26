@@ -122,7 +122,14 @@ def run_full_pipeline(project_id: str, params: dict | None = None):
     if not use_docker:
         try:
             from bimba3d_backend.app.services import storage as _storage
-            _project_dir = _storage.get_project_dir(project_id)
+            from pathlib import Path
+            # Check if pipeline specified a custom project directory
+            _project_dir_override = params.get("project_dir_override")
+            if _project_dir_override:
+                _project_dir = Path(_project_dir_override)
+                logger.info(f"Using user-specified project directory: {_project_dir}")
+            else:
+                _project_dir = _storage.get_project_dir(project_id)
             _log_file = _project_dir / "processing.log"
             _log_file.parent.mkdir(parents=True, exist_ok=True)
             if _attach_file_handler_once(_log_file):

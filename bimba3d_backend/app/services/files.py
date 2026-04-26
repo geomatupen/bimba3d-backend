@@ -1,10 +1,29 @@
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from bimba3d_backend.app.config import DATA_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _find_project_dir(project_id: str) -> Optional[Path]:
+    """Find project directory using the API layer's canonical resolver.
+
+    The resolver knows about normal projects and registered pipeline folders.  This
+    avoids the `/files` endpoint finding a pipeline project while this service then
+    looks only under DATA_DIR and returns an empty image list.
+    """
+    try:
+        from bimba3d_backend.app.api.projects import _find_project_dir as resolve_project_dir
+
+        return resolve_project_dir(project_id)
+    except Exception as exc:
+        logger.warning("Canonical project lookup failed for %s: %s", project_id, exc)
+
+    project_dir = DATA_DIR / project_id
+    return project_dir if project_dir.exists() else None
 
 ENGINE_SUBDIR = "engines"
 
@@ -146,29 +165,82 @@ def get_output_files(project_id: str, run_id: str | None = None) -> dict:
     """
     Get list of output files for a project.
     """
-    project_dir = DATA_DIR / project_id
-    output_dir = project_dir / "outputs"
-    if run_id:
-        output_dir = project_dir / "runs" / run_id / "outputs"
-    
-    if not output_dir.exists():
+    project_dir = _find_project_dir(project_id)
+    if not project_dir:
         return {}
     
     files = {}
 
-    # Check for images
+    # Check for images - handle both regular directories and Windows junctions (pipeline projects)
     images_dir = project_dir / "images"
+    effective_images_dir = images_dir
+
+    # For pipeline projects, the images dir may be a Windows junction that glob() can't traverse.
+    # Fall back to source_dir from config.json if images_dir is empty.
     if images_dir.exists():
         images = []
-        for img in sorted(images_dir.glob("*")):
-            if img.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"} and img.is_file():
-                images.append({
-                    "name": img.name,
-                    "path": str(img),
-                    "size": img.stat().st_size,
-                })
+        try:
+            for img in sorted(images_dir.iterdir()):
+                if img.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"} and img.is_file():
+                    images.append({
+                        "name": img.name,
+                        "path": str(img),
+                        "size": img.stat().st_size,
+                    })
+        except Exception as exc:
+            logger.debug("Failed to iterate images_dir %s: %s", images_dir, exc)
+
+        # If no images found via junction, try source_dir from config.json
+        if not images:
+            config_file = project_dir / "config.json"
+            if config_file.exists():
+                try:
+                    import json
+                    with open(config_file, "r") as f:
+                        config = json.load(f)
+                    source_dir = config.get("source_dir")
+                    if source_dir:
+                        source_path = Path(source_dir)
+                        if source_path.exists() and source_path.is_dir():
+                            effective_images_dir = source_path
+                            for img in sorted(source_path.iterdir()):
+                                if img.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"} and img.is_file():
+                                    images.append({
+                                        "name": img.name,
+                                        "path": str(img),
+                                        "size": img.stat().st_size,
+                                    })
+                except Exception as exc:
+                    logger.debug("Failed to read source_dir from config for %s: %s", project_id, exc)
+
         if images:
             files["images"] = images
+
+    output_dir = project_dir / "outputs"
+    if run_id:
+        output_dir = project_dir / "runs" / run_id / "outputs"
+    elif not (output_dir / ENGINE_SUBDIR).exists():
+        # Pipeline/manual session artifacts are stored under runs/<run_id>/outputs.
+        # When the caller asks for project-level files, expose the latest run's
+        # artifacts so project tabs behave like an automated project run.
+        runs_root = project_dir / "runs"
+        if runs_root.exists() and runs_root.is_dir():
+            try:
+                run_dirs = sorted(
+                    [p for p in runs_root.iterdir() if p.is_dir()],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                for run_dir in run_dirs:
+                    candidate_outputs = run_dir / "outputs"
+                    if candidate_outputs.exists():
+                        output_dir = candidate_outputs
+                        break
+            except Exception as exc:
+                logger.debug("Failed to locate latest run outputs for %s: %s", project_id, exc)
+    
+    if not output_dir.exists():
+        return files
 
     # Check for COLMAP sparse reconstructions under outputs/sparse/*
     sparse_root = output_dir / "sparse"

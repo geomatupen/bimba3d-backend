@@ -8,7 +8,20 @@ from bimba3d_backend.app.config import DATA_DIR
 
 def get_status_file(project_id: str) -> Path:
     """Get path to project status file."""
-    return DATA_DIR / project_id / "status.json"
+    # First try DATA_DIR (regular projects)
+    data_dir_path = DATA_DIR / project_id / "status.json"
+    if data_dir_path.exists():
+        return data_dir_path
+
+    # For pipeline projects, we need to find them
+    # Import here to avoid circular dependency
+    from bimba3d_backend.app.api.projects import _find_project_dir
+    project_dir = _find_project_dir(project_id)
+    if project_dir:
+        return project_dir / "status.json"
+
+    # Default to DATA_DIR path (will be created if needed)
+    return data_dir_path
 
 
 def initialize_status(project_id: str, name: Optional[str] = None) -> None:

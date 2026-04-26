@@ -21,6 +21,7 @@ INDEX_ALLOWED_KEYS = {
     "paths",
     "artifact_format",
     "provenance_summary",
+    "ai_profile",
 }
 
 
@@ -397,6 +398,64 @@ def summarize_lineage(contributors: list[dict]) -> dict:
     }
 
 
+def find_best_checkpoint_in_pipeline_folder(pipeline_folder: Path) -> Path | None:
+    """Scan all project run directories inside a pipeline folder and return the
+    best (highest-reward or most-recent) gsplat checkpoint .pt file found.
+
+    Search order:
+    1. Runs that have an input_mode_learning_results.json with the highest reward.
+    2. Falls back to the most recently modified checkpoint file across all runs.
+    """
+    best_checkpoint: Path | None = None
+    best_reward: float | None = None
+    best_mtime: float = 0.0
+
+    for project_dir in pipeline_folder.iterdir():
+        if not project_dir.is_dir():
+            continue
+        if project_dir.name in {"shared_models", "training_pipelines"}:
+            continue
+        runs_dir = project_dir / "runs"
+        if not runs_dir.exists():
+            continue
+        for run_dir in runs_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+            ckpt = find_latest_gsplat_checkpoint(run_dir)
+            if ckpt is None or not ckpt.is_file():
+                continue
+            # Try to read reward from learning results
+            results_file = run_dir / "outputs" / "engines" / "gsplat" / "input_mode_learning_results.json"
+            reward: float | None = None
+            if results_file.exists():
+                try:
+                    with open(results_file, "r", encoding="utf-8") as fh:
+                        results = json.load(fh)
+                    reward = results.get("reward")
+                    if isinstance(reward, (int, float)):
+                        reward = float(reward)
+                    else:
+                        reward = None
+                except Exception:
+                    reward = None
+
+            mtime = ckpt.stat().st_mtime
+
+            if best_checkpoint is None:
+                best_checkpoint = ckpt
+                best_reward = reward
+                best_mtime = mtime
+            elif reward is not None and (best_reward is None or reward > best_reward):
+                best_checkpoint = ckpt
+                best_reward = reward
+                best_mtime = mtime
+            elif reward is None and best_reward is None and mtime > best_mtime:
+                best_checkpoint = ckpt
+                best_mtime = mtime
+
+    return best_checkpoint
+
+
 def elevate_learner_model(
     shared_model_dir: Path,
     mode: str,
@@ -405,9 +464,16 @@ def elevate_learner_model(
     pipeline_name: str,
     pipeline_projects: list[dict] = None,
     shared_config: dict = None,
+    source_checkpoint_path: Path | None = None,
 ) -> dict:
     """
     Elevate a shared contextual continuous learner model to global model registry.
+
+    The elevated model bundles:
+    - The AI learner weights (contextual bandit / Q-table JSON) so the selector
+      can immediately predict good parameters for new scenes.
+    - A gsplat checkpoint (.pt) so the model can be used as a warm-start for
+      subsequent training runs (start_model_mode='reuse').
 
     Args:
         shared_model_dir: Path to pipeline's shared_models directory
@@ -417,6 +483,9 @@ def elevate_learner_model(
         pipeline_name: Pipeline name for provenance
         pipeline_projects: List of project configs from pipeline (for lineage tracking)
         shared_config: Shared training configuration used across all pipeline projects
+        source_checkpoint_path: Optional explicit path to a gsplat .pt checkpoint to
+            bundle with the model.  When None the function auto-discovers the best
+            checkpoint from the pipeline folder that contains shared_model_dir.
 
     Returns:
         Model record with model_id and paths
@@ -511,23 +580,31 @@ def elevate_learner_model(
         "project_names": project_names[:10],  # First 10 for display
     }
 
-    # Register in global index with ai_profile for filtering
+    # Register in global index with ai_profile for filtering.
+    # artifact_format="learner_json" signals that this model carries only the
+    # contextual bandit weights — no gsplat checkpoint.  The weights are seeded
+    # into the target project's local model directory at test-run dispatch time
+    # (see projects.py _seed_learner_weights_into_project).
     model_record = {
         "model_id": model_id,
         "model_name": model_name,
-        "engine": "gsplat",  # Compatible with gsplat engine for UI filtering
+        "engine": "gsplat",
         "created_at": created_at,
         "source": {
-            "pipeline_id": pipeline_id,
-            "pipeline_name": pipeline_name,
+            "project_id": None,
+            "project_name": pipeline_name,
+            "run_id": None,
         },
         "paths": {
+            "checkpoint": None,  # No gsplat checkpoint — learner weights only
+            "artifact": target_model_path.as_posix(),  # learner JSON
             "model_dir": model_dir.as_posix(),
-            "learner_model": target_model_path.as_posix(),
+            "configs_dir": None,
+            "lineage": (model_dir / "lineage.json").as_posix(),
         },
         "artifact_format": "learner_json",
         "ai_profile": {
-            "pipeline_kind": "contextual_continuous",
+            "pipeline_kind": "input_mode",
             "ai_input_mode": mode,
             "ai_selector_strategy": "contextual_continuous",
             "context_dim": model_data.get("context_dim"),
@@ -540,6 +617,68 @@ def elevate_learner_model(
     save_models_index(records)
 
     return model_record
+
+
+def seed_learner_weights_into_project(
+    model_record: dict,
+    project_dir: Path,
+) -> Path | None:
+    """Copy the learner JSON from an elevated learner_json model into the target
+    project's local contextual_continuous_selector directory so that
+    select_contextual_continuous() can load it during a test run.
+
+    The selector loads weights from:
+      project_dir/models/contextual_continuous_selector/{mode}.json
+
+    This function is called by the API before dispatching a test run when the
+    selected source model has artifact_format='learner_json'.
+
+    Returns the path to the seeded file, or None if seeding was not possible.
+    """
+    if not isinstance(model_record, dict):
+        return None
+
+    ai_profile = model_record.get("ai_profile") if isinstance(model_record.get("ai_profile"), dict) else {}
+    mode = str(ai_profile.get("ai_input_mode") or "").strip().lower()
+    if not mode:
+        # Fall back to metadata.json inside the model dir
+        model_dir = _model_dir_from_record(str(model_record.get("model_id") or ""), model_record)
+        meta = read_json_if_exists(model_dir / "metadata.json")
+        if isinstance(meta, dict):
+            mode = str(meta.get("ai_input_mode") or "").strip().lower()
+    if not mode:
+        return None
+
+    # Locate the learner JSON — prefer paths.artifact, then scan model_dir
+    paths = model_record.get("paths") if isinstance(model_record.get("paths"), dict) else {}
+    artifact_raw = paths.get("artifact")
+    model_dir = _model_dir_from_record(str(model_record.get("model_id") or ""), model_record)
+
+    learner_src: Path | None = None
+    if isinstance(artifact_raw, str) and artifact_raw.strip():
+        candidate = Path(artifact_raw.strip()).expanduser()
+        if candidate.is_file():
+            learner_src = candidate
+
+    if learner_src is None:
+        # Scan model_dir for learner_{mode}.json
+        candidate = model_dir / f"learner_{mode}.json"
+        if candidate.is_file():
+            learner_src = candidate
+
+    if learner_src is None:
+        return None
+
+    # Destination: project_dir/models/contextual_continuous_selector/{mode}.json
+    dest_dir = project_dir / "models" / "contextual_continuous_selector"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / f"{mode}.json"
+
+    try:
+        shutil.copy2(learner_src, dest_path)
+        return dest_path
+    except Exception:
+        return None
 
 
 def write_lineage(
